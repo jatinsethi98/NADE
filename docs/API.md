@@ -164,9 +164,12 @@ labels are exposed** — the rest (`UNREAD`, `IMPORTANT`, `CHAT`, `YELLOW_STAR`,
 | `STARRED` | Starred | 7 |
 | `SENT` | Sent | 8 |
 
-User labels follow, ordered by name, `name` passed through from Gmail verbatim
-— including the awkward real ones (`[Notion]`, `[Gmail]All Mail`). Labels whose
-name starts with `[Gmail]` are hidden: they are Gmail's own internal views.
+User labels follow, `name` passed through from Gmail verbatim — including the
+awkward real ones (`[Notion]`, `[Gmail]All Mail`) — **ordered by raw byte value
+of the name**, not by locale collation. Byte order is stable across platforms
+and Postgres collations; a locale-aware sort is not, and the iOS list would
+disagree with the server's on some devices. Labels whose name starts with
+`[Gmail]` are hidden: they are Gmail's own internal views, not places.
 
 `unread` and `total` count **threads**, not messages, because that is what the
 list shows. Both are within the synced 30-day window; they are not Gmail's
@@ -396,7 +399,8 @@ Routing is decided server-side: heuristics first (a quoted phrase or a
 
 ### `GET /agents`
 
-Not paginated.
+Not paginated. Ordered **oldest first** by `created_at`, so the list does not
+reshuffle under the user every time an agent runs.
 
 ```json
 ← {"agents": [{
@@ -531,7 +535,7 @@ Paginated, newest first. `agent_id` optional. This is the Settings → Run log.
 
 ```json
 ← {"id": "…", "agent_id": "…", "agent_name": "…", "status": "…",
-   "trigger_kind": "mail", "trigger_ref": "18f2a1b3c4d5e6f7"|null,
+   "trigger_kind": "mail", "trigger_ref": "18f2c4d5e6f70819"|null,   // see below
    "error": null,                                     // string|null, set when status=failed
    "journal": [{"seq": 1, "kind": "…", "payload": {…}, "created_at": "…"}]}
 ```
@@ -539,20 +543,43 @@ Paginated, newest first. `agent_id` optional. This is the Settings → Run log.
 `status` ∈ `queued` `running` `pending_approval` `waiting` `done` `failed`
 `expired` `skipped`.
 
+`trigger_ref` is the **message** id for `trigger_kind: "mail"` — the specific
+message that fired the run, not its thread. The distinction is invisible on a
+one-message thread, where Gmail gives the thread the same id as its first
+message, and very visible on the fourth reply. It is null for `schedule` and
+`manual`.
+
 ### 6.1 Journal entry kinds
 
-`seq` starts at **1** and increases by one with no gaps. The outer `seq` **is**
-the step identifier — `step_started` and `step_done` for the same step carry the
-same `seq`, which is also what `effect_id` is derived from. There is no
-separate `seq` inside the payload.
+**Every entry has its own `seq`.** It starts at **1** and increases by exactly
+one with no gaps — `run_journal`'s primary key is `(run_id, seq)`, so two
+entries cannot share one.
+
+A *step* is therefore identified by the `seq` of the entry that **opened** it,
+and the entries that close it name that seq explicitly:
+
+- an ordinary call is opened by `step_started`;
+- a gated call is opened by **`approval_requested`** — the `step_started` that
+  eventually executes it is a *later* entry that carries the original opening
+  seq forward.
+
+`step_done`, `step_failed` and the executing `step_started` all carry
+`step_seq` in their payload, pointing at that opening entry. Correlating by
+"the nearest preceding open with the same tool name" would be ambiguous the
+moment an agent calls one tool twice, which is ordinary.
+
+`effect_id` is derived from the **opening** seq and from nothing else, so a
+gated step keeps the id minted at `approval_requested` right through approval
+and execution. That is precisely what makes a post-crash re-execution upsert
+instead of duplicating.
 
 | `kind` | `payload` |
 |---|---|
 | `run_started` | `{"trigger_kind": "mail", "trigger_ref": "…"\|null}` |
 | `llm_response` | `{"model": "…", "stop_reason": "tool_use"\|"end_turn"\|"max_tokens", "tokens_in": 1840, "tokens_out": 96, "text": "…"}` |
-| `step_started` | `{"tool": "read_thread", "args": {…}, "args_hash": "sha256:…", "effect_id": "…"}` |
-| `step_done` | `{"tool": "read_thread", "result": {…}, "result_bytes": 1204, "truncated": false}` |
-| `step_failed` | `{"tool": "…", "error": "…"}` |
+| `step_started` | `{"tool": "read_thread", "step_seq": 3, "args": {…}, "args_hash": "sha256:…", "effect_id": "…"}` — `step_seq` equals this entry's own `seq` for an ungated call, or the `approval_requested` seq for a gated one |
+| `step_done` | `{"tool": "read_thread", "step_seq": 3, "result": {…}, "result_bytes": 1204, "truncated": false}` |
+| `step_failed` | `{"tool": "…", "step_seq": 3, "error": "…"}` |
 | `approval_requested` | `{"tool": "write_note", "feed_item_id": "…", "effect_id": "…", "summary": "…"}` |
 | `approval_granted` | `{"feed_item_id": "…"}` |
 | `approval_skipped` | `{"feed_item_id": "…"}` |
@@ -622,6 +649,16 @@ The feed is the home screen. It is the only place NADE asks for anything.
 
 `new_count` is the number of items with `status: "new"` — approvals *and*
 unseen info items. It is the badge.
+
+`approval_expires_at` is non-null on **every** `kind: "approval"` item
+regardless of status, and null on every `info` item. Keeping it after
+resolution is deliberate: it is what lets an expired card say *when* it
+expired.
+
+`resolved_note` is the italic line under a card that is finished with. It is
+set for `resolved`, `skipped` **and** `expired`, and null for `new` and for
+`info`. Skipped and expired need it most — without it those cards render an
+outcome with no explanation.
 
 ### 7.1 `data`, typed by action
 
@@ -771,7 +808,9 @@ Unauthenticated.
 ← {"status": "ok", "db": "ok", "version": "0.1.0"}
 ```
 
-`503` with `"db": "down"` when the pool cannot round-trip `select 1`.
+`503` with `{"status": "degraded", "db": "down"}` when the pool cannot
+round-trip `select 1`. `status` describes the service, `db` the dependency, so
+they do not carry the same word.
 
 ---
 
@@ -791,11 +830,20 @@ where clients crash.
 | `search.json`, `search_empty.json` | `GET /search` |
 | `notes.json`, `notes_empty.json`, `note.json` | notes |
 | `drafts.json`, `drafts_empty.json`, `draft.json` | drafts |
-| `agents.json`, `agents_empty.json`, `agent.json`, `agent_compile_failed.json` | agents |
-| `runs.json`, `run.json`, `run_done.json`, `run_failed.json` | runs and journals |
-| `feed.json`, `feed_empty.json`, `feed_item.json`, `feed_item_info.json` | feed |
+| `agents.json`, `agents_empty.json` | `GET /agents` list rows (no `allowed_tools`) |
+| `agent.json`, `agent_scheduled.json`, `agent_draft.json`, `agent_compile_failed.json` | the full agent object: mail-triggered, scheduled, draft-with-`draft_reply`, and a failed compile |
+| `runs.json`, `runs_empty.json` | `GET /runs` |
+| `run.json`, `run_done.json`, `run_failed.json` | journals: gated-and-pending, gated-approved-and-executed, failed |
+| `feed.json`, `feed_empty.json`, `feed_item.json`, `feed_item_info.json`, `feed_item_editable.json` | feed — the last one is the `["approve","edit","skip"]` branch |
 | `approve.json`, `skip.json`, `seen.json` | feed actions |
 | `settings.json` | settings |
+| `ask_request.json`, `ask_request_route_hint.json` | `POST /ask` request bodies — the only place `route_hint` can be pinned |
 | `ask_answer.sse`, `ask_results.sse`, `ask_agent_draft.sse`, `ask_error.sse` | all four ask streams |
-| `error_*.json` | one per error code in §0 |
+| `error_*.json` | one per error code in §0 (13 files) |
 | `healthz.json`, `healthz_db_down.json` | health |
+
+Endpoints with no JSON body have no fixture and need none:
+`GET /auth/gmail/start` (302), `POST /devices` (204), `POST /webhooks/gmail`
+(204), and the attachment proxy (raw bytes). There is deliberately no
+`GET /drafts/{id}`: the list carries the whole draft, and `PATCH` returns it —
+a third way to read one would be a third thing to keep consistent.
