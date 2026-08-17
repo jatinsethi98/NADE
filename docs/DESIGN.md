@@ -326,10 +326,12 @@ The state is the SSE `route` event (API.md §4).
     border, radius 4, padding `12 / 13`, kicker 11 pt uppercase accent
     `0.08em`, 3 pt `neutral-300` track with an accent fill, 12 pt tabular
     `ink60` footings) has no field behind it in any endpoint.
-  - `v1 →` **"Make this an agent" is hidden**, leaving only "Clear" (ghost).
-    `POST /ask` classifies server-side and there is no way to force the
-    `agent_draft` route, so the button would have nothing to call. Path back:
-    a `route_hint` parameter on `/ask`.
+  - **"Make this an agent" ships**, beside "Clear" (ghost). It re-posts the
+    same `query` to `POST /ask` with `route_hint: "agent_draft"`, which forces
+    the route instead of letting the server classify, and the screen moves to
+    the `agent_draft` state. (`route_hint` was added to `API.md` §4 for exactly
+    this button — the spec briefly cut it as unimplementable, which it was
+    until the contract gained the field.)
 - **`agent_draft`** — query bubble (max-width 80%), lead line "Here's what I'd
   build. Tap anything underlined to change it." 14 pt line-height 1.65,
   margin-bottom 16, then the **draft card**: 1 pt **accent** border, radius 4,
@@ -372,17 +374,24 @@ Everything below the nav bar is one scroll view — **including the footer
 buttons**, which are not pinned.
 
 1. Sentence block `20 / 22 / 18`, bottom divider: `name` Cormorant 600 22 pt,
-   margin-bottom 14; `nl_definition` 16 pt line-height **2**; hint italic 12 pt
-   `ink60` top 14.
-   `v1 →` **the sentence renders as plain text with no underlined spans, and
-   the hint reads "Tap the sentence to edit it, or open a section below."**
-   The mockup underlines two editable spans (1 pt accent, padding-bottom 2) and
-   trails a muted `ink60` clause, but the agent object carries only
-   `nl_definition` — `when_span`/`do_span` exist solely on the `/ask` draft
-   event, so a saved agent has no span offsets to underline. Editing opens one
-   multiline editor over the whole sentence → `PATCH /agents/{id}
-   {nl_definition}`, which recompiles `spec`. Path back: add the spans to the
-   agent object.
+   margin-bottom 14; the sentence 16 pt line-height **2**; hint italic 12 pt
+   `ink60` top 14: "Tap any underline to edit, or open a section below."
+
+   The sentence is **composed, not parsed**:
+   `When {when_span}, {do_span}.` followed by `{trailing}` in `ink60` when
+   non-null. Both spans are underlined 1 pt accent with padding-bottom 2, and
+   each is independently tappable. All three fields come from
+   `GET /agents/{id}` (`API.md` §5) and are the same ones the `/ask` draft
+   event carries, so a sentence looks and behaves identically whether you
+   arrived from a fresh draft or a saved agent.
+
+   Tapping a span opens a single-line editor over that span alone; editing
+   either one sends the recomposed sentence as
+   `PATCH /agents/{id} {nl_definition}`, which recompiles `spec` and returns
+   fresh spans. **Fallback:** when `spec` is null — a compile failure — all
+   three fields are null, so render `nl_definition` as plain unstyled text with
+   the compile error beneath it, and let a tap edit the whole sentence. That is
+   the only state in which the underlines are absent.
 2. Four disclosure sections, each padding `15 / 22 / 14` + bottom divider, the
    whole header row tappable. Header: eyebrow 10 pt uppercase accent `0.1em` +
    right summary 12 pt `ink55`. Expanded-content top margin is **per section**:
@@ -772,9 +781,12 @@ Every string the UI shows must be true of what v1 does (PLAN C1/C2). v1 takes
   "Forward", "Reply-all" or "Archive".
 - No affordance that does nothing. This is why 1f's Archive and "⋯", 1i's
   segmented control and formatting bar, 1j's ‹ › and "Add event", 1c's
-  "＋ Add a schedule as well" and "＋ Attach", 1a's "Make this an agent", and
-  the mockup's "＋ New" / "＋ Add mailbox" / "Swipe actions" rows are all cut
-  rather than disabled.
+  "＋ Add a schedule as well" and "＋ Attach", and the mockup's "＋ New" /
+  "＋ Add mailbox" / "Swipe actions" rows are all cut rather than disabled.
+  The rule cuts an affordance whose *backing* is missing — it is not a licence
+  to cut one that is merely inconvenient. "Make this an agent" was cut under
+  this rule and has since been restored, because the contract gained the field
+  it needed rather than the button being wished away.
 - No sentence describing behaviour v1 does not implement — 2b's "Tips fade out
   after the first week", 1c's "Nothing leaves your account without your tap",
   1k's "mail stays on device between runs".
@@ -811,9 +823,9 @@ an addition the mockup does not contain; the rest are substitutions.
 | 7 | 1a | idle state not built | turn 2 replaces 1a |
 | 8 | 1a | **+** `answer` route rendering | the contract has three routes, the mockup drew two |
 | 9 | 1a | progress card cut | no field behind it |
-| 10 | 1a | "Make this an agent" hidden | no way to force the `agent_draft` route |
+| ~~10~~ | 1a | ~~"Make this an agent" hidden~~ — **ships**, via `route_hint` | resolved: `API.md` §4 gained the field |
 | 11 | 1b | **+** `paused` status colour `neutral-500` | `ends.after` produces the state |
-| 12 | 1c | sentence not underlined; whole-sentence editing | agent object carries no span offsets |
+| ~~12~~ | 1c | ~~sentence not underlined~~ — **underlined**, via `when_span`/`do_span` | resolved: `API.md` §5 gained the fields |
 | 13 | 1c | filter table loses the **To** row | single account; no recipient filter in `spec` |
 | 14 | 1c | "＋ Add a schedule as well" hidden | one `trigger.kind` per agent |
 | 15 | 1c | attachments hidden | not supported |
