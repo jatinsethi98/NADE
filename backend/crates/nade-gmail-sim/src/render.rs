@@ -5,11 +5,13 @@
 //! * `historyId` and `internalDate` are **strings**; `sizeEstimate`,
 //!   `resultSizeEstimate` and `body.size` are **numbers**. A client that types
 //!   any of them the other way round fails here.
-//! * `resultSizeEstimate` is an *estimate*. The live sample in
-//!   `backend/testdata/live/list.json` returned 500 messages with a
-//!   `nextPageToken` and an estimate of **501**, so that is what the simulator
-//!   produces: returned count, plus one when another page exists. A client that
-//!   treats it as a total is wrong about Gmail and wrong here.
+//! * `resultSizeEstimate` is an *estimate*, and a bad one. Two careful
+//!   measurements of the real API disagree — 500 rows reported as 501, and 85
+//!   rows reported as 201 while pegged at 201 for **every** query tried — so no
+//!   formula reproduces it. By default the simulator saturates, which can never
+//!   equal the number of rows returned; see [`ResultSizeEstimate`]. A client
+//!   that treats it as a total, or compares it between two queries, is wrong
+//!   about Gmail and fails here on its first call.
 //! * An empty listing has **no** `messages` key at all, not `"messages": []`.
 //! * `format=raw` omits `payload`; `format=full` omits `raw`. They never both
 //!   appear.
@@ -184,7 +186,12 @@ pub fn message_reference(message: &StoredMessage) -> Value {
 ///
 /// `total_is_exact` is false whenever the caller knows another page exists.
 #[must_use]
-pub fn list_envelope(key: &str, entries: Vec<Value>, next_page_token: Option<&str>) -> Value {
+pub fn list_envelope(
+    key: &str,
+    entries: Vec<Value>,
+    next_page_token: Option<&str>,
+    estimate: usize,
+) -> Value {
     let mut object = Map::new();
     let count = entries.len();
     // EDGE: an empty result has no `messages` key at all. Gmail omits it, and a
@@ -196,9 +203,55 @@ pub fn list_envelope(key: &str, entries: Vec<Value>, next_page_token: Option<&st
     if let Some(token) = next_page_token {
         object.insert("nextPageToken".to_owned(), json!(token));
     }
-    let estimate = count + usize::from(next_page_token.is_some());
     object.insert("resultSizeEstimate".to_owned(), json!(estimate));
     Value::Object(object)
+}
+
+/// How `resultSizeEstimate` is computed.
+///
+/// Gmail's own behaviour cannot be reproduced by any formula — two careful
+/// measurements of the real API disagree:
+///
+/// * `backend/testdata/live/list.json`: `maxResults=500`, 500 rows returned, a
+///   `nextPageToken`, estimate **501**;
+/// * a live probe scoped to `newer_than:3d`: 85 rows returned, no next page,
+///   estimate **201** — *pegged at 201 for every query tried, including the
+///   empty one*.
+///
+/// So the field is not a count, not a page size, and not even comparable
+/// between two queries against the same mailbox. Both shapes are offered; the
+/// default is the one that makes a client misusing it fail immediately.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResultSizeEstimate {
+    /// **Default.** Saturates at `2 × maxResults + 1` whenever anything
+    /// matched, and `0` when nothing did — reproducing the probe, including its
+    /// insensitivity to the query. Because a page can never hold more than
+    /// `maxResults` rows, this value is *never* the number of rows returned, so
+    /// a client that reads it as a count breaks on its first call rather than on
+    /// its first large mailbox.
+    #[default]
+    Saturating,
+    /// `returned + 1` when another page exists, `returned` otherwise —
+    /// reproducing the `list.json` fixture. Useful for a test that pins that
+    /// fixture's exact shape; misleading everywhere else, because on a complete
+    /// single page it happens to equal the count.
+    PageBased,
+}
+
+impl ResultSizeEstimate {
+    /// Compute the value for one page.
+    #[must_use]
+    pub fn of(self, returned: usize, max_results: usize, has_more: bool) -> usize {
+        // Zero matches is zero in both modes: an observed raw response body for
+        // a query that matched nothing is literally `{"resultSizeEstimate": 0}`.
+        if returned == 0 {
+            return 0;
+        }
+        match self {
+            Self::Saturating => max_results.saturating_mul(2).saturating_add(1),
+            Self::PageBased => returned + usize::from(has_more),
+        }
+    }
 }
 
 /// `users.getProfile`.
@@ -512,25 +565,43 @@ mod tests {
 
     #[test]
     fn an_empty_listing_has_no_messages_key() {
-        let body = list_envelope("messages", Vec::new(), None);
+        let body = list_envelope("messages", Vec::new(), None, 0);
         assert!(body.get("messages").is_none(), "{body}");
         assert_eq!(body["resultSizeEstimate"], 0);
         assert!(body.get("nextPageToken").is_none());
     }
 
     #[test]
-    fn result_size_estimate_matches_the_live_sample() {
-        // backend/testdata/live/list.json: 500 rows, a nextPageToken, and an
-        // estimate of 501. Not a count — an estimate.
+    fn the_two_measurements_of_result_size_estimate_disagree_and_both_are_modelled() {
+        // `backend/testdata/live/list.json`: maxResults=500, 500 rows, a
+        // nextPageToken, estimate 501.
+        assert_eq!(ResultSizeEstimate::PageBased.of(500, 500, true), 501);
+        // A live probe: 85 rows, no next page, estimate 201 — pegged at 201 for
+        // every query tried, including the empty one. maxResults was the
+        // default 100, and 2 x 100 + 1 = 201.
+        assert_eq!(ResultSizeEstimate::Saturating.of(85, 100, false), 201);
+
+        // No formula produces both, which is the finding. The default is the
+        // shape that makes misuse fail: it can never equal the row count,
+        // because a page never holds more than `maxResults` rows.
+        for returned in 1..=100usize {
+            let estimate = ResultSizeEstimate::Saturating.of(returned, 100, false);
+            assert_ne!(estimate, returned, "{returned} rows must not self-report");
+            assert!(estimate > returned);
+        }
+        // Nothing matched is 0 in both modes — an observed raw body for a query
+        // that matched nothing is literally `{"resultSizeEstimate": 0}`.
+        assert_eq!(ResultSizeEstimate::Saturating.of(0, 100, false), 0);
+        assert_eq!(ResultSizeEstimate::PageBased.of(0, 100, false), 0);
+    }
+
+    #[test]
+    fn the_envelope_reports_whatever_estimate_it_is_given() {
         let rows: Vec<Value> = (0..500).map(|n| json!({ "id": n.to_string() })).collect();
-        let body = list_envelope("messages", rows, Some("tok"));
+        let body = list_envelope("messages", rows, Some("tok"), 501);
         assert_eq!(body["resultSizeEstimate"], 501);
         assert_eq!(body["messages"].as_array().unwrap().len(), 500);
-
-        // Last page: no token, and now the estimate happens to be exact.
-        let rows: Vec<Value> = (0..3).map(|n| json!({ "id": n.to_string() })).collect();
-        let body = list_envelope("messages", rows, None);
-        assert_eq!(body["resultSizeEstimate"], 3);
+        assert!(body["resultSizeEstimate"].is_number());
     }
 
     #[test]

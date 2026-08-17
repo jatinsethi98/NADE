@@ -15,17 +15,34 @@
 //! most for LLM-generated queries, where a hallucinated operator looks exactly
 //! like a quiet mailbox.
 //!
-//! Three places where being *stricter* than a permissive parser is the faithful
-//! choice, because Gmail documents only the narrow form and silently treats the
-//! rest as text:
+//! # What is measured, and what is only documented
 //!
-//! * `newer_than:`/`older_than:` take **only** `d`, `m`, `y`. `w`, `h` and a
-//!   bare number are undocumented and are refused.
-//! * A bare date means **midnight Pacific**, not midnight UTC, and only the
-//!   unambiguous `YYYY/MM/DD` order is accepted. Ranges are half-open
-//!   `[after, before)`.
-//! * `OR` and `AND` are **case-sensitive**; a lowercase `or` is the literal
-//!   word, so lowercasing a user's query silently changes its meaning.
+//! Several of these were settled by a live read-only probe against a real
+//! mailbox, scoped to `newer_than:3d` (85 messages) so that counts
+//! discriminate. Where the probe and the documentation disagree, **the probe
+//! wins** — this is a fidelity simulator, and a simulator that rejects what
+//! Gmail accepts teaches the client to avoid perfectly good queries, which is
+//! its own kind of wrong.
+//!
+//! | Behaviour | Status |
+//! |---|---|
+//! | `newer_than:` accepts `h` (`24h` == `1d`) | **measured**; undocumented, and it works |
+//! | `newer_than:` accepts `d`, `m`, `y` | documented **and** measured |
+//! | `newer_than:1w`, `newer_than:30` (no unit) | **measured**: return nothing. Refused here |
+//! | `\|` is an OR alias — `(a \| b)` == `(a OR b)` | **measured**; documented nowhere |
+//! | Operator **names** are case-insensitive (`IS:UNREAD`) | **measured** |
+//! | The boolean keyword `or` is case-**sensitive** | **measured**: lowercase `or` matches the literal word |
+//! | `from: x` (space after the colon) still filters | **measured**: identical to `from:x` |
+//! | `from:` with a genuinely empty argument is a no-op | **measured**: returns the unfiltered baseline |
+//! | An unknown operator matches nothing, never a `400` | **measured** (`zzz:qqq` → 0) |
+//! | `q=label:` is case-insensitive | **measured** |
+//! | A bare date is **midnight Pacific**, not UTC | documented only |
+//! | Ranges are half-open `[after, before)` | documented only, via Google's worked example |
+//! | `m` = 30 days, `y` = 365 days | **unmeasured** — a stated approximation |
+//!
+//! Only `MM/DD/YYYY` is refused despite being documented: `03/04/2004` is
+//! genuinely ambiguous against `YYYY/MM/DD` and Google publishes no
+//! disambiguation rule, so zero results is safer than three wrong months.
 //!
 //! What is *not* modelled, and is safe not to be: stemming, synonyms, `AROUND`,
 //! wildcards, and Gmail's own spam/category classification. Ordering is
@@ -332,12 +349,20 @@ fn tokenise(input: &str) -> Vec<Token> {
             _ => {
                 let (word, next) = read_word(&chars, index);
                 index = next;
-                // EDGE: `OR` and `AND` are **case-sensitive** in Gmail. A
-                // lowercase `or` is searched for as the literal word — so
-                // lowercasing a user's query silently changes what it means, and
-                // a simulator that accepted `or` would hide that. `|` is not
-                // documented as an OR at all and is therefore a plain term here.
-                if word == "OR" {
+                // MEASURED, and two different rules that coexist:
+                //
+                // * the **boolean keyword** `OR` is case-**sensitive** — a
+                //   lowercase `or` is matched as the literal word, so
+                //   lowercasing a user's query silently changes its meaning;
+                // * `|` really is an OR alias. It is documented nowhere, and
+                //   Gmail implements it: `(from:a | from:b)` returns exactly
+                //   what `(from:a OR from:b)` returns. Undocumented is not the
+                //   same as absent, and for a fidelity simulator the observed
+                //   behaviour wins.
+                //
+                // Operator *names* are a third case, handled in `parse_term`:
+                // those are case-insensitive (`IS:UNREAD` == `is:unread`).
+                if word == "OR" || word == "|" {
                     out.push(Token::Or);
                 } else if word == "AND" {
                     // Documented, but implicit already; drop it.
@@ -460,6 +485,29 @@ impl Cursor {
             }
             Some(Token::Word(word)) => {
                 self.at += 1;
+                // MEASURED: `from: chase.com` returns exactly what
+                // `from:chase.com` returns. Gmail skips the whitespace and still
+                // applies the operator, so the tokeniser's split must be undone.
+                if let Some((operator, argument)) = word.split_once(':') {
+                    if argument.is_empty() && !operator.is_empty() {
+                        // …but only a *plain* word is swallowed as the argument.
+                        // `from: is:unread` must leave `is:unread` as its own
+                        // filter rather than searching for a sender literally
+                        // called "is:unread". Unmeasured, and the only reading
+                        // that keeps both halves of the query meaningful.
+                        if let Some(Token::Word(next)) = self.peek().cloned() {
+                            if !next.contains(':') {
+                                self.at += 1;
+                                return Some(Query::Term(parse_term(&format!("{word}{next}"))));
+                            }
+                        }
+                        // MEASURED: `newer_than:3d from:` returns the full
+                        // `newer_than:3d` baseline — an operator with a
+                        // genuinely empty argument is a no-op, not a filter and
+                        // not a search for the word.
+                        return Some(Query::All);
+                    }
+                }
                 Some(Query::Term(parse_term(&word)))
             }
             Some(Token::CloseParen | Token::CloseBrace) => {
@@ -534,20 +582,25 @@ fn fallback(word: &str) -> impl FnOnce(()) -> Term + '_ {
     move |()| Term::Text(word.to_ascii_lowercase())
 }
 
-/// `30d`, `6m`, `1y` — and **nothing else**.
+/// `24h`, `30d`, `6m`, `1y` — and **nothing else**.
 ///
-/// Google documents exactly three units for `newer_than:`/`older_than:`: `d`,
-/// `m`, `y` ([Gmail search operators][ops]). `w` for weeks and a bare number
-/// with no unit are **not** documented anywhere, so they are refused here and
-/// fall back to free text. That is the conservative choice and the one that
-/// helps: if Gmail parses `newer_than:1w` as a search *term* rather than a
-/// duration — which is what an unrecognised operator argument becomes — then a
-/// simulator that helpfully accepted it would hand back a plausible-looking
-/// seven-day window that the real API never produces, and the client would ship
-/// a sync window that silently does not exist.
+/// Google documents three units for `newer_than:`/`older_than:` — `d`, `m`, `y`
+/// ([Gmail search operators][ops]) — but a live probe against a real mailbox
+/// settles the rest, and the docs are incomplete in both directions:
+///
+/// | Unit | Status |
+/// |---|---|
+/// | `d`, `m`, `y` | documented **and** measured |
+/// | `h` | **undocumented, and it works** — `newer_than:24h` returns exactly what `newer_than:1d` returns |
+/// | `w` | measured: returns **nothing**. Not supported |
+/// | bare number, no unit | measured: returns **nothing**. Not supported |
+///
+/// `w` and a bare number therefore fall back to free text and match nothing,
+/// which is what the real API does with them. Accepting them would hand back a
+/// plausible-looking window that Gmail never produces.
 ///
 /// `m` is 30 days and `y` is 365. Whether Gmail means calendar months and years
-/// is undocumented; this is a stated approximation, and it is why NADE's own
+/// is still unmeasured; this is a stated approximation, and it is why NADE's own
 /// sync should compute its window and pass `after:`/`before:` in epoch seconds
 /// rather than lean on `newer_than:` at all.
 ///
@@ -555,6 +608,7 @@ fn fallback(word: &str) -> impl FnOnce(()) -> Term + '_ {
 fn span_ms(value: &str) -> Result<i64, ()> {
     let (digits, unit) = value.split_at(value.len().saturating_sub(1));
     let multiplier = match unit {
+        "h" => 3_600_000,
         "d" => DAY_MS,
         "m" => 30 * DAY_MS,
         "y" => 365 * DAY_MS,
@@ -801,12 +855,16 @@ mod tests {
         assert_eq!(span_ms("6m"), Ok(180 * DAY_MS));
         assert_eq!(span_ms("1y"), Ok(365 * DAY_MS));
 
-        // `w`, `h` and a bare number are documented **nowhere**. Accepting them
-        // would hand back a plausible window the real API never produces.
-        for undocumented in ["2w", "6h", "7", "30D", "30 d", ""] {
+        // MEASURED: `h` is undocumented and works — `24h` == `1d`.
+        assert_eq!(span_ms("24h"), Ok(DAY_MS));
+        assert_eq!(span_ms("1h"), Ok(3_600_000));
+
+        // MEASURED: `w` and a bare number return nothing from the real API.
+        // Accepting them would hand back a window Gmail never produces.
+        for unsupported in ["2w", "7", "30D", "30 d", ""] {
             assert!(
-                span_ms(undocumented).is_err(),
-                "{undocumented:?} is not a documented span"
+                span_ms(unsupported).is_err(),
+                "{unsupported:?} is not a supported span"
             );
         }
         assert!(span_ms("abc").is_err());
@@ -867,8 +925,10 @@ mod tests {
     }
 
     #[test]
-    fn or_is_case_sensitive_and_pipe_is_not_an_or() {
-        // Gmail searches for a lowercase `or` as the literal word, which is why
+    fn the_boolean_or_is_case_sensitive_but_operator_names_are_not() {
+        // MEASURED, and these are two different rules that coexist.
+
+        // The boolean keyword: lowercase `or` is the literal word, which is why
         // lowercasing a user's query silently changes what it means.
         assert_eq!(
             Query::parse("a or b"),
@@ -878,26 +938,51 @@ mod tests {
                 Query::Term(Term::Text("b".to_owned())),
             ])
         );
-        // `|` is not documented as an OR anywhere; it is a plain term.
-        assert!(!hit("from:paypal | from:stripe", &[], 1));
-        // …and `AND` is documented, but redundant.
+
+        // Operator names, by contrast, fold case — `IS:UNREAD` == `is:unread`.
+        assert_eq!(Query::parse("IS:UNREAD"), Query::parse("is:unread"));
+        assert!(hit("IS:UNREAD", &["UNREAD"], 1));
+        assert_eq!(Query::parse("FROM:Stripe"), Query::parse("from:stripe"));
+        assert_eq!(
+            Query::parse("Newer_Than:30d"),
+            Query::parse("newer_than:30d")
+        );
+
+        // MEASURED: `|` really is an OR alias, documented nowhere.
+        assert_eq!(
+            Query::parse("(from:paypal | from:stripe)"),
+            Query::parse("(from:paypal OR from:stripe)")
+        );
+        assert!(hit("from:paypal | from:stripe", &[], 1));
+
+        // `AND` is documented, and redundant.
         assert!(hit("from:stripe AND is:unread", &["UNREAD"], 1));
     }
 
     #[test]
-    fn a_space_after_the_colon_is_free_text_not_a_match_everything() {
-        // EDGE: `from: x`. An operator with an empty argument would
-        // `contains("")` and match every message in the mailbox — a stray space
-        // turning into a silently unfiltered sync.
+    fn a_space_after_the_colon_still_applies_the_operator() {
+        // MEASURED: `from: chase.com` returns exactly what `from:chase.com`
+        // returns — Gmail skips the whitespace and still filters. An earlier
+        // draft made this free text, which was stricter than Gmail and would
+        // have taught a client to avoid a query that works fine.
+        assert_eq!(Query::parse("from: stripe"), Query::parse("from:stripe"));
+        assert!(hit("from: stripe", &[], 1));
+        assert!(!hit("from: paypal", &[], 1), "it really is still a filter");
         assert_eq!(
-            Query::parse("from:"),
-            Query::Term(Term::Text("from:".to_owned()))
+            Query::parse("subject: invoice"),
+            Query::parse("subject:invoice")
         );
-        assert!(
-            !hit("from: stripe", &[], 1),
-            "neither term is in the haystack"
-        );
-        assert!(hit("from:stripe", &[], 1), "no space, real operator");
+    }
+
+    #[test]
+    fn an_operator_with_a_genuinely_empty_argument_is_a_no_op() {
+        // MEASURED: `newer_than:3d from:` returns the full `newer_than:3d`
+        // baseline, so a dangling operator filters nothing at all.
+        assert_eq!(Query::parse("from:"), Query::All);
+        assert!(hit("from:", &[], 900));
+        // …and it must not swallow a following operator as its argument.
+        assert!(hit("from: is:unread", &["UNREAD"], 1));
+        assert!(!hit("from: is:unread", &[], 1));
     }
 
     #[test]

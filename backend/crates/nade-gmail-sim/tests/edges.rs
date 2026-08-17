@@ -127,12 +127,18 @@ fn pagination_on_the_exact_boundary() {
         exact.get("nextPageToken").is_none(),
         "a full page that exhausts the set must not offer another: {exact}"
     );
-    assert_eq!(exact["resultSizeEstimate"], 5);
+    // The estimate is NOT the count. Measured: 85 rows came back reported as
+    // 201, pegged at 201 for every query. A client that sizes a progress bar or
+    // an allocation from this field is wrong.
+    assert_ne!(
+        exact["resultSizeEstimate"].as_u64(),
+        Some(5),
+        "resultSizeEstimate must not be usable as a count"
+    );
 
     // One short: a token, and page two holds exactly the last row.
     let short = get(&sim, "/gmail/v1/users/me/messages?maxResults=4").json_body();
     assert_eq!(short["messages"].as_array().unwrap().len(), 4);
-    assert_eq!(short["resultSizeEstimate"], 5, "estimate = returned + 1");
     let token = short["nextPageToken"].as_str().expect("a token");
 
     let page_two = get(
@@ -142,7 +148,9 @@ fn pagination_on_the_exact_boundary() {
     .json_body();
     assert_eq!(page_two["messages"].as_array().unwrap().len(), 1);
     assert!(page_two.get("nextPageToken").is_none());
-    assert_eq!(page_two["resultSizeEstimate"], 1);
+    // …and it does not shrink to match the last page either, so it cannot even
+    // be used to tell how much is left.
+    assert_ne!(page_two["resultSizeEstimate"].as_u64(), Some(1));
 
     // The two pages together are the same five rows, in the same order, with no
     // row seen twice and none missing.
@@ -1472,11 +1480,18 @@ fn the_simulator_is_send_and_sync_and_reads_never_see_half_a_mutation() {
                     let body = sim
                         .handle(&sim.authorized("/gmail/v1/users/me/messages?maxResults=500"))
                         .json_body();
-                    let count = body["messages"].as_array().map_or(0, Vec::len);
-                    let estimate = body["resultSizeEstimate"].as_u64().unwrap();
+                    let rows = body["messages"].as_array().cloned().unwrap_or_default();
                     // Whatever the writer is doing, one response is internally
-                    // consistent with itself.
-                    assert_eq!(u64::from(u32::try_from(count).unwrap()), estimate);
+                    // consistent with itself: the key is present exactly when
+                    // there are rows, and no message appears twice.
+                    assert_eq!(rows.is_empty(), body.get("messages").is_none());
+                    let mut ids: Vec<&str> =
+                        rows.iter().filter_map(|row| row["id"].as_str()).collect();
+                    assert_eq!(ids.len(), rows.len(), "every row must carry an id");
+                    ids.sort_unstable();
+                    let before = ids.len();
+                    ids.dedup();
+                    assert_eq!(ids.len(), before, "a row appeared twice in one page");
                 }
             })
         })
@@ -1843,4 +1858,121 @@ fn a_malformed_query_is_indistinguishable_from_an_empty_inbox() {
         );
         assert_eq!(body["resultSizeEstimate"], 0);
     }
+}
+
+/// `resultSizeEstimate` saturates and cannot be used to compare two queries.
+///
+/// MEASURED against a real mailbox: scoped to `newer_than:3d` (85 messages), the
+/// field reported **201 for every query tried**, including the empty one and
+/// including queries whose actual result counts were 1, 6, 35 and 59. It is not
+/// a total, not a page size, and not comparable between queries.
+#[test]
+fn result_size_estimate_saturates_and_cannot_compare_two_queries() {
+    let sim = sim();
+    let now = sim.clock().now_ms();
+    for n in 0..40 {
+        sim.insert_message(
+            &MessageSpec::new()
+                .subject(format!("m{n}"))
+                .from(if n < 3 {
+                    "a@one.example"
+                } else {
+                    "b@two.example"
+                })
+                .received_at(ReceivedAt::AtMs(now - i64::from(n) * 3_600_000)),
+        )
+        .unwrap();
+    }
+
+    let estimate = |q: &str| -> u64 {
+        let target = format!(
+            "/gmail/v1/users/me/messages?q={}",
+            nade_gmail_sim::api::encode_component(q)
+        );
+        get(&sim, &target).json_body()["resultSizeEstimate"]
+            .as_u64()
+            .unwrap()
+    };
+    let count = |q: &str| -> usize {
+        let target = format!(
+            "/gmail/v1/users/me/messages?q={}",
+            nade_gmail_sim::api::encode_component(q)
+        );
+        get(&sim, &target).json_body()["messages"]
+            .as_array()
+            .map_or(0, Vec::len)
+    };
+
+    // Three queries with genuinely different result counts…
+    assert_eq!(count(""), 40);
+    assert_eq!(count("from:one.example"), 3);
+    assert_eq!(count("from:two.example"), 37);
+
+    // …all report the same estimate. Comparing them tells you nothing.
+    assert_eq!(estimate(""), estimate("from:one.example"));
+    assert_eq!(estimate(""), estimate("from:two.example"));
+    assert_ne!(
+        estimate("from:one.example") as usize,
+        count("from:one.example")
+    );
+
+    // Only a query that matches nothing reports 0 — the one case where the
+    // field carries information.
+    assert_eq!(estimate("from:nobody.example"), 0);
+    assert_eq!(count("from:nobody.example"), 0);
+
+    // A test that needs the `list.json` fixture's shape can ask for it.
+    let paged = Simulator::with_config(Config {
+        result_size_estimate: nade_gmail_sim::render::ResultSizeEstimate::PageBased,
+        ..Config::default()
+    });
+    seed(&paged, 5);
+    let body = paged
+        .handle(&paged.authorized("/gmail/v1/users/me/messages?maxResults=4"))
+        .json_body();
+    assert_eq!(
+        body["resultSizeEstimate"], 5,
+        "returned + 1 when more exist"
+    );
+}
+
+/// A single page caps at 500 ids, so any count comparison must stay under it or
+/// it silently compares two ceilings.
+#[test]
+fn a_single_page_caps_at_five_hundred_ids() {
+    let sim = sim();
+    let now = sim.clock().now_ms();
+    for n in 0..520 {
+        sim.insert_message(
+            &MessageSpec::new()
+                .subject(format!("m{n}"))
+                .received_at(ReceivedAt::AtMs(now - i64::from(n) * 60_000)),
+        )
+        .unwrap();
+    }
+
+    let body = get(&sim, "/gmail/v1/users/me/messages?maxResults=1000").json_body();
+    assert_eq!(
+        body["messages"].as_array().unwrap().len(),
+        500,
+        "asking for more than 500 still yields 500"
+    );
+    assert!(
+        body["nextPageToken"].is_string(),
+        "the other 20 are behind a token, not lost"
+    );
+
+    // Two different mailbox sizes both hit the ceiling, so counting one page is
+    // not a way to compare them.
+    let smaller = Simulator::new();
+    let now = smaller.clock().now_ms();
+    for n in 0..505 {
+        smaller
+            .insert_message(
+                &MessageSpec::new().received_at(ReceivedAt::AtMs(now - i64::from(n) * 60_000)),
+            )
+            .unwrap();
+    }
+    let other = get(&smaller, "/gmail/v1/users/me/messages?maxResults=500").json_body();
+    assert_eq!(other["messages"].as_array().unwrap().len(), 500);
 }

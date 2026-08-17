@@ -23,7 +23,7 @@ use crate::{
     mailbox::Mailbox,
     message::MessageSpec,
     query::Query,
-    render::{self, fingerprint, Format, HistoryCursor, PageCursor},
+    render::{self, fingerprint, Format, HistoryCursor, PageCursor, ResultSizeEstimate},
 };
 
 /// How the simulator treats the `Authorization` header.
@@ -47,6 +47,9 @@ pub struct Config {
     pub auth: AuthMode,
     /// The order batch sub-responses come back in.
     pub batch_order: BatchOrder,
+    /// How `resultSizeEstimate` is computed. Defaults to the saturating shape,
+    /// which is never equal to the number of rows returned.
+    pub result_size_estimate: ResultSizeEstimate,
     /// How long a `users.watch` registration lasts. Gmail's is seven days.
     pub watch_ttl_ms: i64,
 }
@@ -57,6 +60,7 @@ impl Default for Config {
             email_address: "me@example.com".to_owned(),
             auth: AuthMode::Enforced,
             batch_order: BatchOrder::default(),
+            result_size_estimate: ResultSizeEstimate::default(),
             watch_ttl_ms: 7 * crate::clock::DAY_MS,
         }
     }
@@ -617,9 +621,13 @@ impl Simulator {
             .iter()
             .map(|message| render::message_reference(message))
             .collect();
+        let estimate =
+            self.config
+                .result_size_estimate
+                .of(entries.len(), max_results, next.is_some());
         SimResponse::json(
             200,
-            &render::list_envelope("messages", entries, next.as_deref()),
+            &render::list_envelope("messages", entries, next.as_deref(), estimate),
         )
     }
 
@@ -753,9 +761,13 @@ impl Simulator {
                 render::thread_reference(thread_id, &messages)
             })
             .collect();
+        let estimate =
+            self.config
+                .result_size_estimate
+                .of(entries.len(), max_results, next.is_some());
         SimResponse::json(
             200,
-            &render::list_envelope("threads", entries, next.as_deref()),
+            &render::list_envelope("threads", entries, next.as_deref(), estimate),
         )
     }
 

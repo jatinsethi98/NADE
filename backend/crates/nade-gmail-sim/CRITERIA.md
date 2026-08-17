@@ -7,7 +7,7 @@ are marked ✎ and explained in §7.
 Every edge case below is either a named test or an `// EDGE:` comment beside the
 code. Tests are preferred; the table records which.
 
-**Status: 262 tests, all passing.** 177 unit, 60 `tests/edges.rs`, 7
+**Status: 266 tests, all passing.** 179 unit, 62 `tests/edges.rs`, 7
 `tests/determinism.rs`, 7 `tests/hygiene.rs`, 6 `tests/sync_story.rs`, 5 doc.
 
 ---
@@ -76,7 +76,7 @@ is the second.
 | A1 | Crate and all targets build clean | `cargo build -p nade-gmail-sim --all-targets` | ✅ |
 | A2 | No clippy warnings anywhere, including tests | `cargo clippy -p nade-gmail-sim --all-targets -- -D warnings` | ✅ |
 | A3 | Formatted | `cargo fmt --check` | ✅ |
-| A4 | All unit, integration and doc tests green | `cargo test -p nade-gmail-sim` | ✅ 262 |
+| A4 | All unit, integration and doc tests green | `cargo test -p nade-gmail-sim` | ✅ 266 |
 | A5 | Rustdoc builds with no warnings | `cargo doc -p nade-gmail-sim --no-deps` | ✅ |
 | A6 | The above pass **twice consecutively** | run the block twice | ✅ |
 | A7 | One implementation, two transports | `determinism::http_and_in_process_agree_byte_for_byte` | ✅ |
@@ -108,8 +108,8 @@ is the second.
 
 ## 4. Query (`q`) support
 
-Implicit AND between terms; `OR` and `{a b}`; `-` negation; parentheses; quoted
-phrases.
+Implicit AND between terms; `OR`, `|` and `{a b}`; `-` negation; parentheses;
+quoted phrases.
 
 Operators: `newer_than:`/`older_than:`, `after:`/`before:`/`newer:`/`older:`,
 `label:`, `in:`, `category:`, `from:`, `to:`, `cc:`, `bcc:`, `subject:`,
@@ -117,31 +117,65 @@ Operators: `newer_than:`/`older_than:`, `after:`/`before:`/`newer:`/`older:`,
 `filename:`, `larger:`/`smaller:`, `list:`, `rfc822msgid:`, and bare words
 matched against subject + sender + recipients + decoded body.
 
-**Deliberately strict**, in the four places where Google documents only a narrow
-form and silently treats everything else as search text. Being permissive here
-would hand back a plausible result set the real API never produces — the exact
-failure the brief warns about:
+### What is measured, and what is only documented
 
-| Rule | Why |
+A live read-only probe against the real account, scoped to `newer_than:3d`
+(baseline **85** ids) so counts discriminate, settled most of this. **Where the
+probe and the documentation disagree, the probe wins.** Four items below were
+corrected *away* from a conservative reading that had made the simulator
+stricter than Gmail — and a simulator that rejects what Gmail accepts teaches
+the client to avoid perfectly good queries, which is its own kind of wrong.
+
+| Behaviour | Status |
 |---|---|
-| `newer_than:`/`older_than:` accept **only** `d`, `m`, `y` | Google documents exactly those three. `w`, `h` and a bare number are undocumented, so they degrade to free text and match nothing — loud, rather than a plausible fake window |
-| A bare date is **midnight Pacific**, not UTC | The API's own filtering guide: *"All dates … are interpreted as midnight on that date in the PST timezone."* Modelling UTC would put every bound 8 h out |
-| Only `YYYY/MM/DD` is accepted, never `MM/DD/YYYY` | Both are documented, so `03/04/2004` is genuinely ambiguous and Google publishes no rule. Refusing gives zero results instead of three wrong months |
-| `OR`/`AND` are **case-sensitive** | A lowercase `or` is the literal word in Gmail, so lowercasing a query silently changes its meaning. `\|` is not a documented OR and is a plain term |
+| `newer_than:` accepts `h` — `24h` → 35, `1d` → 35 | ✎ **measured**; undocumented, and it works |
+| `newer_than:` accepts `d`, `m`, `y` | documented **and** measured |
+| `newer_than:1w` → 0, `newer_than:30` (no unit) → 0 | **measured**: unsupported. Refused here |
+| `\|` is an OR alias — `(a \| b)` → 6, `(a OR b)` → 6 | ✎ **measured**; documented nowhere |
+| Operator **names** fold case — `IS:UNREAD` → 59, `is:unread` → 59 | ✎ **measured** |
+| The boolean keyword `or` is case-**sensitive** — `(a or b)` → 0 | **measured**: matched as the literal word |
+| `from: x` still filters — `from:chase.com` → 1, `from: chase.com` → 1 | ✎ **measured**: whitespace is skipped |
+| `from:` with a genuinely empty argument is a no-op — `newer_than:3d from:` → 85 | **measured**: the full baseline |
+| An unknown operator matches nothing, never a `400` — `zzz:qqq` → 0 | **measured** |
+| `q=label:` is case-insensitive | **measured** |
+| A bare date is **midnight Pacific**, not UTC | documented only |
+| Ranges are half-open `[after, before)` | documented only, via Google's worked example |
+| `m` = 30 days, `y` = 365 days | **unmeasured** — a stated approximation |
 
-Ranges are half-open `[after, before)` — forced by Google's own worked example
-(`after:2014/01/01 before:2014/02/01` = "all messages sent in January 2014").
-Epoch seconds are accepted and are exact, which is what a client should send.
+Two rules coexist and are easy to conflate: operator **names** are
+case-insensitive, while the boolean **keyword** `or` is case-sensitive. Both are
+measured, and the simulator implements both.
 
-`m` = 30 days and `y` = 365; whether Gmail means calendar units is undocumented,
-and this is a stated approximation.
+Only `MM/DD/YYYY` is refused despite being documented: `03/04/2004` is genuinely
+ambiguous against `YYYY/MM/DD` and Google publishes no disambiguation rule, so
+zero results is safer than three confidently wrong months.
 
-**Anything unrecognised is a free-text term.** There is no published evidence
-that `messages.list` has ever returned `400` for a malformed `q` — the observed
-answer is `200` with body `{"resultSizeEstimate": 0}`. So a malformed query is
-**indistinguishable from an empty inbox**, and the simulator reproduces that
-rather than being helpfully strict. `labelIds`, by contrast, *is* validated: it
-is case-sensitive and an unknown id is a `400 Invalid label: …`.
+**A malformed query is indistinguishable from an empty inbox.** `messages.list`
+answers `200` with no `messages` key; there is no `400` path for `q` at all. A
+client must validate `q` itself. `labelIds`, by contrast, *is* validated: it is
+case-sensitive and an unknown id is `400 Invalid label: …`.
+
+### `resultSizeEstimate` is unusable
+
+Two careful measurements of the real API disagree, so **no formula reproduces
+it**:
+
+* `backend/testdata/live/list.json` — `maxResults=500`, 500 rows, a
+  `nextPageToken`, estimate **501**;
+* the live probe — 85 rows, no next page, estimate **201**, and *pegged at 201
+  for every query tried*, including the empty one and including queries whose
+  real counts were 1, 6, 35 and 59.
+
+The simulator therefore defaults to `ResultSizeEstimate::Saturating`
+(`2 × maxResults + 1` when anything matched, `0` when nothing did), which can
+**never** equal the number of rows returned. A client that reads the field as a
+count, sizes a progress bar from it, or compares it between two queries fails on
+its first call instead of on its first large mailbox. `PageBased` reproduces the
+`list.json` shape for a test that wants to pin that fixture.
+
+Related, and worth knowing when designing any count comparison: **a single page
+caps at 500 ids**, so two mailboxes of different sizes both hit the ceiling and
+look identical.
 
 Not modelled, and safe: stemming, synonyms, `AROUND`, wildcards, Gmail's own
 categorisation. Bare-word matching is whole-token with no stemming — stricter
@@ -228,14 +262,17 @@ out of the adversarial self-review.
 | E72 | 8-bit bytes in a header | become `U+FFFD` in `payload.headers` — the simulator must **not** repair what the client has to (PARSER.md trap 2) | `mime::tests::eight_bit_header_bytes_become_replacement_chars_not_a_panic` | ✅ |
 | E73 | Duplicate `Subject` headers | both returned, in order; `header()` takes the first (PARSER.md trap 3) | `mime::tests::duplicate_headers_are_all_kept_in_order` | ✅ |
 | E74 ✎ | Thread listing preview | `threads.list` previews the **newest** message; `threads.get` reads oldest-first | `a_thread_listing_previews_its_newest_message` | ✅ |
-| E75 ✎ | Undocumented `newer_than:` unit | `1w`/`6h`/bare number degrade to free text and match nothing | `query::tests::an_undocumented_span_unit_degrades_to_free_text_and_matches_nothing` | ✅ |
+| E75 ✎ | Unsupported `newer_than:` unit | `1w` and a bare number degrade to free text and match nothing; `h` **is** supported (`24h` == `1d`) | `query::tests::an_unsupported_span_unit_degrades_to_free_text_and_matches_nothing` | ✅ |
 | E76 ✎ | A bare date's timezone | midnight **Pacific**, not UTC; epoch seconds exact; `MM/DD/YYYY` refused | `query::tests::a_bare_date_means_midnight_pacific_not_midnight_utc` | ✅ |
 | E77 ✎ | Date range inclusivity | half-open `[after, before)` | `query::tests::a_date_range_is_half_open` | ✅ |
-| E78 ✎ | `or` vs `OR` | lowercase `or` is the literal word; `\|` is not an OR | `query::tests::or_is_case_sensitive_and_pipe_is_not_an_or` | ✅ |
-| E79 ✎ | A space after the colon | `from: x` is free text — an empty operator argument must **not** match everything | `query::tests::a_space_after_the_colon_is_free_text_not_a_match_everything` | ✅ |
+| E78 ✎ | `or` vs `OR` vs `IS:` | the boolean `or` is case-sensitive; operator **names** are not; `\|` **is** an OR alias | `query::tests::the_boolean_or_is_case_sensitive_but_operator_names_are_not` | ✅ |
+| E79 ✎ | A space after the colon | `from: x` still filters, identically to `from:x` | `query::tests::a_space_after_the_colon_still_applies_the_operator` | ✅ |
+| E79b ✎ | A genuinely empty operator argument | `from:` is a no-op returning the unfiltered baseline, and does not swallow a following operator | `query::tests::an_operator_with_a_genuinely_empty_argument_is_a_no_op` | ✅ |
 | E80 ✎ | Unknown `labelIds` value | `400 Invalid label: inbox` — case-sensitive, unlike `q=label:` | `an_unknown_label_id_is_a_400_not_an_empty_result` | ✅ |
 | E81 ✎ | `category:` mapping | `category:primary` → `CATEGORY_PERSONAL` (there is no `CATEGORY_PRIMARY`); `reservations`/`purchases` have no label id | `query::tests::category_maps_onto_the_label_gmail_actually_uses` | ✅ |
 | E82 ✎ | Malformed `q` | always `200` with no `messages` key — indistinguishable from an empty inbox | `a_malformed_query_is_indistinguishable_from_an_empty_inbox` | ✅ |
+| E83 ✎ | `resultSizeEstimate` saturates | three queries with counts 40/3/37 all report the same estimate; only a zero-result query reports 0 | `result_size_estimate_saturates_and_cannot_compare_two_queries` | ✅ |
+| E84 ✎ | A page caps at 500 ids | `maxResults=1000` yields 500 + a token; two different mailbox sizes both hit the ceiling | `a_single_page_caps_at_five_hundred_ids` | ✅ |
 
 ---
 
@@ -303,16 +340,31 @@ The first draft said unpadded. Google's own client samples call
 `data`, which raises on missing padding — so Gmail pads. The simulator pads, and
 its decoder accepts both.
 
-### 7.6 ✎ The `q` parser is stricter than a permissive one, on purpose
+### 7.6 ✎ The `q` parser was wrong in both directions, and a live probe fixed it
 
-Six things in §4 were corrected after research into Google's published operator
-tables and the API filtering guide. In each case the first draft was *more*
-permissive than Gmail, which is the dangerous direction: a simulator that
-accepts `newer_than:1w`, or reads a bare date as UTC, or lets a lowercase `or`
-mean OR, hands the client a result set the real API will never produce. The one
-that would have bitten hardest is `from: x` with a space — an operator with an
-empty argument matched **every** message, so a stray space became a silently
-unfiltered sync.
+Two rounds of correction, and the second reversed part of the first.
+
+**Round one, from the published docs.** Six things where the first draft was
+*more permissive* than Gmail — accepting `newer_than:1w`, reading a bare date as
+UTC, treating `from: x` as an unfiltered match-everything. That last one was the
+worst: an operator with an empty argument `contains("")`, so a stray space
+became a silently unfiltered sync.
+
+**Round two, from a live read-only probe**, which overturned four of those
+corrections because they had over-shot into being *stricter* than Gmail:
+
+| Corrected to | Measured reality |
+|---|---|
+| `h` refused as undocumented | `24h` → 35 = `1d` → 35. It works |
+| `\|` refused as undocumented | `(a \| b)` → 6 = `(a OR b)` → 6. It is an OR |
+| `from: x` made free text | `from: chase.com` → 1 = `from:chase.com` → 1. Still filters |
+| all keywords case-sensitive | `IS:UNREAD` → 59 = `is:unread` → 59. Only the boolean `or` is case-sensitive |
+
+The lesson is worth recording: *undocumented is not the same as absent*. For a
+fidelity simulator the observed behaviour wins over the documentation, in both
+directions — a simulator that rejects what Gmail accepts teaches the client to
+avoid queries that work fine, which is as damaging as accepting what Gmail
+rejects.
 
 ### 7.7 ✎ `format=raw` carries no `attachmentId`
 
