@@ -12,7 +12,7 @@ python3 docs/contract/generate.py && python3 docs/contract/validate.py
 ```
 
 `generate.py` builds **one** Python object graph — one account, one label list,
-seven threads, four agents, six runs, five feed items, two notes, one draft —
+seven threads, four agents, seven runs, six feed items, two notes, one draft —
 and serialises every fixture from it. A cross-reference cannot disagree with
 itself because it is the same string. `validate.py` then re-checks the output
 against `API.md` and exits non-zero on any violation.
@@ -43,16 +43,23 @@ run.
   16 lowercase hex; label ids are `INBOX`-style or `Label_<n>` (both the short
   `Label_12` and long `Label_1901000275082506782` forms appear on purpose).
   Bearer tokens are `nade_` + 64 hex, 69 characters total.
+- **Journal steps are identified by `step_seq`.** Every entry has its own
+  `seq`, +1, no gaps — `(run_id, seq)` is a primary key, so sharing one was
+  never possible. A *step* is identified by the seq of the entry that
+  **opened** it: the `step_started` itself for an ungated call, the
+  `approval_requested` for a gated one. `step_started`, `step_done` and
+  `step_failed` all carry that seq as `step_seq`, so steps correlate by
+  pointer — guessing at "the nearest preceding open with the same tool" breaks
+  the moment an agent calls a tool twice, which is ordinary.
 - **Effect ids are `uuid5`.** `uuid5(EFFECT_NAMESPACE, "<run-id>:<seq>")` under
   the frozen namespace `6e616465-5f65-6666-6563-745f6e737631` — the ASCII bytes
   of `nade_effect_nsv1`, defined in
-  `backend/crates/nade-agent-sdk/src/ids.rs`. `seq` is the journal sequence of
-  the entry that *opened* the step: the `step_started` for an ordinary call,
-  the `approval_requested` for a gated one — and a gated step keeps that id
-  when it finally executes, which is what makes replay after a crash upsert
-  rather than duplicate. **Anything an agent wrote has a v5 id; anything else
-  has v4.** `validate.py` recomputes every one of them and cross-checks the
-  namespace against the Rust golden vector.
+  `backend/crates/nade-agent-sdk/src/ids.rs`. The seq is the **opening** seq
+  and nothing else, so a gated step keeps the id minted at
+  `approval_requested` through approval and execution — which is what makes
+  re-execution after a crash upsert rather than duplicate. **Anything an agent
+  wrote has a v5 id; anything else has v4.** `validate.py` recomputes every one
+  of them and cross-checks the namespace against the Rust golden vector.
 - **The world is frozen.** No clocks, no randomness: every timestamp is a
   constant derived from one base day (2026-08-16/17) and every id is a literal
   or a `uuid5` derivation. `validate.py` parses `generate.py` and fails it for
@@ -66,14 +73,16 @@ resolution follows that.
 
 | Agent | Status | Trigger | Tools | Runs |
 |---|---|---|---|---|
-| Job Search Tracker | published | mail | `search_mail` `read_thread` `write_note` | pending, skipped, failed, expired |
+| Job Search Tracker | published | mail | `search_mail` `read_thread` `write_note` | pending (note), skipped, failed, expired |
 | Morning To-Do | published | schedule | `search_mail` `read_thread` `write_note` | done → note |
-| Reply Drafter | draft | mail (run by hand) | `read_thread` `draft_reply` | done → draft |
+| Reply Drafter | draft | mail (run by hand) | `read_thread` `draft_reply` | done → draft, pending (draft) |
 | Flight Watcher | draft | — | none | none (`spec: null`, `compile_error` set) |
 
 A run that has not reached `done` has **not** written its effect, so its note or
 draft appears in no list — but its id is still exact, and is what the feed item
-publishes so the client can deep-link straight after approving.
+publishes so the client can deep-link straight after approving. Every run whose
+feed item publishes such an id has a journal fixture, so `validate.py`
+recomputes the id rather than trusting it.
 
 ## Files
 
@@ -101,13 +110,16 @@ publishes so the client can deep-link straight after approving.
 | `agent_draft.json` | same, `status: "draft"`, output kind `draft` |
 | `agent_compile_failed.json` | same, `spec: null` + `compile_error`, spans null |
 | `runs.json`, `runs_empty.json` | `GET /runs` — all six runs, newest first |
-| `run.json` | `GET /runs/{id}` — `pending_approval`, journal ends on `approval_requested` |
+| `run.json` | `GET /runs/{id}` — `pending_approval`, gated on `write_note` |
+| `run_pending_draft.json` | `pending_approval`, gated on `draft_reply` — the Edit card's run |
 | `run_done.json` | `done` — gated step, approval granted, effect written under the approval's id |
 | `run_failed.json` | `failed` — `step_failed` then `run_failed`, `error` set |
-| `feed.json` | `GET /feed` — live approval, unseen info, resolved, skipped, expired; `new_count` counted |
+| `run_skipped.json`, `run_expired.json` | the two runs whose approved effect will never be written |
+| `feed.json` | `GET /feed` — two live approvals, unseen info, resolved, skipped, expired; `new_count` counted |
 | `feed_empty.json` | same, empty |
 | `feed_item.json` | `GET /feed/{id}` — the live approval, with its token |
 | `feed_item_info.json` | same, an `info` item |
+| `feed_item_editable.json` | same, the live `draft_reply` approval — the only card that renders `["approve", "edit", "skip"]` |
 | `approve.json`, `skip.json`, `seen.json` | feed actions |
 | `settings.json` | `GET /settings` |
 | `ask_answer.sse` | `POST /ask`, `route.kind = answer` |

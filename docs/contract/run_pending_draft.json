@@ -1,0 +1,90 @@
+{
+  "id": "b0000007-0000-4000-8000-000000000007",
+  "agent_id": "a0000003-0000-4000-8000-000000000003",
+  "agent_name": "Reply Drafter",
+  "status": "pending_approval",
+  "trigger_kind": "manual",
+  "trigger_ref": null,
+  "error": null,
+  "journal": [
+    {
+      "seq": 1,
+      "kind": "run_started",
+      "payload": {
+        "trigger_kind": "manual",
+        "trigger_ref": null
+      },
+      "created_at": "2026-08-17T09:05:11Z"
+    },
+    {
+      "seq": 2,
+      "kind": "llm_response",
+      "payload": {
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "tool_use",
+        "tokens_in": 1188,
+        "tokens_out": 58,
+        "text": "Reading the design review thread."
+      },
+      "created_at": "2026-08-17T09:05:15Z"
+    },
+    {
+      "seq": 3,
+      "kind": "step_started",
+      "payload": {
+        "step_seq": 3,
+        "tool": "read_thread",
+        "args": {
+          "thread_id": "18f28c5d6e7f8a9b"
+        },
+        "args_hash": "sha256:faf7bb504ec86502fd5ee3152561830cdc9418251e6ad4494942b7574899c738",
+        "effect_id": "8beb4e5f-0109-5e04-9a17-dbe59799341d"
+      },
+      "created_at": "2026-08-17T09:05:15Z"
+    },
+    {
+      "seq": 4,
+      "kind": "step_done",
+      "payload": {
+        "step_seq": 3,
+        "tool": "read_thread",
+        "result": {
+          "thread_id": "18f28c5d6e7f8a9b",
+          "subject": "Re: Design review — Thursday",
+          "message_count": 4,
+          "latest": {
+            "from_email": "kamran@northbound.co",
+            "ts": "2026-08-16T18:03:52Z",
+            "body_text": "Works for me. I'll bring the composer flows and the two open questions from Monday."
+          }
+        },
+        "result_bytes": 266,
+        "truncated": false
+      },
+      "created_at": "2026-08-17T09:05:17Z"
+    },
+    {
+      "seq": 5,
+      "kind": "llm_response",
+      "payload": {
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "tool_use",
+        "tokens_in": 2530,
+        "tokens_out": 166,
+        "text": "Kamran needs a time. Asking before I save the draft."
+      },
+      "created_at": "2026-08-17T09:05:26Z"
+    },
+    {
+      "seq": 6,
+      "kind": "approval_requested",
+      "payload": {
+        "tool": "draft_reply",
+        "feed_item_id": "c0000006-0000-4000-8000-000000000006",
+        "effect_id": "dff12b81-d3df-5f94-8cdb-3d5edfb62c35",
+        "summary": "Draft a reply to Kamran confirming Thursday and listing the two open questions."
+      },
+      "created_at": "2026-08-17T09:05:28Z"
+    }
+  ]
+}

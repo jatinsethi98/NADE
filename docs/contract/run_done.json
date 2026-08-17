@@ -32,6 +32,7 @@
       "seq": 3,
       "kind": "step_started",
       "payload": {
+        "step_seq": 3,
         "tool": "read_thread",
         "args": {
           "thread_id": "18f2a1b3c4d5e6f7"
@@ -45,6 +46,7 @@
       "seq": 4,
       "kind": "step_done",
       "payload": {
+        "step_seq": 3,
         "tool": "read_thread",
         "result": {
           "thread_id": "18f2a1b3c4d5e6f7",
@@ -105,6 +107,7 @@
       "seq": 9,
       "kind": "step_started",
       "payload": {
+        "step_seq": 6,
         "tool": "draft_reply",
         "args": {
           "thread_id": "18f2a1b3c4d5e6f7",
@@ -123,6 +126,7 @@
       "seq": 10,
       "kind": "step_done",
       "payload": {
+        "step_seq": 6,
         "tool": "draft_reply",
         "result": {
           "draft_id": "135939c3-d4b8-52c6-bad9-12f159855157",

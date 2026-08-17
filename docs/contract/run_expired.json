@@ -1,0 +1,99 @@
+{
+  "id": "b0000006-0000-4000-8000-000000000006",
+  "agent_id": "a0000001-0000-4000-8000-000000000001",
+  "agent_name": "Job Search Tracker",
+  "status": "expired",
+  "trigger_kind": "mail",
+  "trigger_ref": "18f1d8e7c6b5a409",
+  "error": null,
+  "journal": [
+    {
+      "seq": 1,
+      "kind": "run_started",
+      "payload": {
+        "trigger_kind": "mail",
+        "trigger_ref": "18f1d8e7c6b5a409"
+      },
+      "created_at": "2026-08-09T11:04:22Z"
+    },
+    {
+      "seq": 2,
+      "kind": "llm_response",
+      "payload": {
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "tool_use",
+        "tokens_in": 1611,
+        "tokens_out": 79,
+        "text": "Reading the Vale Robotics thread."
+      },
+      "created_at": "2026-08-09T11:04:25Z"
+    },
+    {
+      "seq": 3,
+      "kind": "step_started",
+      "payload": {
+        "step_seq": 3,
+        "tool": "read_thread",
+        "args": {
+          "thread_id": "18f1d8e7c6b5a409"
+        },
+        "args_hash": "sha256:9cf3fc16cd2abcd07c5c4edcd8157f47be78d054342b35105a07e4b70bafcb6c",
+        "effect_id": "72594aed-2e79-5494-ba42-c1e6ac250694"
+      },
+      "created_at": "2026-08-09T11:04:25Z"
+    },
+    {
+      "seq": 4,
+      "kind": "step_done",
+      "payload": {
+        "step_seq": 3,
+        "tool": "read_thread",
+        "result": {
+          "thread_id": "18f1d8e7c6b5a409",
+          "subject": "Design Lead — Vale Robotics",
+          "message_count": 2,
+          "latest": {
+            "gmail_id": "18f1d8e7c6b5a409",
+            "from_email": "nadia@valerobotics.com",
+            "ts": "2026-08-09T11:04:10Z",
+            "body_text": "Following up on the systems interview and the paid trial week we discussed — are either of those still of interest?"
+          }
+        },
+        "result_bytes": 331,
+        "truncated": false
+      },
+      "created_at": "2026-08-09T11:04:28Z"
+    },
+    {
+      "seq": 5,
+      "kind": "llm_response",
+      "payload": {
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "tool_use",
+        "tokens_in": 2260,
+        "tokens_out": 141,
+        "text": "Two next steps. Asking before I save."
+      },
+      "created_at": "2026-08-09T11:04:30Z"
+    },
+    {
+      "seq": 6,
+      "kind": "approval_requested",
+      "payload": {
+        "tool": "write_note",
+        "feed_item_id": "c0000004-0000-4000-8000-000000000004",
+        "effect_id": "025f88b4-5735-543f-8a7b-469c648f0e08",
+        "summary": "Two next steps found — a systems interview and a paid trial week."
+      },
+      "created_at": "2026-08-09T11:04:31Z"
+    },
+    {
+      "seq": 7,
+      "kind": "approval_expired",
+      "payload": {
+        "feed_item_id": "c0000004-0000-4000-8000-000000000004"
+      },
+      "created_at": "2026-08-16T12:00:00Z"
+    }
+  ]
+}

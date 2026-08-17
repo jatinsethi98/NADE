@@ -1,0 +1,99 @@
+{
+  "id": "b0000004-0000-4000-8000-000000000004",
+  "agent_id": "a0000001-0000-4000-8000-000000000001",
+  "agent_name": "Job Search Tracker",
+  "status": "skipped",
+  "trigger_kind": "mail",
+  "trigger_ref": "18f2554a3b2c1d0e",
+  "error": null,
+  "journal": [
+    {
+      "seq": 1,
+      "kind": "run_started",
+      "payload": {
+        "trigger_kind": "mail",
+        "trigger_ref": "18f2554a3b2c1d0e"
+      },
+      "created_at": "2026-08-15T18:20:03Z"
+    },
+    {
+      "seq": 2,
+      "kind": "llm_response",
+      "payload": {
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "tool_use",
+        "tokens_in": 1502,
+        "tokens_out": 71,
+        "text": "Reading the Halcyon thread."
+      },
+      "created_at": "2026-08-15T18:20:06Z"
+    },
+    {
+      "seq": 3,
+      "kind": "step_started",
+      "payload": {
+        "step_seq": 3,
+        "tool": "read_thread",
+        "args": {
+          "thread_id": "18f2554a3b2c1d0e"
+        },
+        "args_hash": "sha256:9cd2fad14c44618505d53625bc00d13d92c2417914e7fbc04fe539e5c44cd309",
+        "effect_id": "cb1641dd-a9b7-5a6b-aba4-bef475ba6d8b"
+      },
+      "created_at": "2026-08-15T18:20:06Z"
+    },
+    {
+      "seq": 4,
+      "kind": "step_done",
+      "payload": {
+        "step_seq": 3,
+        "tool": "read_thread",
+        "result": {
+          "thread_id": "18f2554a3b2c1d0e",
+          "subject": "Senior Product Designer — Halcyon",
+          "message_count": 1,
+          "latest": {
+            "gmail_id": "18f2554a3b2c1d0e",
+            "from_email": "talent@halcyon.io",
+            "ts": "2026-08-15T18:19:40Z",
+            "body_text": "We're building out the design team and your name came up twice this week. Would you be open to a 45-minute screen?"
+          }
+        },
+        "result_bytes": 329,
+        "truncated": false
+      },
+      "created_at": "2026-08-15T18:20:08Z"
+    },
+    {
+      "seq": 5,
+      "kind": "llm_response",
+      "payload": {
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "tool_use",
+        "tokens_in": 2044,
+        "tokens_out": 118,
+        "text": "One next step. Asking before I save."
+      },
+      "created_at": "2026-08-15T18:20:10Z"
+    },
+    {
+      "seq": 6,
+      "kind": "approval_requested",
+      "payload": {
+        "tool": "write_note",
+        "feed_item_id": "c0000003-0000-4000-8000-000000000003",
+        "effect_id": "3ce08559-47f9-57d5-a0e2-e880eae828f0",
+        "summary": "One next step found — a 45-minute screen with Halcyon."
+      },
+      "created_at": "2026-08-15T18:20:11Z"
+    },
+    {
+      "seq": 7,
+      "kind": "approval_skipped",
+      "payload": {
+        "feed_item_id": "c0000003-0000-4000-8000-000000000003"
+      },
+      "created_at": "2026-08-15T19:41:52Z"
+    }
+  ]
+}

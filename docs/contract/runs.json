@@ -1,6 +1,16 @@
 {
   "runs": [
     {
+      "id": "b0000007-0000-4000-8000-000000000007",
+      "agent_id": "a0000003-0000-4000-8000-000000000003",
+      "agent_name": "Reply Drafter",
+      "trigger_kind": "manual",
+      "status": "pending_approval",
+      "summary": null,
+      "created_at": "2026-08-17T09:05:11Z",
+      "updated_at": "2026-08-17T09:05:28Z"
+    },
+    {
       "id": "b0000001-0000-4000-8000-000000000001",
       "agent_id": "a0000001-0000-4000-8000-000000000001",
       "agent_name": "Job Search Tracker",
