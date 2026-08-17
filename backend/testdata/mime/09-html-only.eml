@@ -1,0 +1,9 @@
+From: newsletter@example.com
+To: jatinsethi98@gmail.com
+Subject: HTML only
+Date: Sun, 9 Aug 2026 06:00:00 +0000
+Content-Type: text/html; charset="utf-8"
+
+<html><head><style>p{color:red}</style><script>var x=1;</script></head>
+<body><h1>Weekly digest</h1><p>Three&nbsp;stories this week.</p>
+<p>Read&nbsp;more &rarr;</p></body></html>

@@ -1,0 +1,70 @@
+{
+  "_comment": "Calendar is a v1 stub. There is NO calendar endpoint — see docs/API.md §8 and the parity map in docs/PLAN.md. This file is bundled in the app and is the only thing behind the Calendar tab. The data is lifted verbatim from mockup screen 1j so the tab looks like the design rather than like an empty state. Nothing here is real, nothing syncs, and the 'Add event' affordance is hidden in v1 because there is nothing to add to.",
+  "month": "August",
+  "year": 2026,
+  "range": "17 — 22",
+  "selected_date": "2026-08-17",
+  "days": [
+    {
+      "date": "2026-08-17",
+      "weekday": "Mon",
+      "day": 17,
+      "items": [
+        { "time": "09:30", "name": "Standup" },
+        { "time": "11:00", "name": "Design review" },
+        { "time": "14:00", "name": "1:1 Ana" },
+        { "time": "16:30", "name": "Kettle intro" }
+      ]
+    },
+    {
+      "date": "2026-08-18",
+      "weekday": "Tue",
+      "day": 18,
+      "items": [
+        { "time": "08:00", "name": "Swim" },
+        { "time": "10:00", "name": "Roadmap" },
+        { "time": "13:30", "name": "Vendor call" }
+      ]
+    },
+    {
+      "date": "2026-08-19",
+      "weekday": "Wed",
+      "day": 19,
+      "items": [
+        { "time": "09:30", "name": "Standup" },
+        { "time": "12:00", "name": "Lunch, Priya" },
+        { "time": "15:00", "name": "Offsite sync" }
+      ]
+    },
+    {
+      "date": "2026-08-20",
+      "weekday": "Thu",
+      "day": 20,
+      "items": [
+        { "time": "09:00", "name": "All-hands" },
+        { "time": "11:30", "name": "Interview" },
+        { "time": "17:00", "name": "Viewing — Larch" },
+        { "time": "19:30", "name": "Dinner" }
+      ]
+    },
+    {
+      "date": "2026-08-21",
+      "weekday": "Fri",
+      "day": 21,
+      "items": [
+        { "time": "09:30", "name": "Standup" },
+        { "time": "10:30", "name": "Retro" },
+        { "time": "15:30", "name": "Ship review" }
+      ]
+    },
+    {
+      "date": "2026-08-22",
+      "weekday": "Sat",
+      "day": 22,
+      "items": [
+        { "time": "11:00", "name": "Market" },
+        { "time": "17:30", "name": "Viewing — Ridgeway" }
+      ]
+    }
+  ]
+}

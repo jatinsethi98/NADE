@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "unauthorized",
+    "message": "Bearer token missing, unknown, or revoked."
+  }
+}

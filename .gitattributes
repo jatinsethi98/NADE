@@ -1,0 +1,22 @@
+# Byte-exact files. Git's automatic CRLF↔LF normalisation would silently
+# corrupt these, and the corruption would only show up as a mysterious parser
+# test failure on a fresh clone.
+
+# The MIME conformance corpus IS its bytes. RFC 822 line endings are CRLF, the
+# header/body boundary is a blank CRLF line, and case 25 exists specifically to
+# test a message with mixed CRLF and bare LF. Normalising any of that would turn
+# the corpus into a test of something else.
+*.eml           -text
+
+# SSE fixtures are the exact wire bytes of a stream, blank-line framing included.
+*.sse           -text
+
+# Binaries, marked so git never inspects or rewrites them.
+*.ttf           binary
+*.png           binary
+*.pdf           binary
+*.sqlite3       binary
+*.p8            binary
+
+# Xcode's project file merges badly and should be reviewed as a whole.
+*.pbxproj       -text merge=union linguist-generated

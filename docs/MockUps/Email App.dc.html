@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics><meta name="design_doc_mode" content="canvas"><link rel="stylesheet" href="_ds/classical-8be2cb87-f63e-4f03-a740-ace7447fab1a/styles.css"><script src="_ds/classical-8be2cb87-f63e-4f03-a740-ace7447fab1a/_ds_bundle.js"></script><style>body{margin:0;background:#dedbd6}.dv-turn{padding:40px 44px 32px;border-bottom:1px solid rgba(0,0,0,.08);scroll-margin-top:16px}.dv-thd{display:flex;align-items:baseline;gap:10px;margin:0 0 20px}.dv-tid{font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#201f1d;color:#f3f2f2;border-radius:4px;text-decoration:none}.dv-tname{font-family:var(--font-heading);font-weight:600;font-size:15px;color:#201f1d}.dv-opts{display:flex;flex-wrap:wrap;gap:30px;align-items:flex-start}.dv-opt{flex:none;display:flex;flex-direction:column;gap:9px;scroll-margin-top:16px}.dv-oid{font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.09);color:#201f1d;border-radius:5px;text-decoration:none}.dv-olabel{display:flex;align-items:baseline;gap:8px;font:400 11.5px/1.3 var(--font-body);color:rgba(0,0,0,.55)}.dv-opt *{scrollbar-width:none}.dv-opt *::-webkit-scrollbar{display:none;width:0;height:0}.dv-opt:target .dv-oid{background:#b68235;color:#fff}.dv-next{margin:26px 0 0;font:12px/1.6 var(--font-body);color:rgba(0,0,0,.5)}</style></helmet>
+<section class="dv-turn" id="t2">
+<div class="dv-thd"><a class="dv-tid" href="#t2">2</a><span class="dv-tname">Home, reworked — feed by default, tips behind it (replaces <a class="dv-oid" href="#1a">1a</a>)</span></div>
+<div class="dv-opts">
+
+<div class="dv-opt" id="2a"><div class="dv-olabel"><a class="dv-oid" href="#2a">2a</a>Feed under a pinned search bar — tap the grabber to pull it down (live)</div>
+<x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" hint-size="402px,874px">
+<div style="height:100%;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body);font-size:15px">
+  <div style="flex:1;position:relative;min-height:0">
+
+    <div style="position:absolute;inset:0;display:{{ feedDisplay }};flex-direction:column">
+      <div style="padding:58px 20px 11px;border-bottom:1px solid var(--color-divider)">
+        <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:11px"><span style="font-family:var(--font-heading);font-weight:600;font-size:17px">Sunday 16 August</span><span style="margin-left:auto;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--color-accent);font-variant-numeric:tabular-nums">{{ newCount }} new</span></div>
+        <div style="display:flex;gap:10px;align-items:center">
+          <input class="input" value="{{ q }}" onChange="{{ onQ }}" placeholder="Ask, search, or describe an agent" style="border-radius:999px;padding:8px 15px;min-height:38px;font-size:13.5px">
+          <div onClick="{{ send }}" style="width:38px;height:38px;flex:none;border:1px solid var(--color-accent);border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--color-accent);cursor:pointer" style-hover="background:color-mix(in srgb,var(--color-accent) 12%,transparent)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"></path><path d="M20 2v4"></path><path d="M22 4h-4"></path><circle cx="4" cy="20" r="2"></circle></svg></div>
+        </div>
+      </div>
+      <div style="flex:1;overflow:auto;min-height:0">
+        <div onClick="{{ closeFeed }}" style="padding:9px 0 8px;display:flex;flex-direction:column;align-items:center;gap:5px;cursor:pointer;border-bottom:1px solid var(--color-divider)"><span style="width:34px;height:3px;border-radius:99px;background:var(--color-neutral-400)"></span><span style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 55%,transparent)">Pull down to hide</span></div>
+        <sc-for list="{{ feed }}" as="f" hint-placeholder-count="6">
+          <div style="padding:12px 20px 13px;border-bottom:1px solid var(--color-divider);border-left:2px solid {{ f.rule }}">
+            <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--color-accent)">{{ f.src }}</span><span style="margin-left:auto;font-size:11px;font-variant-numeric:tabular-nums;color:color-mix(in srgb,var(--color-text) 60%,transparent)">{{ f.time }}</span></div>
+            <div style="font-size:14px;line-height:1.6;margin-top:5px">{{ f.body }}</div>
+            <sc-if value="{{ f.isOtp }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;align-items:center;gap:12px;margin-top:9px;border:1px solid var(--color-divider);border-radius:var(--radius-md);padding:8px 13px"><span style="font-family:var(--font-heading);font-weight:400;font-size:25px;letter-spacing:.12em;font-variant-numeric:tabular-nums">{{ f.code }}</span><span onClick="{{ f.copy }}" style="margin-left:auto;font-size:12px;color:var(--color-accent);cursor:pointer;border-bottom:1px solid var(--color-accent-300);padding-bottom:1px">{{ f.copyLabel }}</span></div>
+            </sc-if>
+            <sc-if value="{{ f.isApprove }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;gap:8px;margin-top:10px"><button class="btn btn-primary" onClick="{{ f.approve }}">Approve</button><button class="btn btn-secondary" onClick="{{ f.noop }}">Edit</button><button class="btn btn-ghost" onClick="{{ f.skip }}">Skip</button></div>
+            </sc-if>
+            <sc-if value="{{ f.resolved }}" hint-placeholder-val="{{ false }}">
+              <div style="margin-top:8px;font-size:12.5px;font-style:italic;color:var(--color-accent-700)">{{ f.resolved }}</div>
+            </sc-if>
+          </div>
+        </sc-for>
+        <div style="padding:16px 20px 24px;font-size:12px;font-style:italic;color:color-mix(in srgb,var(--color-text) 55%,transparent)">Older activity lives in the run log.</div>
+      </div>
+    </div>
+
+    <div style="position:absolute;inset:0;display:{{ focusDisplay }};flex-direction:column;background:var(--color-bg)">
+      <div style="padding:58px 20px 0;display:flex;align-items:baseline;gap:8px"><span style="font-family:var(--font-heading);font-weight:400;font-size:26px">Good morning</span><span style="margin-left:auto;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 60%,transparent);font-variant-numeric:tabular-nums">Sun 16 Aug</span></div>
+      <div style="flex:1;display:flex;flex-direction:column;justify-content:center;padding:0 20px;min-height:0">
+        <div style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 60%,transparent);margin-bottom:8px">Try</div>
+        <sc-for list="{{ prompts }}" as="p" hint-placeholder-count="3">
+          <div onClick="{{ p.run }}" style="padding:11px 0;border-top:1px solid var(--color-divider);font-size:14.5px;line-height:1.45;display:flex;gap:12px;cursor:pointer"><span style="color:var(--color-accent);font-variant-numeric:tabular-nums;font-size:11.5px;padding-top:3px">{{ p.n }}</span><span>{{ p.t }}</span></div>
+        </sc-for>
+        <div style="display:flex;gap:10px;align-items:center;margin-top:22px">
+          <input class="input" value="{{ q }}" onChange="{{ onQ }}" placeholder="Ask, search, or describe an agent" style="border-radius:999px;padding:10px 16px;min-height:44px;font-size:14px;border-color:var(--color-accent)">
+          <div onClick="{{ send }}" style="width:44px;height:44px;flex:none;border:1px solid var(--color-accent);border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--color-accent);cursor:pointer"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 7-7 7 7"></path><path d="M12 19V5"></path></svg></div>
+        </div>
+      </div>
+      <div onClick="{{ openFeed }}" style="border-top:1px solid var(--color-divider);padding:9px 20px 12px;cursor:pointer">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:5px;margin-bottom:9px"><span style="width:34px;height:3px;border-radius:99px;background:var(--color-neutral-400)"></span><span style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--color-accent);font-variant-numeric:tabular-nums">{{ newCount }} new · swipe up</span></div>
+        <div style="opacity:.45;display:flex;flex-direction:column;gap:7px">
+          <div style="display:flex;gap:8px;align-items:baseline;border-left:2px solid var(--color-accent);padding-left:9px"><span style="font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--color-accent)">Job Search Tracker</span><span style="font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Two next steps to approve…</span></div>
+          <div style="display:flex;gap:8px;align-items:baseline;padding-left:11px"><span style="font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--color-accent)">Kettle</span><span style="font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Sign-in code 481 302</span></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+  <div style="display:flex;border-top:1px solid var(--color-divider);padding:9px 10px 26px">
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:var(--color-accent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"></path><path d="M20 2v4"></path><path d="M22 4h-4"></path><circle cx="4" cy="20" r="2"></circle></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Ask</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Mail</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4"></path><path d="M10 9H8"></path><path d="M16 13H8"></path><path d="M16 17H8"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Notes</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Calendar</span></div>
+  </div>
+</div>
+</x-import></div>
+
+<div class="dv-opt" id="2b"><div class="dv-olabel"><a class="dv-oid" href="#2b">2b</a>Pulled down — tips above, search front and centre, feed peeking</div>
+<x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" hint-size="402px,874px">
+<div style="height:100%;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body);font-size:15px">
+  <div style="padding:58px 20px 0;display:flex;align-items:baseline;gap:8px"><span style="font-family:var(--font-heading);font-weight:400;font-size:26px">Good morning</span><span style="margin-left:auto;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 60%,transparent);font-variant-numeric:tabular-nums">Sun 16 Aug</span></div>
+  <div style="flex:1;display:flex;flex-direction:column;justify-content:center;padding:0 20px;min-height:0">
+    <div style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 60%,transparent);margin-bottom:8px">Try</div>
+    <div style="padding:11px 0;border-top:1px solid var(--color-divider);font-size:14.5px;line-height:1.45;display:flex;gap:12px"><span style="color:var(--color-accent);font-variant-numeric:tabular-nums;font-size:11.5px;padding-top:3px">01</span><span>Forward the Tempe utility bills to Kamran, ask him to transfer them</span></div>
+    <div style="padding:11px 0;border-top:1px solid var(--color-divider);font-size:14.5px;line-height:1.45;display:flex;gap:12px"><span style="color:var(--color-accent);font-variant-numeric:tabular-nums;font-size:11.5px;padding-top:3px">02</span><span>Keep a tab on my United flights this year — how close am I to status?</span></div>
+    <div style="padding:11px 0;border-top:1px solid var(--color-divider);font-size:14.5px;line-height:1.45;display:flex;gap:12px"><span style="color:var(--color-accent);font-variant-numeric:tabular-nums;font-size:11.5px;padding-top:3px">03</span><span>Unsubscribe from newsletters I haven't opened in a while</span></div>
+    <div style="display:flex;gap:10px;align-items:center;margin-top:22px">
+      <span style="flex:1;border:1px solid var(--color-accent);border-radius:999px;padding:11px 16px;font-size:14px;color:color-mix(in srgb,var(--color-text) 60%,transparent)">Ask, search, or describe an agent</span>
+      <span style="width:44px;height:44px;flex:none;border:1px solid var(--color-accent);border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--color-accent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 7-7 7 7"></path><path d="M12 19V5"></path></svg></span>
+    </div>
+    <div style="margin-top:16px;font-size:12px;font-style:italic;color:color-mix(in srgb,var(--color-text) 55%,transparent);text-align:center">Tips fade out after the first week — the feed becomes the default view.</div>
+  </div>
+  <div style="border-top:1px solid var(--color-divider);padding:9px 20px 12px">
+    <div style="display:flex;flex-direction:column;align-items:center;gap:5px;margin-bottom:9px"><span style="width:34px;height:3px;border-radius:99px;background:var(--color-neutral-400)"></span><span style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--color-accent);font-variant-numeric:tabular-nums">4 new · swipe up</span></div>
+    <div style="opacity:.45;display:flex;flex-direction:column;gap:7px">
+      <div style="display:flex;gap:8px;align-items:baseline;border-left:2px solid var(--color-accent);padding-left:9px"><span style="font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--color-accent)">Job Search Tracker</span><span style="font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Two next steps to approve…</span></div>
+      <div style="display:flex;gap:8px;align-items:baseline;padding-left:11px"><span style="font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--color-accent)">Kettle</span><span style="font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Sign-in code 481 302</span></div>
+    </div>
+  </div>
+  <div style="display:flex;border-top:1px solid var(--color-divider);padding:9px 10px 26px">
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:var(--color-accent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"></path><path d="M20 2v4"></path><path d="M22 4h-4"></path><circle cx="4" cy="20" r="2"></circle></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Ask</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Mail</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4"></path><path d="M10 9H8"></path><path d="M16 13H8"></path><path d="M16 17H8"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Notes</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Calendar</span></div>
+  </div>
+</div>
+</x-import></div>
+
+</div>
+<p class="dv-next">Try next: "approvals in their own group at the top of the feed" · "swap the OTP row for a copy-on-tap chip" · "let the feed collapse into the search bar as a count"</p>
+</section>
+<section class="dv-turn" id="t1">
+<div class="dv-thd"><a class="dv-tid" href="#t1">1</a><span class="dv-tname">Mail with agents — first pass</span></div>
+<div class="dv-opts">
+
+<div class="dv-opt" id="1a"><div class="dv-olabel"><a class="dv-oid" href="#1a">1a</a>Home — ask, search, make an agent (live)</div>
+<x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" hint-size="402px,874px">
+<div style="height:100%;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body);font-size:15px">
+  <div style="padding:62px 22px 8px;display:flex;align-items:baseline"><div style="font-family:var(--font-heading);font-weight:400;font-size:27px">Good morning</div><div style="margin-left:auto;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 62%,transparent);font-variant-numeric:tabular-nums">Sun 16 Aug</div></div>
+  <div style="flex:1;overflow:auto;padding:14px 22px 8px">
+    <sc-if value="{{ isIdle }}" hint-placeholder-val="{{ true }}">
+      <div>
+        <div style="font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 62%,transparent);margin-bottom:10px">Try</div>
+        <sc-for list="{{ prompts }}" as="p" hint-placeholder-count="3">
+          <div onClick="{{ p.run }}" style="padding:13px 0;border-top:1px solid var(--color-divider);font-size:15px;line-height:1.4;display:flex;gap:12px;cursor:pointer" style-hover="background:color-mix(in srgb,var(--color-accent) 7%,transparent)"><span style="color:var(--color-accent);font-variant-numeric:tabular-nums;font-size:12px;padding-top:3px">{{ p.n }}</span><span>{{ p.t }}</span></div>
+        </sc-for>
+        <div style="border-top:1px solid var(--color-divider);margin-top:26px;padding-top:14px;display:flex;align-items:baseline;gap:8px;font-size:13px;color:color-mix(in srgb,var(--color-text) 60%,transparent)"><span style="font-family:var(--font-heading);font-size:16px;color:var(--color-text)">8 agents</span><span>· 6 published, 2 drafts</span><span style="margin-left:auto;color:var(--color-accent)">All →</span></div>
+        <div style="margin-top:10px;font-size:13px;line-height:1.6;color:color-mix(in srgb,var(--color-text) 60%,transparent);font-style:italic">Launch Digest ran 9 minutes ago — 4 announcements summarised.</div>
+      </div>
+    </sc-if>
+    <sc-if value="{{ isSearch }}" hint-placeholder-val="{{ false }}">
+      <div>
+        <div style="text-align:right;margin-bottom:16px"><span style="display:inline-block;max-width:78%;text-align:left;border:1px solid var(--color-divider);border-radius:var(--radius-lg);padding:9px 13px;font-size:14px;background:var(--color-neutral-100)">{{ asked }}</span></div>
+        <div style="font-size:14px;line-height:1.65;margin-bottom:14px">Seven United bookings this year. Four have flown — 11,240 miles credited toward Premier Silver.</div>
+        <div style="border:1px solid var(--color-divider);border-radius:var(--radius-md);padding:12px 13px;margin-bottom:14px">
+          <div style="display:flex;align-items:baseline;gap:8px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--color-accent);margin-bottom:9px">Progress</div>
+          <div style="height:3px;background:var(--color-neutral-300);position:relative;margin-bottom:8px"><div style="position:absolute;left:0;top:0;bottom:0;width:37%;background:var(--color-accent)"></div></div>
+          <div style="display:flex;font-size:12px;font-variant-numeric:tabular-nums;color:color-mix(in srgb,var(--color-text) 60%,transparent)"><span>4 of 12 segments</span><span style="margin-left:auto">11,240 / 30,000 PQP</span></div>
+        </div>
+        <sc-for list="{{ hits }}" as="h" hint-placeholder-count="3">
+          <div style="padding:11px 0;border-top:1px solid var(--color-divider)"><div style="display:flex;gap:8px;align-items:baseline"><span style="font-size:14px">{{ h.from }}</span><span style="margin-left:auto;font-size:11px;font-variant-numeric:tabular-nums;color:color-mix(in srgb,var(--color-text) 62%,transparent)">{{ h.time }}</span></div><div style="font-size:13px;color:color-mix(in srgb,var(--color-text) 62%,transparent);margin-top:2px">{{ h.subj }}</div></div>
+        </sc-for>
+        <div style="display:flex;gap:8px;margin-top:16px"><button class="btn btn-secondary" onClick="{{ toAgent }}">Make this an agent</button><button class="btn btn-ghost" onClick="{{ reset }}">Clear</button></div>
+      </div>
+    </sc-if>
+    <sc-if value="{{ isAgent }}" hint-placeholder-val="{{ false }}">
+      <div>
+        <div style="text-align:right;margin-bottom:16px"><span style="display:inline-block;max-width:80%;text-align:left;border:1px solid var(--color-divider);border-radius:var(--radius-lg);padding:9px 13px;font-size:14px;background:var(--color-neutral-100)">{{ asked }}</span></div>
+        <div style="font-size:14px;line-height:1.65;margin-bottom:16px">Here's what I'd build. Tap anything underlined to change it.</div>
+        <div style="border:1px solid var(--color-accent);border-radius:var(--radius-md);padding:15px 15px 13px">
+          <div style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent);margin-bottom:10px">Draft agent</div>
+          <div style="font-family:var(--font-heading);font-weight:600;font-size:19px;margin-bottom:12px">{{ draftName }}</div>
+          <div style="font-size:15px;line-height:1.85">When <span style="border-bottom:1px solid var(--color-accent);padding-bottom:1px">{{ draftWhen }}</span>, <span style="border-bottom:1px solid var(--color-accent);padding-bottom:1px">{{ draftDo }}</span>.</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:14px"><span class="tag tag-outline">{{ draftTool }}</span><span class="tag tag-neutral">Approval required</span><span class="tag tag-neutral">Draft</span></div>
+        </div>
+        <sc-if value="{{ saved }}" hint-placeholder-val="{{ false }}">
+          <div style="margin-top:14px;font-size:13px;font-style:italic;color:var(--color-accent-700)">Saved to Agents as a draft. It won't run until you publish it.</div>
+        </sc-if>
+        <div style="display:flex;gap:8px;margin-top:16px"><button class="btn btn-primary" onClick="{{ save }}">Save as draft</button><button class="btn btn-secondary" onClick="{{ reset }}">Start over</button></div>
+      </div>
+    </sc-if>
+  </div>
+  <div style="padding:10px 18px 12px;border-top:1px solid var(--color-divider);display:flex;gap:10px;align-items:center">
+    <input class="input" value="{{ q }}" onChange="{{ onQ }}" placeholder="Ask, search, or describe an agent" style="border-radius:999px;padding:9px 15px;min-height:40px;font-size:14px">
+    <div onClick="{{ send }}" style="width:40px;height:40px;flex:none;border:1px solid var(--color-accent);border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--color-accent);cursor:pointer" style-hover="background:color-mix(in srgb,var(--color-accent) 12%,transparent)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 7-7 7 7"></path><path d="M12 19V5"></path></svg></div>
+  </div>
+  <div style="display:flex;border-top:1px solid var(--color-divider);padding:9px 10px 26px">
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:var(--color-accent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"></path><path d="M20 2v4"></path><path d="M22 4h-4"></path><circle cx="4" cy="20" r="2"></circle></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Ask</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Mail</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4"></path><path d="M10 9H8"></path><path d="M16 13H8"></path><path d="M16 17H8"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Notes</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Calendar</span></div>
+  </div>
+</div>
+</x-import></div>
+
+<div class="dv-opt" id="1b"><div class="dv-olabel"><a class="dv-oid" href="#1b">1b</a>Agents — everything you've made</div>
+<x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" hint-size="402px,874px">
+<div style="height:100%;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body);font-size:15px">
+  <div style="padding:62px 22px 12px;border-bottom:1px solid var(--color-divider);display:flex;align-items:baseline;gap:10px"><div style="font-family:var(--font-heading);font-weight:600;font-size:23px">Agents</div><div style="margin-left:auto;color:var(--color-accent);font-size:13px">New</div></div>
+  <div style="display:flex;gap:16px;padding:11px 22px;border-bottom:1px solid var(--color-divider);font-size:12px"><span style="color:var(--color-accent);border-bottom:1px solid var(--color-accent);padding-bottom:3px">All 8</span><span style="color:color-mix(in srgb,var(--color-text) 60%,transparent)">Published 6</span><span style="color:color-mix(in srgb,var(--color-text) 60%,transparent)">Drafts 2</span></div>
+  <div style="flex:1;overflow:auto">
+    <sc-for list="{{ agents }}" as="a" hint-placeholder-count="5">
+      <div style="padding:14px 22px;border-bottom:1px solid var(--color-divider)">
+        <div style="display:flex;align-items:baseline;gap:9px"><div style="font-family:var(--font-heading);font-weight:600;font-size:17px">{{ a.name }}</div><div style="margin-left:auto;font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:{{ a.dotColor }};font-variant-numeric:tabular-nums">{{ a.status }}</div></div>
+        <div style="font-size:13px;line-height:1.55;color:color-mix(in srgb,var(--color-text) 68%,transparent);margin-top:4px">{{ a.line }}</div>
+        <div style="display:flex;align-items:center;gap:7px;margin-top:8px;font-size:11px;color:color-mix(in srgb,var(--color-text) 62%,transparent);font-variant-numeric:tabular-nums"><span style="color:var(--color-accent)">{{ a.trigger }}</span><span>·</span><span>{{ a.last }}</span><sc-if value="{{ a.approval }}" hint-placeholder-val="{{ false }}"><span>· needs approval</span></sc-if></div>
+      </div>
+    </sc-for>
+  </div>
+  <div style="display:flex;border-top:1px solid var(--color-divider);padding:9px 10px 26px">
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:var(--color-accent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"></path><path d="M20 2v4"></path><path d="M22 4h-4"></path><circle cx="4" cy="20" r="2"></circle></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Ask</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Mail</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4"></path><path d="M10 9H8"></path><path d="M16 13H8"></path><path d="M16 17H8"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Notes</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Calendar</span></div>
+  </div>
+</div>
+</x-import></div>
+
+<div class="dv-opt" id="1c"><div class="dv-olabel"><a class="dv-oid" href="#1c">1c</a>Agent builder — sentence first, details folded away (live)</div>
+<x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" hint-size="402px,874px">
+<div style="height:100%;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body);font-size:15px">
+  <div style="padding:60px 22px 11px;border-bottom:1px solid var(--color-divider);display:flex;align-items:baseline"><span style="color:var(--color-accent);font-size:13px">Cancel</span><span style="margin-left:auto;margin-right:auto;font-family:var(--font-heading);font-weight:600;font-size:15px">Edit agent</span><span style="color:var(--color-accent);font-size:13px">Save</span></div>
+  <div style="flex:1;overflow:auto">
+    <div style="padding:20px 22px 18px;border-bottom:1px solid var(--color-divider)">
+      <div style="font-family:var(--font-heading);font-weight:600;font-size:22px;margin-bottom:14px">Job Search Tracker</div>
+      <div style="font-size:16px;line-height:2">When <span style="border-bottom:1px solid var(--color-accent);padding-bottom:2px">a recruiter emails about a tech role</span>, <span style="border-bottom:1px solid var(--color-accent);padding-bottom:2px">pull out the next steps and add them to my Notion "Jobs" page</span>. <span style="color:color-mix(in srgb,var(--color-text) 60%,transparent)">Ask me before sending.</span></div>
+      <div style="margin-top:14px;font-size:12px;font-style:italic;color:color-mix(in srgb,var(--color-text) 60%,transparent)">Tap any underline to edit, or open a section below.</div>
+    </div>
+
+    <div onClick="{{ tInv }}" style="padding:15px 22px 14px;border-bottom:1px solid var(--color-divider);cursor:pointer">
+      <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent)">Invocation</span><span style="margin-left:auto;font-size:12px;color:color-mix(in srgb,var(--color-text) 55%,transparent)">{{ invSummary }}</span></div>
+      <sc-if value="{{ openInv }}" hint-placeholder-val="{{ true }}">
+        <div style="margin-top:14px">
+          <div style="display:flex;flex-direction:column;gap:0">
+            <sc-for list="{{ invModes }}" as="m" hint-placeholder-count="3">
+              <div onClick="{{ m.pick }}" style="display:flex;gap:11px;align-items:flex-start;padding:11px 0;border-top:1px solid var(--color-divider)">
+                <span style="width:16px;height:16px;flex:none;border-radius:50%;margin-top:3px;border:1.5px solid {{ m.ring }};background:{{ m.fill }};box-shadow:{{ m.inner }}"></span>
+                <span><span style="font-size:15px">{{ m.label }}</span><br><span style="font-size:12px;color:color-mix(in srgb,var(--color-text) 55%,transparent)">{{ m.hint }}</span></span>
+              </div>
+            </sc-for>
+          </div>
+          <div style="margin-top:12px;border:1px solid var(--color-divider);border-radius:var(--radius-md);padding:12px 13px">
+            <div style="display:flex;padding:6px 0;font-size:13px"><span style="width:66px;color:color-mix(in srgb,var(--color-text) 60%,transparent)">From</span><span>recruiters, hiring managers</span></div>
+            <div style="display:flex;padding:6px 0;border-top:1px solid var(--color-divider);font-size:13px"><span style="width:66px;color:color-mix(in srgb,var(--color-text) 60%,transparent)">To</span><span style="color:color-mix(in srgb,var(--color-text) 62%,transparent)">Any inbox</span></div>
+            <div style="display:flex;padding:6px 0;border-top:1px solid var(--color-divider);font-size:13px"><span style="width:66px;color:color-mix(in srgb,var(--color-text) 60%,transparent)">About</span><span>tech roles</span></div>
+          </div>
+          <div style="margin-top:12px;display:flex;align-items:center;gap:8px;font-size:13px;color:var(--color-accent)"><span>＋</span><span>Add a schedule as well</span></div>
+        </div>
+      </sc-if>
+    </div>
+
+    <div onClick="{{ tInp }}" style="padding:15px 22px 14px;border-bottom:1px solid var(--color-divider);cursor:pointer">
+      <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent)">Inputs</span><span style="margin-left:auto;font-size:12px;color:color-mix(in srgb,var(--color-text) 55%,transparent)">Prompt · 1 attachment</span></div>
+      <sc-if value="{{ openInp }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-top:13px">
+          <div style="border:1px solid var(--color-divider);border-radius:var(--radius-md);padding:11px 12px;font-size:14px;line-height:1.6">Find out the next steps from the email — call, take-home, or intro — and add them to my Notion "Jobs" todo page with the company and the date.</div>
+          <div style="display:flex;gap:8px;margin-top:10px;align-items:center"><span class="tag tag-neutral">Reply template.pdf</span><span style="font-size:13px;color:var(--color-accent)">＋ Attach</span></div>
+        </div>
+      </sc-if>
+    </div>
+
+    <div onClick="{{ tTool }}" style="padding:15px 22px 14px;border-bottom:1px solid var(--color-divider);cursor:pointer">
+      <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent)">Tools</span><span style="margin-left:auto;font-size:12px;color:color-mix(in srgb,var(--color-text) 55%,transparent)">{{ toolSummary }}</span></div>
+      <sc-if value="{{ openTool }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-top:6px">
+          <sc-for list="{{ tools }}" as="t" hint-placeholder-count="4">
+            <div onClick="{{ t.toggle }}" style="display:flex;align-items:center;gap:10px;padding:11px 0;border-top:1px solid var(--color-divider);font-size:14px"><span style="color:{{ t.mark }};width:14px">{{ t.tick }}</span><span>{{ t.name }}</span><span style="margin-left:auto;font-size:11px;color:color-mix(in srgb,var(--color-text) 60%,transparent)">{{ t.note }}</span></div>
+          </sc-for>
+        </div>
+      </sc-if>
+    </div>
+
+    <div onClick="{{ tSet }}" style="padding:15px 22px 14px;border-bottom:1px solid var(--color-divider);cursor:pointer">
+      <div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent)">Settings</span><span style="margin-left:auto;font-size:12px;color:color-mix(in srgb,var(--color-text) 55%,transparent)">{{ setSummary }}</span></div>
+      <sc-if value="{{ openSet }}" hint-placeholder-val="{{ false }}">
+        <div style="margin-top:13px">
+          <div style="display:flex;align-items:center;gap:10px"><span style="font-size:14px">Status</span><span style="margin-left:auto;display:inline-flex;border:1px solid var(--color-divider);border-radius:var(--radius-md);overflow:hidden"><span onClick="{{ setDraft }}" style="padding:6px 14px;font-size:13px;cursor:pointer;color:{{ draftColor }};box-shadow:{{ draftRing }}">Draft</span><span onClick="{{ setPub }}" style="padding:6px 14px;font-size:13px;cursor:pointer;border-left:1px solid var(--color-divider);color:{{ pubColor }};box-shadow:{{ pubRing }}">Published</span></span></div>
+          <div style="display:flex;align-items:center;gap:10px;margin-top:16px;padding-top:14px;border-top:1px solid var(--color-divider)"><span><span style="font-size:14px">Ask before it acts</span><br><span style="font-size:12px;color:color-mix(in srgb,var(--color-text) 55%,transparent)">You approve each draft or change</span></span><span onClick="{{ tAppr }}" style="margin-left:auto;width:46px;height:26px;flex:none;border-radius:999px;border:1px solid {{ apprRing }};background:{{ apprBg }};position:relative;cursor:pointer"><span style="position:absolute;top:2px;left:{{ apprX }};width:20px;height:20px;border-radius:50%;background:{{ apprKnob }};transition:left .18s ease"></span></span></div>
+          <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--color-divider);font-size:12px;line-height:1.6;color:color-mix(in srgb,var(--color-text) 55%,transparent);font-style:italic">{{ setNote }}</div>
+        </div>
+      </sc-if>
+    </div>
+    <div style="padding:18px 22px 30px;display:flex;gap:10px"><button class="btn btn-primary" style="flex:1" onClick="{{ noop }}">Run once now</button><button class="btn btn-secondary" onClick="{{ noop }}">Delete</button></div>
+  </div>
+</div>
+</x-import></div>
+
+<div class="dv-opt" id="1d"><div class="dv-olabel"><a class="dv-oid" href="#1d">1d</a>Schedule sheet — recurrence, Classical (live)</div>
+<x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" hint-size="402px,874px">
+<div style="height:100%;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body);font-size:15px;position:relative">
+  <div style="padding:60px 22px 11px;border-bottom:1px solid var(--color-divider);display:flex;align-items:baseline"><span style="color:color-mix(in srgb,var(--color-text) 55%,transparent);font-size:13px">Cancel</span><span style="margin-left:auto;margin-right:auto;font-family:var(--font-heading);font-weight:600;font-size:15px">Edit agent</span><span style="color:color-mix(in srgb,var(--color-text) 55%,transparent);font-size:13px">Save</span></div>
+  <div style="flex:1;opacity:.35;padding:20px 22px"><div style="font-family:var(--font-heading);font-weight:600;font-size:22px;margin-bottom:14px">Morning To-Do</div><div style="font-size:16px;line-height:2">Every <span style="border-bottom:1px solid var(--color-accent)">weekday at 8:00</span>, <span style="border-bottom:1px solid var(--color-accent)">build today's to-do from my template and Slack it to me</span>.</div></div>
+  <div style="position:absolute;inset:0;background:color-mix(in srgb,var(--color-neutral-900) 45%,transparent)"></div>
+  <div style="position:absolute;left:0;right:0;bottom:0;background:var(--color-surface);border-top:1px solid var(--color-divider);border-radius:var(--radius-lg) var(--radius-lg) 0 0;padding:16px 22px 34px;box-shadow:var(--shadow-lg)">
+    <div style="width:38px;height:4px;border-radius:99px;background:var(--color-neutral-400);margin:0 auto 16px"></div>
+    <div style="font-family:var(--font-heading);font-weight:600;font-size:20px;margin-bottom:18px">How often</div>
+    <div style="display:flex;align-items:center;gap:12px;padding-bottom:16px;border-bottom:1px solid var(--color-divider)">
+      <span style="font-size:14px">Repeat every</span>
+      <span onClick="{{ decEvery }}" style="width:30px;height:30px;border:1px solid var(--color-divider);border-radius:var(--radius-md);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--color-accent)">−</span>
+      <span style="min-width:22px;text-align:center;font-variant-numeric:tabular-nums;font-size:15px">{{ every }}</span>
+      <span onClick="{{ incEvery }}" style="width:30px;height:30px;border:1px solid var(--color-divider);border-radius:var(--radius-md);display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--color-accent)">＋</span>
+      <span onClick="{{ cycleUnit }}" style="margin-left:auto;border:1px solid var(--color-divider);border-radius:var(--radius-md);padding:6px 12px;font-size:14px;cursor:pointer;display:flex;gap:8px;align-items:center">{{ unit }}<span style="color:var(--color-accent);font-size:10px">▼</span></span>
+    </div>
+    <div style="padding:16px 0;border-bottom:1px solid var(--color-divider)">
+      <div style="font-size:12px;color:color-mix(in srgb,var(--color-text) 55%,transparent);margin-bottom:11px">Repeat on</div>
+      <div style="display:flex;gap:8px">
+        <sc-for list="{{ dow }}" as="d" hint-placeholder-count="7">
+          <span onClick="{{ d.toggle }}" style="flex:1;aspect-ratio:1;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;cursor:pointer;border:1px solid {{ d.ring }};background:{{ d.bg }};color:{{ d.fg }}">{{ d.l }}</span>
+        </sc-for>
+      </div>
+    </div>
+    <div style="padding:16px 0 18px">
+      <div style="font-size:12px;color:color-mix(in srgb,var(--color-text) 55%,transparent);margin-bottom:8px">Ends</div>
+      <sc-for list="{{ endOpts }}" as="e" hint-placeholder-count="3">
+        <div onClick="{{ e.pick }}" style="display:flex;align-items:center;gap:11px;padding:9px 0;cursor:pointer">
+          <span style="width:16px;height:16px;flex:none;border-radius:50%;border:1.5px solid {{ e.ring }};background:{{ e.fill }};box-shadow:{{ e.inner }}"></span>
+          <span style="font-size:14px">{{ e.label }}</span>
+          <span style="margin-left:auto;font-size:13px;font-variant-numeric:tabular-nums;color:{{ e.valColor }}">{{ e.val }}</span>
+        </div>
+      </sc-for>
+    </div>
+    <div style="display:flex;gap:10px;border-top:1px solid var(--color-divider);padding-top:16px"><button class="btn btn-secondary" style="flex:1" onClick="{{ noop }}">Cancel</button><button class="btn btn-primary" style="flex:1" onClick="{{ noop }}">{{ recurSummary }}</button></div>
+  </div>
+</div>
+</x-import></div>
+
+<div class="dv-opt" id="1e"><div class="dv-olabel"><a class="dv-oid" href="#1e">1e</a>Mail — smart mailboxes across accounts (live)</div>
+<x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" hint-size="402px,874px">
+<div style="height:100%;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body);font-size:15px">
+  <div style="padding:60px 22px 10px;display:flex;align-items:baseline;gap:10px"><div style="font-family:var(--font-heading);font-weight:600;font-size:23px">{{ filter }}</div><div style="margin-left:auto;display:flex;gap:7px;align-items:center;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 60%,transparent)"><span style="width:7px;height:7px;border-radius:50%;background:var(--color-accent)"></span>2 accounts</div></div>
+  <div style="display:flex;gap:8px;padding:6px 22px 12px;border-bottom:1px solid var(--color-divider);overflow:auto">
+    <sc-for list="{{ chips }}" as="c" hint-placeholder-count="5">
+      <span onClick="{{ c.pick }}" style="flex:none;padding:5px 12px;border-radius:999px;font-size:12.5px;cursor:pointer;border:1px solid {{ c.ring }};color:{{ c.fg }};background:{{ c.bg }}">{{ c.label }}</span>
+    </sc-for>
+  </div>
+  <div style="flex:1;overflow:auto">
+    <sc-if value="{{ smartRule }}" hint-placeholder-val="{{ false }}">
+      <div style="padding:10px 22px;border-bottom:1px solid var(--color-divider);font-size:12px;font-style:italic;color:color-mix(in srgb,var(--color-text) 55%,transparent)">{{ smartRule }}</div>
+    </sc-if>
+    <sc-for list="{{ mail }}" as="m" hint-placeholder-count="6">
+      <div style="padding:13px 22px 13px 14px;border-bottom:1px solid var(--color-divider);display:flex;gap:9px">
+        <span style="width:6px;height:6px;border-radius:50%;flex:none;margin-top:8px;background:{{ m.dot }}"></span>
+        <span style="flex:1;min-width:0">
+          <span style="display:flex;align-items:baseline;gap:8px"><span style="font-size:15px;font-weight:{{ m.weight }}">{{ m.from }}</span><span style="margin-left:auto;font-size:11px;font-variant-numeric:tabular-nums;color:color-mix(in srgb,var(--color-text) 62%,transparent)">{{ m.time }}</span></span>
+          <span style="display:block;font-size:14px;margin-top:2px">{{ m.subj }}</span>
+          <span style="display:block;font-size:13px;line-height:1.5;margin-top:2px;color:color-mix(in srgb,var(--color-text) 55%,transparent);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ m.snip }}</span>
+          <sc-if value="{{ m.agent }}" hint-placeholder-val="{{ false }}"><span style="display:inline-flex;margin-top:7px;font-size:11px;color:var(--color-accent);border-bottom:1px solid var(--color-accent-300);padding-bottom:1px">{{ m.agent }}</span></sc-if>
+        </span>
+        <span style="font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 55%,transparent);writing-mode:vertical-rl;margin-top:2px">{{ m.acct }}</span>
+      </div>
+    </sc-for>
+  </div>
+  <div style="display:flex;border-top:1px solid var(--color-divider);padding:9px 10px 26px">
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"></path><path d="M20 2v4"></path><path d="M22 4h-4"></path><circle cx="4" cy="20" r="2"></circle></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Ask</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:var(--color-accent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Mail</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4"></path><path d="M10 9H8"></path><path d="M16 13H8"></path><path d="M16 17H8"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Notes</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Calendar</span></div>
+  </div>
+</div>
+</x-import></div>
+
+<div class="dv-opt" id="1f"><div class="dv-olabel"><a class="dv-oid" href="#1f">1f</a>Reading a thread — the agent's draft sits in it</div>
+<x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" hint-size="402px,874px">
+<div style="height:100%;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body);font-size:15px">
+  <div style="padding:60px 20px 10px;border-bottom:1px solid var(--color-divider);display:flex;align-items:center;gap:12px;font-size:13px"><span style="color:var(--color-accent)">‹ Recruiters</span><span style="margin-left:auto;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Archive</span><span style="color:color-mix(in srgb,var(--color-text) 62%,transparent)">⋯</span></div>
+  <div style="flex:1;overflow:auto;padding:20px 22px 8px">
+    <div style="font-family:var(--font-heading);font-weight:600;font-size:24px;line-height:1.2">Staff Product Designer at Kettle</div>
+    <div style="display:flex;gap:9px;align-items:baseline;margin-top:10px;font-size:13px;color:color-mix(in srgb,var(--color-text) 60%,transparent)"><span style="color:var(--color-text)">Priya Raghavan</span><span>· to me</span><span style="margin-left:auto;font-variant-numeric:tabular-nums">9:12</span></div>
+    <div class="hr" style="margin:14px 0"></div>
+    <div style="font-size:14.5px;line-height:1.75;text-align:justify;hyphens:auto">Hi Maya — I came across your work on the Northbound reader and wanted to check whether you're open to a conversation. We're hiring a staff designer to own the composer end to end.</div>
+    <div style="font-size:14.5px;line-height:1.75;text-align:justify;hyphens:auto;margin-top:12px">If it's interesting, the next step is a 30-minute intro with our head of design, then a portfolio session the week after. I've attached the role outline.</div>
+    <div style="display:flex;gap:9px;margin-top:14px;align-items:center"><span class="tag tag-neutral">Kettle — Staff Designer.pdf</span><span style="font-size:11px;color:color-mix(in srgb,var(--color-text) 62%,transparent);font-variant-numeric:tabular-nums">240 KB</span></div>
+    <div style="margin-top:20px;border:1px solid var(--color-accent);border-radius:var(--radius-md);padding:14px 15px">
+      <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:9px"><span style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-accent)">Job Search Tracker</span><span style="margin-left:auto;font-size:11px;color:color-mix(in srgb,var(--color-text) 62%,transparent)">waiting on you</span></div>
+      <div style="font-size:14px;line-height:1.7">Two next steps found — <span style="font-style:italic">30-min intro</span> and <span style="font-style:italic">portfolio session</span>. Ready to add them to Notion → Jobs.</div>
+      <div style="display:flex;gap:8px;margin-top:12px"><button class="btn btn-primary" onClick="{{ noop }}">Approve</button><button class="btn btn-secondary" onClick="{{ noop }}">Edit</button><button class="btn btn-ghost" onClick="{{ noop }}">Skip</button></div>
+    </div>
+    <div class="hr" style="margin:20px 0 8px"></div>
+    <div style="font-size:12px;color:color-mix(in srgb,var(--color-text) 62%,transparent);font-style:italic;padding-bottom:10px">Filed in Recruiters · maya@gmail.com</div>
+  </div>
+  <div style="border-top:1px solid var(--color-divider);padding:11px 20px 30px;display:flex;gap:10px;align-items:center">
+    <span style="flex:1;border:1px solid var(--color-divider);border-radius:999px;padding:10px 15px;font-size:13.5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Reply, or ask for a draft…</span>
+    <span style="width:38px;height:38px;flex:none;border:1px solid var(--color-accent);border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--color-accent)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"></path><path d="M20 2v4"></path><path d="M22 4h-4"></path><circle cx="4" cy="20" r="2"></circle></svg></span>
+  </div>
+</div>
+</x-import></div>
+
+</div>
+<div class="dv-opts" style="margin-top:30px">
+
+<div class="dv-opt" id="1g"><div class="dv-olabel"><a class="dv-oid" href="#1g">1g</a>Mailboxes — accounts above, smart boxes below</div>
+<x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" hint-size="402px,874px">
+<div style="height:100%;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body);font-size:15px">
+  <div style="padding:62px 22px 12px;border-bottom:1px solid var(--color-divider);display:flex;align-items:baseline"><div style="font-family:var(--font-heading);font-weight:600;font-size:23px">Mailboxes</div><div style="margin-left:auto;color:var(--color-accent);font-size:13px">Edit</div></div>
+  <div style="flex:1;overflow:auto">
+    <div style="padding:16px 22px 6px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Accounts</div>
+    <div style="padding:12px 22px;border-top:1px solid var(--color-divider);border-bottom:1px solid var(--color-divider);display:flex;align-items:baseline;gap:10px;background:var(--color-accent-100)"><span style="width:7px;height:7px;border-radius:50%;background:var(--color-accent)"></span><span><span style="font-size:15px">All inboxes</span><br><span style="font-size:12px;color:color-mix(in srgb,var(--color-text) 55%,transparent)">Both accounts, one list</span></span><span style="margin-left:auto;font-variant-numeric:tabular-nums;font-size:13px;color:var(--color-accent-800)">12</span></div>
+    <div style="padding:12px 22px;border-bottom:1px solid var(--color-divider);display:flex;align-items:baseline;gap:10px"><span style="width:7px;height:7px;border-radius:50%;border:1px solid var(--color-neutral-500)"></span><span><span style="font-size:15px">maya@gmail.com</span><br><span style="font-size:12px;color:color-mix(in srgb,var(--color-text) 55%,transparent)">Personal</span></span><span style="margin-left:auto;font-variant-numeric:tabular-nums;font-size:13px;color:color-mix(in srgb,var(--color-text) 60%,transparent)">9</span></div>
+    <div style="padding:12px 22px;border-bottom:1px solid var(--color-divider);display:flex;align-items:baseline;gap:10px"><span style="width:7px;height:7px;border-radius:50%;border:1px solid var(--color-neutral-500)"></span><span><span style="font-size:15px">maya@northbound.co</span><br><span style="font-size:12px;color:color-mix(in srgb,var(--color-text) 55%,transparent)">Work</span></span><span style="margin-left:auto;font-variant-numeric:tabular-nums;font-size:13px;color:color-mix(in srgb,var(--color-text) 60%,transparent)">3</span></div>
+    <div style="padding:20px 22px 6px;display:flex;align-items:baseline"><span style="font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Smart mailboxes</span><span style="margin-left:auto;font-size:12px;color:var(--color-accent)">＋ New</span></div>
+    <div style="padding:13px 22px;border-top:1px solid var(--color-divider)"><div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:15px">Recruiters</span><span style="margin-left:auto;font-variant-numeric:tabular-nums;font-size:13px;color:var(--color-accent)">2</span></div><div style="font-size:12px;color:color-mix(in srgb,var(--color-text) 62%,transparent);margin-top:3px">From recruiter domains · about roles · both accounts</div></div>
+    <div style="padding:13px 22px;border-top:1px solid var(--color-divider)"><div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:15px">Travel</span><span style="margin-left:auto;font-variant-numeric:tabular-nums;font-size:13px;color:color-mix(in srgb,var(--color-text) 60%,transparent)">7</span></div><div style="font-size:12px;color:color-mix(in srgb,var(--color-text) 62%,transparent);margin-top:3px">Airlines, hotels, anything with a booking code</div></div>
+    <div style="padding:13px 22px;border-top:1px solid var(--color-divider)"><div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:15px">Bills</span><span style="margin-left:auto;font-variant-numeric:tabular-nums;font-size:13px;color:var(--color-accent)">1</span></div><div style="font-size:12px;color:color-mix(in srgb,var(--color-text) 62%,transparent);margin-top:3px">Recurring senders with an amount due · Tempe forwards to Kamran</div></div>
+    <div style="padding:13px 22px;border-top:1px solid var(--color-divider)"><div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:15px">Launches</span><span style="margin-left:auto;font-variant-numeric:tabular-nums;font-size:13px;color:color-mix(in srgb,var(--color-text) 60%,transparent)">4</span></div><div style="font-size:12px;color:color-mix(in srgb,var(--color-text) 62%,transparent);margin-top:3px">Subject contains launch, ship, or GA · work only</div></div>
+    <div style="padding:13px 22px;border-top:1px solid var(--color-divider);border-bottom:1px solid var(--color-divider)"><div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:15px">Newsletters</span><span style="margin-left:auto;font-variant-numeric:tabular-nums;font-size:13px;color:color-mix(in srgb,var(--color-text) 60%,transparent)">31</span></div><div style="font-size:12px;color:color-mix(in srgb,var(--color-text) 62%,transparent);margin-top:3px">Bulk senders · Weekly Unsubscribe watches this box</div></div>
+    <div style="padding:20px 22px 6px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Standard</div>
+    <div style="display:flex;flex-wrap:wrap;border-top:1px solid var(--color-divider)"><span style="width:50%;padding:12px 22px;border-bottom:1px solid var(--color-divider);font-size:14px">Drafts</span><span style="width:50%;padding:12px 22px;border-bottom:1px solid var(--color-divider);border-left:1px solid var(--color-divider);font-size:14px">Sent</span><span style="width:50%;padding:12px 22px;border-bottom:1px solid var(--color-divider);font-size:14px">Archive</span><span style="width:50%;padding:12px 22px;border-bottom:1px solid var(--color-divider);border-left:1px solid var(--color-divider);font-size:14px">Junk</span></div>
+    <div style="height:24px"></div>
+  </div>
+  <div style="display:flex;border-top:1px solid var(--color-divider);padding:9px 10px 26px">
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"></path><path d="M20 2v4"></path><path d="M22 4h-4"></path><circle cx="4" cy="20" r="2"></circle></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Ask</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:var(--color-accent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Mail</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4"></path><path d="M10 9H8"></path><path d="M16 13H8"></path><path d="M16 17H8"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Notes</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Calendar</span></div>
+  </div>
+</div>
+</x-import></div>
+
+<div class="dv-opt" id="1h"><div class="dv-olabel"><a class="dv-oid" href="#1h">1h</a>Notes — a plain list (live: tap to load into <a class="dv-oid" href="#1i">1i</a>)</div>
+<x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" hint-size="402px,874px">
+<div style="height:100%;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body);font-size:15px">
+  <div style="padding:62px 22px 12px;display:flex;align-items:baseline"><div style="font-family:var(--font-heading);font-weight:600;font-size:23px">Notes</div><div style="margin-left:auto;color:var(--color-accent);font-size:20px">＋</div></div>
+  <div style="padding:0 22px 12px"><span style="display:block;border:1px solid var(--color-divider);border-radius:999px;padding:8px 14px;font-size:13.5px;color:color-mix(in srgb,var(--color-text) 60%,transparent)">Search notes</span></div>
+  <div style="flex:1;overflow:auto">
+    <sc-for list="{{ notes }}" as="n" hint-placeholder-count="5">
+      <div onClick="{{ n.pick }}" style="padding:14px 22px;border-top:1px solid var(--color-divider);cursor:pointer;border-left:2px solid {{ n.ring }}">
+        <div style="font-family:var(--font-heading);font-weight:600;font-size:17px">{{ n.title }}</div>
+        <div style="font-size:12px;color:color-mix(in srgb,var(--color-text) 60%,transparent);margin-top:4px;font-variant-numeric:tabular-nums">{{ n.meta }}</div>
+      </div>
+    </sc-for>
+    <div style="border-top:1px solid var(--color-divider);padding:16px 22px;font-size:12px;font-style:italic;color:color-mix(in srgb,var(--color-text) 60%,transparent)">Recipe Clipper and Job Search Tracker write into Notes. Their edits show a gold rule until you open them.</div>
+  </div>
+  <div style="display:flex;border-top:1px solid var(--color-divider);padding:9px 10px 26px">
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"></path><path d="M20 2v4"></path><path d="M22 4h-4"></path><circle cx="4" cy="20" r="2"></circle></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Ask</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Mail</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:var(--color-accent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4"></path><path d="M10 9H8"></path><path d="M16 13H8"></path><path d="M16 17H8"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Notes</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Calendar</span></div>
+  </div>
+</div>
+</x-import></div>
+
+<div class="dv-opt" id="1i"><div class="dv-olabel"><a class="dv-oid" href="#1i">1i</a>Note — markdown, read or write (live: edit the source)</div>
+<x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" hint-size="402px,874px">
+<div style="height:100%;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body);font-size:15px">
+  <div style="padding:60px 20px 10px;border-bottom:1px solid var(--color-divider);display:flex;align-items:center;gap:10px;font-size:13px">
+    <span style="color:var(--color-accent)">‹ Notes</span>
+    <span style="margin-left:auto;display:inline-flex;border:1px solid var(--color-divider);border-radius:var(--radius-md);overflow:hidden">
+      <span onClick="{{ readMode }}" style="padding:5px 12px;font-size:12px;cursor:pointer;color:{{ readColor }}">Read</span>
+      <span onClick="{{ writeMode }}" style="padding:5px 12px;font-size:12px;cursor:pointer;border-left:1px solid var(--color-divider);color:{{ writeColor }}">Write</span>
+    </span>
+  </div>
+  <div style="flex:1;overflow:auto;padding:16px 22px 20px">
+    <sc-if value="{{ isRead }}" hint-placeholder-val="{{ true }}">
+      <div>{{ preview }}</div>
+    </sc-if>
+    <sc-if value="{{ isWrite }}" hint-placeholder-val="{{ false }}">
+      <textarea class="input" value="{{ noteSrc }}" onChange="{{ onMd }}" style="width:100%;min-height:520px;font-family:ui-monospace,Menlo,monospace;font-size:12.5px;line-height:1.75;border:none;padding:0;background:transparent;resize:none"></textarea>
+    </sc-if>
+  </div>
+  <div style="border-top:1px solid var(--color-divider);padding:10px 20px 30px;display:flex;gap:14px;align-items:center;font-size:12px;color:color-mix(in srgb,var(--color-text) 62%,transparent)">
+    <span style="font-family:ui-monospace,Menlo,monospace">#</span><span style="font-weight:600">B</span><span style="font-style:italic">I</span><span>☐</span><span style="font-family:ui-monospace,Menlo,monospace">`</span><span>❝</span><span style="margin-left:auto;font-variant-numeric:tabular-nums">Saved</span>
+  </div>
+</div>
+</x-import></div>
+
+<div class="dv-opt" id="1j"><div class="dv-olabel"><a class="dv-oid" href="#1j">1j</a>Calendar — six days, each a compressed timeline (live)</div>
+<x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" hint-size="402px,874px">
+<div style="height:100%;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body);font-size:15px">
+  <div style="padding:62px 22px 12px;display:flex;align-items:baseline;gap:10px"><div style="font-family:var(--font-heading);font-weight:600;font-size:23px">August</div><div style="font-size:13px;color:color-mix(in srgb,var(--color-text) 62%,transparent);font-variant-numeric:tabular-nums">17 — 22</div><div style="margin-left:auto;display:flex;gap:14px;color:var(--color-accent);font-size:14px"><span>‹</span><span>›</span></div></div>
+  <div style="flex:1;display:grid;grid-template-columns:1fr 1fr 1fr;grid-template-rows:1fr 1fr;border-top:1px solid var(--color-divider)">
+    <sc-for list="{{ days }}" as="d" hint-placeholder-count="6">
+      <div onClick="{{ d.pick }}" style="border-right:1px solid var(--color-divider);border-bottom:1px solid var(--color-divider);padding:11px 11px 10px;display:flex;flex-direction:column;cursor:pointer;background:{{ d.bg }};box-shadow:inset 0 0 0 1px {{ d.ring }}">
+        <div style="display:flex;align-items:baseline;gap:5px;margin-bottom:9px"><span style="font-family:var(--font-heading);font-weight:400;font-size:22px;font-variant-numeric:tabular-nums;color:{{ d.num }}">{{ d.n }}</span><span style="font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 62%,transparent)">{{ d.name }}</span></div>
+        <div style="flex:1;border-left:1px solid var(--color-divider);padding-left:9px;display:flex;flex-direction:column;gap:8px">
+          <sc-for list="{{ d.items }}" as="it" hint-placeholder-count="3">
+            <div style="position:relative"><span style="position:absolute;left:-12px;top:5px;width:5px;height:1px;background:var(--color-accent)"></span><div style="font-size:9.5px;font-variant-numeric:tabular-nums;letter-spacing:.03em;color:var(--color-accent-700)">{{ it.t }}</div><div style="font-size:11.5px;line-height:1.25;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ it.n }}</div></div>
+          </sc-for>
+        </div>
+      </div>
+    </sc-for>
+  </div>
+  <div style="border-top:1px solid var(--color-divider);padding:13px 22px 8px">
+    <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:8px"><span style="font-family:var(--font-heading);font-weight:600;font-size:16px">{{ sel.name }} {{ sel.n }}</span><span style="margin-left:auto;font-size:11px;color:var(--color-accent)">Add event</span></div>
+    <sc-for list="{{ sel.items }}" as="it" hint-placeholder-count="4">
+      <div style="display:flex;gap:12px;padding:7px 0;border-top:1px solid var(--color-divider);font-size:13.5px"><span style="font-variant-numeric:tabular-nums;color:var(--color-accent-700);width:44px">{{ it.t }}</span><span>{{ it.n }}</span></div>
+    </sc-for>
+  </div>
+  <div style="display:flex;border-top:1px solid var(--color-divider);padding:9px 10px 26px">
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"></path><path d="M20 2v4"></path><path d="M22 4h-4"></path><circle cx="4" cy="20" r="2"></circle></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Ask</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Mail</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4"></path><path d="M10 9H8"></path><path d="M16 13H8"></path><path d="M16 17H8"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Notes</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:var(--color-accent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Calendar</span></div>
+  </div>
+</div>
+</x-import></div>
+
+<div class="dv-opt" id="1k"><div class="dv-olabel"><a class="dv-oid" href="#1k">1k</a>Settings</div>
+<x-import component-from-global-scope="IOSDevice" from="./ios-frame.jsx" hint-size="402px,874px">
+<div style="height:100%;display:flex;flex-direction:column;background:var(--color-bg);color:var(--color-text);font-family:var(--font-body);font-size:15px">
+  <div style="padding:62px 22px 12px;border-bottom:1px solid var(--color-divider)"><div style="font-family:var(--font-heading);font-weight:600;font-size:23px">Settings</div></div>
+  <div style="flex:1;overflow:auto">
+    <div style="padding:18px 22px 6px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Accounts</div>
+    <div style="padding:13px 22px;border-top:1px solid var(--color-divider);display:flex;align-items:baseline"><span style="font-size:14.5px">maya@gmail.com</span><span style="margin-left:auto;font-size:12px;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Personal ›</span></div>
+    <div style="padding:13px 22px;border-top:1px solid var(--color-divider);display:flex;align-items:baseline"><span style="font-size:14.5px">maya@northbound.co</span><span style="margin-left:auto;font-size:12px;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Work ›</span></div>
+    <div style="padding:13px 22px;border-top:1px solid var(--color-divider);border-bottom:1px solid var(--color-divider);color:var(--color-accent);font-size:14.5px">＋ Add mailbox</div>
+    <div style="padding:20px 22px 6px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Agents</div>
+    <div style="padding:13px 22px;border-top:1px solid var(--color-divider);display:flex;align-items:center"><span><span style="font-size:14.5px">Approve before sending</span><br><span style="font-size:12px;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Applies to every new agent</span></span><span style="margin-left:auto;width:46px;height:26px;flex:none;border-radius:999px;border:1px solid var(--color-accent);background:var(--color-accent-100);position:relative"><span style="position:absolute;top:2px;left:22px;width:20px;height:20px;border-radius:50%;background:var(--color-accent)"></span></span></div>
+    <div style="padding:13px 22px;border-top:1px solid var(--color-divider);display:flex;align-items:baseline"><span style="font-size:14.5px">Run log</span><span style="margin-left:auto;font-size:12px;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Last 30 days ›</span></div>
+    <div style="padding:13px 22px;border-top:1px solid var(--color-divider);border-bottom:1px solid var(--color-divider);display:flex;align-items:baseline"><span style="font-size:14.5px">Connected tools</span><span style="margin-left:auto;font-size:12px;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Notion, Slack ›</span></div>
+    <div style="padding:20px 22px 6px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Reading</div>
+    <div style="padding:13px 22px;border-top:1px solid var(--color-divider);display:flex;align-items:baseline"><span style="font-size:14.5px">Swipe actions</span><span style="margin-left:auto;font-size:12px;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Archive, Snooze ›</span></div>
+    <div style="padding:13px 22px;border-top:1px solid var(--color-divider);border-bottom:1px solid var(--color-divider);display:flex;align-items:baseline"><span style="font-size:14.5px">Text size</span><span style="margin-left:auto;font-size:12px;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Default ›</span></div>
+    <div style="padding:18px 22px 26px;font-size:12px;font-style:italic;color:color-mix(in srgb,var(--color-text) 62%,transparent)">Version 1.0 — mail stays on device between runs.</div>
+  </div>
+  <div style="display:flex;border-top:1px solid var(--color-divider);padding:9px 10px 26px">
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z"></path><path d="M20 2v4"></path><path d="M22 4h-4"></path><circle cx="4" cy="20" r="2"></circle></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Ask</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="16" x="2" y="4" rx="2"></rect><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Mail</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4"></path><path d="M10 9H8"></path><path d="M16 13H8"></path><path d="M16 17H8"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Notes</span></div>
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;color:color-mix(in srgb,var(--color-text) 62%,transparent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"></path><path d="M16 2v4"></path><rect width="18" height="18" x="3" y="4" rx="2"></rect><path d="M3 10h18"></path></svg><span style="font-size:10.5px;letter-spacing:.09em;text-transform:uppercase">Calendar</span></div>
+  </div>
+</div>
+</x-import></div>
+
+</div>
+<p class="dv-next">Try next: "make the builder a guided When → What → Review flow instead" · "show the agent run log" · "denser mail list"</p>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:2600,&quot;height&quot;:1100}}">
+const ACC = 'var(--color-accent)', DIM = 'color-mix(in srgb,var(--color-text) 62%,transparent)', DIV = 'var(--color-divider)';
+
+const MAIL = [
+  { from: 'Priya Raghavan', subj: 'Staff Product Designer at Kettle', snip: "Wanted to check whether you're open to a conversation.", time: '9:12', unread: true, acct: 'personal', box: ['Recruiters'], agent: 'Job Search Tracker drafted next steps' },
+  { from: 'United MileagePlus', subj: 'Your flight UA 1143 to SFO', snip: 'Boarding pass ready — seat 14C, gate B22.', time: '8:40', unread: false, acct: 'personal', box: ['Travel'], agent: 'United Status Watch: 4 of 12 segments' },
+  { from: 'City of Tempe Utilities', subj: 'Statement 4471 — $86.20 due', snip: 'Your August statement is ready to view.', time: '8:31', unread: true, acct: 'personal', box: ['Bills'], agent: 'Forwarded to Kamran — awaiting approval' },
+  { from: 'Ellis Weber', subj: 'Re: Saturday viewing, 1420 Larch', snip: 'Could you share income details before we confirm?', time: '8:02', unread: true, acct: 'personal', box: [] },
+  { from: 'Ana Duarte', subj: 'Offsite: Seattle, first pass', snip: 'Three venue options, all inside the $20 a head budget.', time: 'Yesterday', unread: false, acct: 'work', box: [] },
+  { from: 'Kettle Engineering', subj: 'Launch: composer v3 is live', snip: 'Rolling out to all workspaces from Monday.', time: 'Yesterday', unread: false, acct: 'work', box: ['Launches'] },
+  { from: 'Serious Eats', subj: 'Miso short ribs, and 4 more', snip: 'This week from the test kitchen.', time: 'Fri', unread: false, acct: 'personal', box: ['Newsletters'] },
+  { from: 'Delta SkyMiles', subj: 'Receipt — PDX to SEA', snip: '$214.30 charged to card ending 4417.', time: 'Fri', unread: false, acct: 'personal', box: ['Travel', 'Receipts'] },
+];
+
+const RULES = {
+  'All Mail': '',
+  Unread: 'Unread across both accounts',
+  Recruiters: 'From: known recruiter domains · About: roles — 2 accounts',
+  Travel: 'Airlines, hotels, and anything with a booking code',
+  Bills: 'Recurring senders with an amount due',
+  Launches: 'Subject contains launch, ship, or GA — work account only',
+};
+
+class Component extends DCLogic {
+  state = {
+    q: '', mode: 'idle', asked: '', saved: false,
+    filter: 'All Mail',
+    inv: 'auto', openInv: true, openInp: false, openTool: false, openSet: false,
+    status: 'Draft', approval: true, tools: { Notion: true, Slack: false, 'Web access': false, Calendar: false },
+    every: 1, unit: 'week', days: [false, true, true, true, true, true, false], ends: 'never',
+    noteId: 0, noteMode: 'read', md: null, day: 3,
+    hm: 'feed', done: {}, copied: '',
+  };
+
+  radio(on) {
+    return on
+      ? { ring: ACC, fill: ACC, inner: 'inset 0 0 0 4px var(--color-bg)' }
+      : { ring: DIV, fill: 'transparent', inner: 'none' };
+  }
+
+  renderVals() {
+    const s = this.state;
+    const set = (o) => this.setState(o);
+
+    const prompts = [
+      { n: '01', t: 'Forward the Tempe utility bills to Kamran, ask him to transfer them' },
+      { n: '02', t: "Keep a tab on my United flights this year — how close am I to status?" },
+      { n: '03', t: "Unsubscribe from newsletters I haven't opened in a while" },
+    ].map((p) => ({ ...p, run: () => this.fire(p.t) }));
+
+    const filtered = MAIL.filter((m) => {
+      if (s.filter === 'All Mail') return true;
+      if (s.filter === 'Unread') return m.unread;
+      return m.box.indexOf(s.filter) > -1;
+    });
+
+    const invModes = [
+      { key: 'auto', label: 'When mail arrives', hint: 'Runs on its own, on matching mail' },
+      { key: 'manual', label: 'Only when I ask', hint: 'You tap Run on the agent' },
+      { key: 'sched', label: 'On a schedule', hint: 'Daily, weekly, or a custom repeat' },
+    ].map((m) => ({ ...m, ...this.radio(s.inv === m.key), pick: (e) => { e.stopPropagation(); set({ inv: m.key }); } }));
+
+    const tools = ['Notion', 'Slack', 'Web access', 'Calendar'].map((name) => ({
+      name,
+      note: { Notion: 'Jobs page', Slack: 'DM me', 'Web access': 'read only', Calendar: 'busy times' }[name],
+      tick: s.tools[name] ? '✓' : '',
+      mark: ACC,
+      toggle: (e) => { e.stopPropagation(); set({ tools: { ...s.tools, [name]: !s.tools[name] } }); },
+    }));
+    const onTools = Object.keys(s.tools).filter((k) => s.tools[k]);
+
+    const DOW = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
+    const dow = DOW.map((l, i) => ({
+      l, toggle: () => { const d = s.days.slice(); d[i] = !d[i]; set({ days: d }); },
+      ring: s.days[i] ? ACC : DIV,
+      bg: s.days[i] ? 'var(--color-accent-100)' : 'transparent',
+      fg: s.days[i] ? 'var(--color-accent-800)' : DIM,
+    }));
+
+    const endOpts = [
+      { key: 'never', label: 'Never', val: '' },
+      { key: 'on', label: 'On', val: '6 Jan 2027' },
+      { key: 'after', label: 'After', val: '13 runs' },
+    ].map((e) => ({ ...e, ...this.radio(s.ends === e.key), pick: () => set({ ends: e.key }), valColor: s.ends === e.key ? 'var(--color-text)' : DIM }));
+
+    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const picked = s.days.map((d, i) => (d ? dayNames[i] : null)).filter(Boolean);
+    const recurSummary = 'Every ' + (s.every > 1 ? s.every + ' ' + s.unit + 's' : s.unit) + (s.unit === 'week' && picked.length ? ' · ' + (picked.length === 5 && !s.days[0] && !s.days[6] ? 'weekdays' : picked.join(' ')) : '');
+
+    return {
+      prompts, agents: AGENTS,
+      q: s.q, asked: s.asked, saved: s.saved,
+      isIdle: s.mode === 'idle', isSearch: s.mode === 'search', isAgent: s.mode === 'agent',
+      onQ: (e) => set({ q: e.target.value }),
+      send: () => this.fire(s.q),
+      reset: () => set({ mode: 'idle', q: '', saved: false }),
+      toAgent: () => set({ mode: 'agent', saved: false }),
+      save: () => set({ saved: true }),
+      draftName: this.draft().name, draftWhen: this.draft().when, draftDo: this.draft().does, draftTool: this.draft().tool,
+      hits: [
+        { from: 'United MileagePlus', subj: 'Your flight UA 1143 to SFO — 8 Sep', time: '8:40' },
+        { from: 'United MileagePlus', subj: 'Receipt: SFO–EWR, confirmation K7QP2M', time: '2 Aug' },
+        { from: 'United MileagePlus', subj: 'Premier Silver — 18,760 PQP to go', time: '21 Jul' },
+      ],
+
+      filter: s.filter, mail: filtered.map((m) => ({ ...m, dot: m.unread ? ACC : 'transparent', weight: m.unread ? 600 : 400 })),
+      smartRule: RULES[s.filter],
+      chips: Object.keys(RULES).map((label) => ({
+        label, pick: () => set({ filter: label }),
+        ring: s.filter === label ? ACC : DIV,
+        fg: s.filter === label ? 'var(--color-accent-800)' : 'color-mix(in srgb,var(--color-text) 62%,transparent)',
+        bg: s.filter === label ? 'var(--color-accent-100)' : 'transparent',
+      })),
+
+      openInv: s.openInv, openInp: s.openInp, openTool: s.openTool, openSet: s.openSet,
+      tInv: () => set({ openInv: !s.openInv }), tInp: () => set({ openInp: !s.openInp }),
+      tTool: () => set({ openTool: !s.openTool }), tSet: () => set({ openSet: !s.openSet }),
+      invModes, tools,
+      invSummary: { auto: 'Automatic', manual: 'Manual', sched: 'Scheduled' }[s.inv],
+      toolSummary: onTools.length ? onTools.join(', ') : 'None',
+      setSummary: s.status + (s.approval ? ' · asks first' : ' · runs alone'),
+      setNote: s.approval ? 'Nothing leaves your account without your tap.' : 'This agent will send and file on its own.',
+      setDraft: (e) => { e.stopPropagation(); set({ status: 'Draft' }); },
+      setPub: (e) => { e.stopPropagation(); set({ status: 'Published' }); },
+      draftColor: s.status === 'Draft' ? ACC : 'inherit', pubColor: s.status === 'Published' ? ACC : 'inherit',
+      draftRing: s.status === 'Draft' ? 'inset 0 0 0 1px ' + ACC : 'none',
+      pubRing: s.status === 'Published' ? 'inset 0 0 0 1px ' + ACC : 'none',
+      tAppr: (e) => { e.stopPropagation(); set({ approval: !s.approval }); },
+      apprRing: s.approval ? ACC : DIV, apprBg: s.approval ? 'var(--color-accent-100)' : 'transparent',
+      apprX: s.approval ? '22px' : '2px', apprKnob: s.approval ? ACC : 'var(--color-neutral-400)',
+
+      every: s.every, unit: s.unit, dow, endOpts, recurSummary,
+      incEvery: () => set({ every: Math.min(30, s.every + 1) }),
+      decEvery: () => set({ every: Math.max(1, s.every - 1) }),
+      cycleUnit: () => { const u = ['day', 'week', 'month']; set({ unit: u[(u.indexOf(s.unit) + 1) % 3] }); },
+      notes: NOTES.map((n, i) => ({ ...n, pick: () => set({ noteId: i, md: null }), ring: i === s.noteId ? ACC : DIV })),
+      note: NOTES[s.noteId], noteSrc: s.md === null ? NOTES[s.noteId].md : s.md,
+      onMd: (e) => set({ md: e.target.value }),
+      isRead: s.noteMode === 'read', isWrite: s.noteMode === 'write',
+      readMode: () => set({ noteMode: 'read' }), writeMode: () => set({ noteMode: 'write' }),
+      readColor: s.noteMode === 'read' ? ACC : DIM, writeColor: s.noteMode === 'write' ? ACC : DIM,
+      preview: React.createElement('div', {
+        style: { fontSize: 14.5, lineHeight: 1.7 },
+        dangerouslySetInnerHTML: { __html: this.mdHtml(s.md === null ? NOTES[s.noteId].md : s.md) },
+      }),
+      days: DAYS.map((d, i) => ({
+        ...d, pick: () => set({ day: i }),
+        ring: i === s.day ? ACC : DIV,
+        num: i === s.day ? ACC : 'var(--color-text)',
+        bg: i === s.day ? 'var(--color-accent-100)' : 'transparent',
+      })),
+      sel: DAYS[s.day],
+      feedDisplay: s.hm === 'feed' ? 'flex' : 'none',
+      focusDisplay: s.hm === 'focus' ? 'flex' : 'none',
+      openFeed: () => set({ hm: 'feed' }), closeFeed: () => set({ hm: 'focus' }),
+      newCount: FEED.filter((f) => f.fresh && !s.done[f.id]).length,
+      feed: FEED.map((f) => ({
+        ...f,
+        rule: f.needs && !s.done[f.id] ? ACC : 'transparent',
+        isApprove: f.kind === 'approve' && !s.done[f.id],
+        isOtp: f.kind === 'otp',
+        resolved: s.done[f.id] || '',
+        copyLabel: s.copied === f.id ? 'Copied' : 'Copy',
+        noop: () => {},
+        copy: () => set({ copied: f.id }),
+        approve: () => set({ done: { ...s.done, [f.id]: f.after } }),
+        skip: () => set({ done: { ...s.done, [f.id]: 'Skipped — left in the mailbox.' } }),
+      })),
+      noop: () => {},
+    };
+  }
+
+  mdHtml(src) {
+    const esc = (t) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const inline = (t) => esc(t)
+      .replace(/`([^`]+)`/g, '<code style="font-family:ui-monospace,Menlo,monospace;font-size:12.5px;background:var(--color-neutral-200);padding:1px 5px;border-radius:2px">$1</code>')
+      .replace(/\[\[([^\]]+)\]\]/g, '<span style="color:var(--color-accent-700);border-bottom:1px solid var(--color-accent-300)">$1</span>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong style="font-weight:600">$1</strong>')
+      .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+      .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" style="color:var(--color-accent-700);text-underline-offset:3px">$1</a>');
+    const out = []; let list = false;
+    const close = () => { if (list) { out.push('</ul>'); list = false; } };
+    src.split('\n').forEach((raw) => {
+      const l = raw.trim();
+      if (!l) { close(); return; }
+      let m = l.match(/^(#{1,3})\s+(.*)/);
+      if (m) { close(); const sz = [25, 19, 16][m[1].length - 1]; out.push('<div style="font-family:var(--font-heading);font-weight:600;font-size:' + sz + 'px;line-height:1.15;margin:16px 0 8px">' + inline(m[2]) + '</div>'); return; }
+      if (l === '---') { close(); out.push('<div style="height:1px;background:var(--color-divider);margin:16px 0"></div>'); return; }
+      if (l[0] === '>') { close(); out.push('<div style="border-left:2px solid var(--color-accent);padding-left:12px;margin:12px 0;font-style:italic;opacity:.82">' + inline(l.slice(1).trim()) + '</div>'); return; }
+      m = l.match(/^-\s+\[( |x)\]\s+(.*)/);
+      if (m) {
+        close();
+        const done = m[1] === 'x';
+        out.push('<div style="display:flex;gap:10px;align-items:baseline;margin:7px 0"><span style="width:14px;height:14px;flex:none;border:1px solid ' + (done ? ACC : DIV) + ';border-radius:2px;display:inline-flex;align-items:center;justify-content:center;font-size:9px;color:' + ACC + ';transform:translateY(2px)">' + (done ? '✓' : '') + '</span><span style="' + (done ? 'opacity:.45;text-decoration:line-through' : '') + '">' + inline(m[2]) + '</span></div>');
+        return;
+      }
+      m = l.match(/^[-*]\s+(.*)/);
+      if (m) { if (!list) { out.push('<ul style="margin:8px 0;padding-left:18px">'); list = true; } out.push('<li style="margin:4px 0">' + inline(m[1]) + '</li>'); return; }
+      close(); out.push('<p style="margin:0 0 11px;text-align:justify;hyphens:auto">' + inline(l) + '</p>');
+    });
+    close();
+    return out.join('');
+  }
+
+  draft() {
+    const t = (this.state.asked || '').toLowerCase();
+    if (t.indexOf('tempe') > -1 || t.indexOf('forward') > -1) {
+      return { name: 'Tempe Utilities → Kamran', when: 'a utility bill from the City of Tempe arrives', does: 'forward it to Kamran with "Please get this transferred asap"', tool: 'Email' };
+    }
+    if (t.indexOf('unsubscribe') > -1 || t.indexOf('newsletter') > -1) {
+      return { name: 'Weekly Unsubscribe', when: 'every Sunday morning', does: "unsubscribe from newsletters I've opened less than 10% of the time", tool: 'Web access' };
+    }
+    return { name: 'Job Search Tracker', when: 'a recruiter emails about a tech role', does: 'add the next steps to my Notion "Jobs" page', tool: 'Notion' };
+  }
+
+  fire(text) {
+    if (!text) return;
+    const t = text.toLowerCase();
+    const search = t.indexOf('how close') > -1 || t.indexOf('keep a tab') > -1 || t.indexOf('show') > -1 || t.indexOf('find') > -1;
+    this.setState({ asked: text, q: '', saved: false, mode: search ? 'search' : 'agent' });
+  }
+}
+
+const FEED = [
+  { id: 'jobs', src: 'Job Search Tracker', time: '9:12', kind: 'approve', needs: true, fresh: true, body: 'Two next steps in Priya Raghavan\u2019s mail — a 30-minute intro and a portfolio session. Add both to Notion \u2192 Jobs?', after: 'Approved — added to Notion \u2192 Jobs.' },
+  { id: 'otp', src: 'Kettle', time: '9:04', kind: 'otp', fresh: true, code: '481 302', body: 'Sign-in code, expires in 10 minutes.' },
+  { id: 'bill', src: 'Tempe Utilities \u2192 Kamran', time: '8:31', kind: 'approve', needs: true, fresh: true, body: 'Statement 4471, $86.20. Forward to Kamran with \u201CPlease get this transferred asap\u201D?', after: 'Forwarded to Kamran.' },
+  { id: 'ellis', src: 'Viewing Replies', time: '8:04', kind: 'info', fresh: true, body: 'Answered Ellis Weber with income details and weekday 17:00\u201320:00 availability. Saturday 17:30 holds.' },
+  { id: 'united', src: 'United Status Watch', time: '8:40', kind: 'info', body: 'Seat 14C confirmed on UA 1143. Four of twelve segments toward Premier Silver.' },
+  { id: 'todo', src: 'Morning To-Do', time: '8:00', kind: 'info', body: 'Slacked today\u2019s list — six items, two carried over from Friday.' },
+  { id: 'launch', src: 'Launch Digest', time: '7:30', kind: 'info', body: 'Four launches this week. Composer v3 ships Monday; two announcements touch your team.' },
+  { id: 'unsub', src: 'Weekly Unsubscribe', time: 'Sun', kind: 'info', body: 'Unsubscribed from nine newsletters you had not opened since May.' },
+];
+
+const NOTES = [
+  {
+    title: 'Apartment shortlist', meta: 'Edited 2h ago · 214 words',
+    md: '# Apartment shortlist\n\nThree left after this week\'s viewings. **Larch** is still ahead on light, and it is the only one with laundry in the unit.\n\n- [x] 1420 Larch — Sat 17:30, agent Ellis Weber\n- [ ] 88 Ridgeway — waiting on a time\n- [ ] Rowan & 3rd — no laundry, cheaper by `$120`\n\n> Send income docs before the next viewing so it does not hold up the lease.\n\n## Standing answers\n\nThe replies the agent sends on my behalf.\n\n- Income: 3.4× rent, letter on file\n- Move-in: 1 October, flexible by two weeks\n- Viewings: weekdays 17:00–20:00\n\nLinked from [[Viewing Replies]] and the [Ellis Weber thread](#).',
+  },
+  { title: 'Offsite — Seattle', meta: 'Edited yesterday', md: '# Offsite — Seattle\n\nBudget is `$20` a head. Ana has three venues.\n\n- [ ] Pick venue by Friday\n- [ ] Confirm headcount' },
+  { title: 'Miso short ribs', meta: 'Clipped by Recipe Clipper · Fri', md: '# Miso short ribs\n\nFrom Serious Eats, clipped automatically.\n\n- 1.5 kg short ribs\n- 3 tbsp white miso' },
+  { title: 'Jobs — next steps', meta: 'Synced with Notion · 9:12', md: '# Jobs\n\n## Kettle — Staff Product Designer\n\n- [ ] 30-minute intro with head of design\n- [ ] Portfolio session, week after' },
+  { title: 'Reading', meta: 'Edited 3 Aug', md: '# Reading\n\n- The Craftsman\n- Ways of Seeing' },
+];
+
+const DAYS = [
+  { name: 'Mon', n: '17', items: [{t:'09:30',n:'Standup'}, {t:'11:00',n:'Design review'}, {t:'14:00',n:'1:1 Ana'}, {t:'16:30',n:'Kettle intro'}] },
+  { name: 'Tue', n: '18', items: [{t:'08:00',n:'Swim'}, {t:'10:00',n:'Roadmap'}, {t:'13:30',n:'Vendor call'}] },
+  { name: 'Wed', n: '19', items: [{t:'09:30',n:'Standup'}, {t:'12:00',n:'Lunch, Priya'}, {t:'15:00',n:'Offsite sync'}] },
+  { name: 'Thu', n: '20', items: [{t:'09:00',n:'All-hands'}, {t:'11:30',n:'Interview'}, {t:'17:00',n:'Viewing — Larch'}, {t:'19:30',n:'Dinner'}] },
+  { name: 'Fri', n: '21', items: [{t:'09:30',n:'Standup'}, {t:'10:30',n:'Retro'}, {t:'15:30',n:'Ship review'}] },
+  { name: 'Sat', n: '22', items: [{t:'11:00',n:'Market'}, {t:'17:30',n:'Viewing — Ridgeway'}] },
+];
+
+const AGENTS = [
+  { name: 'Job Search Tracker', line: 'Recruiter mail about tech roles → next steps into Notion "Jobs".', trigger: 'Automatic', last: 'ran 9:12', status: 'Draft', dotColor: 'color-mix(in srgb,var(--color-text) 62%,transparent)', approval: true },
+  { name: 'Weekly Unsubscribe', line: "Unsubscribes from newsletters opened less than 10% of the time.", trigger: 'Sundays 09:00', last: 'ran 6 days ago', status: 'Published', dotColor: 'var(--color-accent)', approval: true },
+  { name: 'Launch Digest', line: 'Summarises launch announcements — dates, milestones, impact, and anything touching my team.', trigger: 'Mondays 07:30', last: 'ran 9 min ago', status: 'Published', dotColor: 'var(--color-accent)', approval: false },
+  { name: 'Morning To-Do', line: "Builds today's list from my template and Slacks it to me.", trigger: 'Weekdays 08:00', last: 'ran yesterday', status: 'Published', dotColor: 'var(--color-accent)', approval: false },
+  { name: 'Viewing Replies', line: 'Answers letting agents with income details and my 5–8pm weekday availability.', trigger: 'Automatic', last: 'ran 8:04', status: 'Published', dotColor: 'var(--color-accent)', approval: false },
+  { name: 'Recipe Clipper', line: 'Files recipes from mail into Notes, keeps them current.', trigger: 'Automatic', last: 'ran Fri', status: 'Published', dotColor: 'var(--color-accent)', approval: false },
+  { name: 'United Status Watch', line: 'Tracks segments flown against what Premier Silver needs.', trigger: 'Automatic', last: 'ran 8:40', status: 'Published', dotColor: 'var(--color-accent)', approval: false },
+  { name: 'Offsite Planner', line: 'Coordinates the Seattle offsite for XYZ team — $20 a head.', trigger: 'Manual', last: 'never run', status: 'Draft', dotColor: 'color-mix(in srgb,var(--color-text) 62%,transparent)', approval: true },
+];
+</script>
+</body>
+</html>

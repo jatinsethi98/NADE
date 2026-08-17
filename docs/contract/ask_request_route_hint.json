@@ -1,0 +1,5 @@
+{
+  "query": "when a recruiter emails about a tech role, save the next steps",
+  "thread_id": null,
+  "route_hint": "agent_draft"
+}

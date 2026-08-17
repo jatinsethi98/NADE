@@ -1,0 +1,102 @@
+{
+  "mailboxes": [
+    {
+      "id": "INBOX",
+      "name": "Inbox",
+      "kind": "system",
+      "unread": 12,
+      "total": 201
+    },
+    {
+      "id": "CATEGORY_PERSONAL",
+      "name": "Primary",
+      "kind": "system",
+      "unread": 4,
+      "total": 63
+    },
+    {
+      "id": "CATEGORY_UPDATES",
+      "name": "Updates",
+      "kind": "system",
+      "unread": 6,
+      "total": 88
+    },
+    {
+      "id": "CATEGORY_SOCIAL",
+      "name": "Social",
+      "kind": "system",
+      "unread": 0,
+      "total": 12
+    },
+    {
+      "id": "CATEGORY_PROMOTIONS",
+      "name": "Promotions",
+      "kind": "system",
+      "unread": 2,
+      "total": 41
+    },
+    {
+      "id": "CATEGORY_FORUMS",
+      "name": "Forums",
+      "kind": "system",
+      "unread": 0,
+      "total": 3
+    },
+    {
+      "id": "STARRED",
+      "name": "Starred",
+      "kind": "system",
+      "unread": 0,
+      "total": 9
+    },
+    {
+      "id": "SENT",
+      "name": "Sent",
+      "kind": "system",
+      "unread": 0,
+      "total": 37
+    },
+    {
+      "id": "Label_18",
+      "name": "Awaiting Reply",
+      "kind": "user",
+      "unread": 0,
+      "total": 6
+    },
+    {
+      "id": "Label_37",
+      "name": "BnbLeverage",
+      "kind": "user",
+      "unread": 0,
+      "total": 47
+    },
+    {
+      "id": "Label_1901000275082506791",
+      "name": "Notes",
+      "kind": "user",
+      "unread": 1,
+      "total": 22
+    },
+    {
+      "id": "Label_1901000275082506782",
+      "name": "Subscriptions",
+      "kind": "user",
+      "unread": 5,
+      "total": 31
+    },
+    {
+      "id": "Label_12",
+      "name": "To Reply",
+      "kind": "user",
+      "unread": 3,
+      "total": 14
+    },
+    {
+      "id": "Label_25",
+      "name": "[Notion]",
+      "kind": "user",
+      "unread": 0,
+      "total": 8
+    }
+  ]
+}

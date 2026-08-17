@@ -1,0 +1,60 @@
+{
+  "threads": [
+    {
+      "id": "18f2a1b3c4d5e6f7",
+      "subject": "Staff Product Designer at Kettle",
+      "snippet": "Two things to lock in: a 30-minute intro with our head of design, and a portfolio session the week after. Let me know which afternoon suits and I'll send the invites. Priya",
+      "from_name": "Priya Raghavan",
+      "from_email": "priya@kettle.com",
+      "ts": "2026-08-17T08:22:40Z",
+      "unread": true,
+      "msg_count": 3,
+      "agent_note": "Job Search Tracker · two next steps to approve"
+    },
+    {
+      "id": "18f28c5d6e7f8a9b",
+      "subject": "Re: Design review — Thursday",
+      "snippet": "Works for me. I'll bring the composer flows and the two open questions from Monday.",
+      "from_name": "Kamran Ali",
+      "from_email": "kamran@northbound.co",
+      "ts": "2026-08-16T18:03:52Z",
+      "unread": false,
+      "msg_count": 4,
+      "agent_note": null
+    },
+    {
+      "id": "18f2705f4e3d2c1b",
+      "subject": "Föhn — Ihre Bestellung ist unterwegs 📦",
+      "snippet": "Guten Tag, Ihre Bestellung Nr. 88-2041 wurde versandt und trifft voraussichtlich am Dienstag ein. Sendungsverfolgung: FN-2041-88.",
+      "from_name": "Föhn Versand",
+      "from_email": "versand@foehn.de",
+      "ts": "2026-08-16T12:55:31Z",
+      "unread": false,
+      "msg_count": 1,
+      "agent_note": null
+    },
+    {
+      "id": "18f29e0a1b2c3d4e",
+      "subject": "Your August statement is ready",
+      "snippet": "Your statement for the period ending 31 July is now available to view.",
+      "from_name": "Chase",
+      "from_email": "no.reply.alerts@chase.com",
+      "ts": "2026-08-16T07:40:11Z",
+      "unread": true,
+      "msg_count": 1,
+      "agent_note": null
+    },
+    {
+      "id": "18f2554a3b2c1d0e",
+      "subject": "Senior Product Designer — Halcyon",
+      "snippet": "We're building out the design team and your name came up twice this week. Would you be open to a 45-minute screen?",
+      "from_name": "",
+      "from_email": "talent@halcyon.io",
+      "ts": "2026-08-15T18:19:40Z",
+      "unread": false,
+      "msg_count": 1,
+      "agent_note": null
+    }
+  ],
+  "next_cursor": "eyJ0cyI6IjIwMjYtMDgtMTVUMTg6MTk6NDBaIiwiaWQiOiIxOGYyNTU0YTNiMmMxZDBlIn0"
+}

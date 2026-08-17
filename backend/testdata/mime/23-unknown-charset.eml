@@ -1,0 +1,7 @@
+From: mystery@example.com
+To: jatinsethi98@gmail.com
+Subject: Unknown charset
+Date: Wed, 19 Aug 2026 09:00:00 +0000
+Content-Type: text/plain; charset="x-nonexistent-charset"
+
+Plain ASCII survives regardless.

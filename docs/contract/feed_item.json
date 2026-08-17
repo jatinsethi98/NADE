@@ -1,0 +1,23 @@
+{
+  "id": "c0000001-0000-4000-8000-000000000001",
+  "kind": "approval",
+  "title": "Job Search Tracker",
+  "body": "Two next steps found — a 30-minute intro and a portfolio session. Save them as a note?",
+  "status": "new",
+  "run_id": "b0000001-0000-4000-8000-000000000001",
+  "actions": [
+    "approve",
+    "skip"
+  ],
+  "approval_token": "f0000001-0000-4000-8000-000000000001",
+  "approval_expires_at": "2026-08-24T08:23:01Z",
+  "resolved_note": null,
+  "data": {
+    "action": "write_note",
+    "action_label": "Save note",
+    "note_title": "Kettle — next steps",
+    "note_id": "096573fc-f175-5750-9373-dbf0e4012f84",
+    "thread_id": "18f2a1b3c4d5e6f7"
+  },
+  "created_at": "2026-08-17T08:23:01Z"
+}

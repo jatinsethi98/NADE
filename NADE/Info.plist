@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Keys Xcode generates (CFBundle*, UILaunchScreen, scene manifest, orientations)
+	     are merged in at build time because GENERATE_INFOPLIST_FILE stays YES.
+	     Only the keys Xcode cannot generate live here. -->
+
+	<!-- The four OFL faces in NADE/Resources/Fonts. UIAppFonts takes the file
+	     name; Font.custom() takes the PostScript name (see Theme.Font). -->
+	<key>UIAppFonts</key>
+	<array>
+		<string>Lora-Regular.ttf</string>
+		<string>Lora-SemiBold.ttf</string>
+		<string>CormorantGaramond-Regular.ttf</string>
+		<string>CormorantGaramond-SemiBold.ttf</string>
+	</array>
+
+	<!-- Dev backend runs plain HTTP on the LAN (http://<mac>.local:8080).
+	     NSAllowsLocalNetworking permits *only* local/link-local hosts; it does
+	     not weaken ATS for the public internet. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+</dict>
+</plist>

@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "forbidden",
+    "message": "This account is not allowed to do that."
+  }
+}

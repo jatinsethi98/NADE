@@ -1,0 +1,94 @@
+[package]
+name = "nade-server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "NADE backend: Gmail sync, agent runtime, and the /v1 API the iOS app talks to."
+
+[lib]
+name = "nade_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nade-server"
+path = "src/main.rs"
+
+[dependencies]
+aes-gcm = "0.11"
+anyhow.workspace = true
+async-trait.workspace = true
+axum = { version = "0.8", features = ["macros"] }
+base64.workspace = true
+chrono.workspace = true
+dotenvy = "0.15"
+encoding_rs = "0.8"
+futures.workspace = true
+hex = "0.4"
+# HTML -> text and the `cid:` rewrite. `html2text` is deliberately NOT here -
+# see docs/PARSER.md: it emits 6.5x the text, 21% of it box-drawing glyphs.
+lol_html = "3"
+mail-parser = "0.11"
+# PKCE + `state` + the token request shapes. `default-features = false` keeps
+# oauth2's own reqwest/TLS stack out of the tree; we bridge to our reqwest
+# client by hand (gmail::oauth::HttpBridge).
+oauth2 = { version = "5", default-features = false }
+percent-encoding = "2"
+rand = "0.9"
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+subtle = "2"
+thiserror.workspace = true
+tokio.workspace = true
+tower = "0.5"
+tower-http = { version = "0.6", features = ["catch-panic", "trace"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+# `rustls-no-provider` + an explicit ring provider, rather than reqwest's
+# default aws-lc-rs: sqlx already links ring, aws-lc-rs needs cmake (absent on
+# this machine), and two crypto providers in one process is a trap.
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "http2",
+  "charset",
+  "stream",
+  "rustls-no-provider",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+  "ring",
+  "std",
+  "tls12",
+  "logging",
+] }
+
+# No compile-time *query* macros (`query!`/`query_as!`) anywhere in this crate —
+# see backend/DECISIONS.md D1, enforced by db::tests::no_compile_time_query_macros.
+# `macros` is on only because `sqlx::migrate!` lives behind it; `migrate!` reads
+# .sql files and never touches a database at build time.
+sqlx = { version = "0.8", default-features = false, features = [
+  "runtime-tokio",
+  "tls-rustls-ring",
+  "postgres",
+  "uuid",
+  "chrono",
+  "json",
+  "migrate",
+  "derive",
+  "macros",
+] }
+
+# Docker-free dev/test Postgres. Same TLS backend as sqlx above so the two do
+# not unify into a native-tls build.
+postgresql_embedded = { version = "0.21", default-features = false, features = [
+  "theseus",
+  "tokio",
+  "tls-rustls-ring",
+] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+wiremock = "0.6"

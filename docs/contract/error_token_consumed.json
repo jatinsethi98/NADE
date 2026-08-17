@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "token_consumed",
+    "message": "This approval was already recorded."
+  }
+}

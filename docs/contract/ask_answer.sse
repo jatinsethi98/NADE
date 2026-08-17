@@ -1,0 +1,21 @@
+event: route
+data: {"kind":"answer"}
+
+event: token
+data: {"text":"Priya"}
+
+event: token
+data: {"text":" proposed"}
+
+event: token
+data: {"text":" a 30-minute intro"}
+
+event: token
+data: {"text":" with the head of design,"}
+
+event: token
+data: {"text":" then a portfolio session the week after."}
+
+event: done
+data: {"sources":[{"gmail_id":"18f2c4d5e6f70819","subject":"Staff Product Designer at Kettle"},{"gmail_id":"18f2a1b3c4d5e6f7","subject":"Staff Product Designer at Kettle"}]}
+

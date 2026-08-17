@@ -1,0 +1,89 @@
+{
+  "id": "b0000001-0000-4000-8000-000000000001",
+  "agent_id": "a0000001-0000-4000-8000-000000000001",
+  "agent_name": "Job Search Tracker",
+  "status": "pending_approval",
+  "trigger_kind": "mail",
+  "trigger_ref": "18f2c4d5e6f70819",
+  "error": null,
+  "journal": [
+    {
+      "seq": 1,
+      "kind": "run_started",
+      "payload": {
+        "trigger_kind": "mail",
+        "trigger_ref": "18f2c4d5e6f70819"
+      },
+      "created_at": "2026-08-17T08:22:43Z"
+    },
+    {
+      "seq": 2,
+      "kind": "llm_response",
+      "payload": {
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "tool_use",
+        "tokens_in": 1840,
+        "tokens_out": 96,
+        "text": "I'll read the thread first."
+      },
+      "created_at": "2026-08-17T08:22:47Z"
+    },
+    {
+      "seq": 3,
+      "kind": "step_started",
+      "payload": {
+        "tool": "read_thread",
+        "args": {
+          "thread_id": "18f2a1b3c4d5e6f7"
+        },
+        "args_hash": "sha256:e8c76de6a12df2985a4bf270f77ec35f89766ff3e84acfff7f312527830d2eb8",
+        "effect_id": "5b11cf64-e644-5fec-bfe9-fc577958e72d"
+      },
+      "created_at": "2026-08-17T08:22:47Z"
+    },
+    {
+      "seq": 4,
+      "kind": "step_done",
+      "payload": {
+        "tool": "read_thread",
+        "result": {
+          "thread_id": "18f2a1b3c4d5e6f7",
+          "subject": "Staff Product Designer at Kettle",
+          "message_count": 3,
+          "latest": {
+            "gmail_id": "18f2c4d5e6f70819",
+            "from_email": "priya@kettle.com",
+            "ts": "2026-08-17T08:22:40Z",
+            "body_text": "Two things to lock in: a 30-minute intro with our head of design, and a portfolio session the week…[truncated 1180 bytes]"
+          }
+        },
+        "result_bytes": 334,
+        "truncated": true
+      },
+      "created_at": "2026-08-17T08:22:52Z"
+    },
+    {
+      "seq": 5,
+      "kind": "llm_response",
+      "payload": {
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "tool_use",
+        "tokens_in": 3210,
+        "tokens_out": 184,
+        "text": "Two concrete next steps. Both need approval before I save them."
+      },
+      "created_at": "2026-08-17T08:22:59Z"
+    },
+    {
+      "seq": 6,
+      "kind": "approval_requested",
+      "payload": {
+        "tool": "write_note",
+        "feed_item_id": "c0000001-0000-4000-8000-000000000001",
+        "effect_id": "096573fc-f175-5750-9373-dbf0e4012f84",
+        "summary": "Two next steps found — a 30-minute intro and a portfolio session."
+      },
+      "created_at": "2026-08-17T08:23:01Z"
+    }
+  ]
+}

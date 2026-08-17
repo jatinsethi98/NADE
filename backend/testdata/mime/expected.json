@@ -1,0 +1,443 @@
+{
+  "01-plain-ascii.eml": {
+    "subject": "Staff Product Designer at Kettle",
+    "from_name": "Priya Raghavan",
+    "from_email": "priya@kettle.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-16T09:12:04Z",
+    "body_text_contains": [
+      "Hi Jatin - are you open to a conversation?"
+    ],
+    "body_html_present": false,
+    "attachments": []
+  },
+  "02-rfc2047-b64-subject.eml": {
+    "subject": "Ihre Bestellung ist unterwegs",
+    "from_name": "Föhn Versand",
+    "from_email": "versand@foehn.de",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-14T18:55:31Z",
+    "body_text_contains": [
+      "Ihre Bestellung Nr. 88-2041"
+    ],
+    "body_html_present": false,
+    "attachments": []
+  },
+  "03-rfc2047-q-subject.eml": {
+    "subject": "Don’t forget your café booking",
+    "from_name": "",
+    "from_email": "support@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-03T14:00:00Z",
+    "body_text_contains": [
+      "See you there."
+    ],
+    "body_html_present": false,
+    "attachments": []
+  },
+  "04-rfc2047-iso8859-1.eml": {
+    "subject": "Grüße aus München",
+    "from_name": "Jürgen Müller",
+    "from_email": "juergen@example.de",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-04T12:00:00Z",
+    "body_text_contains": [
+      "Schöne Grüße."
+    ],
+    "body_html_present": false,
+    "attachments": []
+  },
+  "05-rfc2047-adjacent-words.eml": {
+    "subject": "Quarterly résumé review",
+    "from_name": "",
+    "from_email": "news@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-05T09:00:00Z",
+    "body_text_contains": [
+      "Body."
+    ],
+    "body_html_present": false,
+    "attachments": [],
+    "note": "RFC 2047 6.2 — whitespace between adjacent encoded words is dropped."
+  },
+  "06-quoted-printable-body.eml": {
+    "subject": "Invoice",
+    "from_name": "",
+    "from_email": "billing@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-06T10:30:00Z",
+    "body_text_contains": [
+      "your invoice for €41.90",
+      "rejoin without inserting a newline"
+    ],
+    "body_html_present": false,
+    "attachments": [],
+    "note": "Soft line breaks (=\\r\\n) must vanish, not become newlines."
+  },
+  "07-base64-body.eml": {
+    "subject": "Base64",
+    "from_name": "",
+    "from_email": "tokyo@example.jp",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-06T23:00:00Z",
+    "body_text_contains": [
+      "em dash —",
+      "東京で会いましょう"
+    ],
+    "body_html_present": false,
+    "attachments": []
+  },
+  "08-multipart-alternative.eml": {
+    "subject": "Re: Design review",
+    "from_name": "Kamran Ali",
+    "from_email": "kamran@northbound.co",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [
+      "design@northbound.co",
+      "priya@kettle.com"
+    ],
+    "date_utc": "2026-08-15T18:03:52Z",
+    "body_text_contains": [
+      "Works for me. I will bring the composer flows."
+    ],
+    "body_html_present": true,
+    "attachments": [],
+    "note": "text/plain is preferred for body_text; body_html keeps the HTML part."
+  },
+  "09-html-only.eml": {
+    "subject": "HTML only",
+    "from_name": "",
+    "from_email": "newsletter@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-09T06:00:00Z",
+    "body_text_contains": [
+      "Weekly digest",
+      "Three stories this week"
+    ],
+    "body_text_excludes": [
+      "color:red",
+      "var x=1",
+      "&nbsp;",
+      "<p>"
+    ],
+    "body_html_present": true,
+    "attachments": [],
+    "note": "PLAN.md guarantees body_text non-empty via html2text. Script and style content must NOT leak into it, and entities must be decoded."
+  },
+  "10-multipart-related-cid.eml": {
+    "subject": "Your order",
+    "from_name": "",
+    "from_email": "shop@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-10T11:00:00Z",
+    "body_text_contains": [
+      "Thanks!"
+    ],
+    "body_html_present": true,
+    "attachments": [
+      {
+        "name": "logo.png",
+        "mime": "image/png",
+        "inline": true,
+        "content_id": "logo@example.com"
+      }
+    ],
+    "note": "cid: references must be rewritten to the attachment proxy URL; the inline part is still an attachment row."
+  },
+  "11-multipart-mixed-attachment.eml": {
+    "subject": "Role outline",
+    "from_name": "Priya Raghavan",
+    "from_email": "priya@kettle.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-16T09:12:04Z",
+    "body_text_contains": [
+      "The outline is attached."
+    ],
+    "body_html_present": false,
+    "attachments": [
+      {
+        "name": "Kettle — Staff Designer.pdf",
+        "mime": "application/pdf",
+        "inline": false
+      }
+    ],
+    "note": "Attachment filename is itself RFC 2047 encoded — a very common real-world case."
+  },
+  "12-cp1252-mislabelled.eml": {
+    "subject": "Don’t miss out",
+    "from_name": "",
+    "from_email": "marketing@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-11T09:00:00Z",
+    "body_text_contains": [
+      "We’ve got “news” for you — read on."
+    ],
+    "body_html_present": false,
+    "attachments": [],
+    "note": "Senders label cp1252 as iso-8859-1 constantly. Decoding 0x92 as latin-1 gives an unprintable control char; treating iso-8859-1 as cp1252 is what every mail client does. If the parser is strict here it produces mojibake on a large fraction of real mail."
+  },
+  "13-no-date-header.eml": {
+    "subject": "No date",
+    "from_name": "",
+    "from_email": "nodate@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": null,
+    "body_text_contains": [
+      "This message has no Date header."
+    ],
+    "body_html_present": false,
+    "attachments": [],
+    "note": "Must not panic. Fall back to Gmail's internalDate, which the sync layer always has."
+  },
+  "14-malformed-date.eml": {
+    "subject": "Bad date",
+    "from_name": "",
+    "from_email": "baddate@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": null,
+    "body_text_contains": [
+      "Garbage date header."
+    ],
+    "body_html_present": false,
+    "attachments": [],
+    "note": "Jarvis panicked here. Never panic on header content."
+  },
+  "15-bare-address.eml": {
+    "subject": "Your statement is ready",
+    "from_name": "",
+    "from_email": "alerts@chase.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-16T07:40:11Z",
+    "body_text_contains": [
+      "Statement available."
+    ],
+    "body_html_present": false,
+    "attachments": [],
+    "note": "from_name is empty, NOT the local part. The UI decides what to show."
+  },
+  "16-group-address.eml": {
+    "subject": "Bulk mail",
+    "from_name": "",
+    "from_email": "bulk@example.com",
+    "to": [],
+    "cc": [],
+    "date_utc": "2026-08-12T15:00:00Z",
+    "body_text_contains": [
+      "You are one of many."
+    ],
+    "body_html_present": false,
+    "attachments": [],
+    "note": "Group syntax with no members, and a present-but-empty Cc. Both must yield empty lists, not errors and not a phantom recipient."
+  },
+  "17-8bit-utf8.eml": {
+    "subject": "Reunión mañana",
+    "from_name": "Ana Ruiz",
+    "from_email": "ana@example.es",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-13T06:15:00Z",
+    "body_text_contains": [
+      "¿Nos vemos a las nueve? Ángela también viene."
+    ],
+    "body_html_present": false,
+    "attachments": [],
+    "note": "Unencoded 8-bit header value AND body. The Subject here is raw UTF-8, not an encoded word — also legal in practice."
+  },
+  "18-nested-multipart.eml": {
+    "subject": "Nested",
+    "from_name": "",
+    "from_email": "complex@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-14T09:00:00Z",
+    "body_text_contains": [
+      "Plain part inside the alternative."
+    ],
+    "body_text_excludes": [
+      "Attached plain text."
+    ],
+    "body_html_present": true,
+    "attachments": [
+      {
+        "name": "notes.txt",
+        "mime": "text/plain",
+        "inline": false
+      }
+    ],
+    "note": "A text/plain part with Content-Disposition: attachment is an ATTACHMENT, not the body. Getting this wrong appends attachment text to every body."
+  },
+  "19-empty-body.eml": {
+    "subject": "(no body)",
+    "from_name": "",
+    "from_email": "empty@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-15T00:00:00Z",
+    "body_text_contains": [],
+    "body_text_is_empty": true,
+    "body_html_present": false,
+    "attachments": [],
+    "note": "Empty body is legal. It must round-trip as an empty string, not null, and must not fail the non-empty-body_text guarantee by throwing."
+  },
+  "20-folded-headers.eml": {
+    "subject": "A subject that has been folded across two physical lines",
+    "from_name": "Long Sender Name Indeed",
+    "from_email": "long@example.com",
+    "to": [
+      "jatinsethi98@gmail.com",
+      "second@example.com",
+      "third@example.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-16T12:00:00Z",
+    "body_text_contains": [
+      "Folded headers above."
+    ],
+    "body_html_present": false,
+    "attachments": [],
+    "note": "Unfolding joins continuation lines with a single space."
+  },
+  "21-emoji-subject.eml": {
+    "subject": "Your journey starts now 🚀",
+    "from_name": "",
+    "from_email": "google@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-17T09:00:00Z",
+    "body_text_contains": [
+      "Welcome aboard."
+    ],
+    "body_html_present": false,
+    "attachments": [],
+    "note": "Astral-plane codepoint. Any code that indexes by byte or by UTF-16 unit will slice it in half."
+  },
+  "22-bad-base64.eml": {
+    "subject": "Broken encoding",
+    "from_name": "",
+    "from_email": "broken@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-18T09:00:00Z",
+    "body_text_contains": [],
+    "body_html_present": false,
+    "attachments": [],
+    "note": "Must degrade gracefully — decode what it can or fall back to the raw text — and must never panic or abort the whole sync. PLAN.md: parse failure yields a metadata row plus an audit entry, never an aborted sync."
+  },
+  "23-unknown-charset.eml": {
+    "subject": "Unknown charset",
+    "from_name": "",
+    "from_email": "mystery@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-19T09:00:00Z",
+    "body_text_contains": [
+      "Plain ASCII survives regardless."
+    ],
+    "body_html_present": false,
+    "attachments": [],
+    "note": "Unknown charset falls back to UTF-8 then to lossy latin-1. Never an error."
+  },
+  "24-duplicate-headers.eml": {
+    "subject": "First subject",
+    "from_name": "",
+    "from_email": "dup@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-20T09:00:00Z",
+    "body_text_contains": [
+      "Two subject headers."
+    ],
+    "body_html_present": false,
+    "attachments": [],
+    "note": "First occurrence wins, matching every mail client. Deterministic either way, but pick one and test it."
+  },
+  "25-mixed-line-endings.eml": {
+    "subject": "Mixed endings",
+    "from_name": "",
+    "from_email": "mixed@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-21T09:00:00Z",
+    "body_text_contains": [
+      "Line one.",
+      "Line two."
+    ],
+    "body_html_present": false,
+    "attachments": [],
+    "note": "Gmail's format=raw is not guaranteed to be pure CRLF. A parser that only splits on CRLF loses the header/body boundary."
+  },
+  "26-huge-body.eml": {
+    "subject": "Huge body",
+    "from_name": "",
+    "from_email": "huge@example.com",
+    "to": [
+      "jatinsethi98@gmail.com"
+    ],
+    "cc": [],
+    "date_utc": "2026-08-22T09:00:00Z",
+    "body_text_min_length": 100000,
+    "body_html_present": false,
+    "attachments": [],
+    "note": "The messages.fts generated column truncates at 100k chars. body_text itself is not truncated at parse time; anything that caps it must do so explicitly and say so."
+  }
+}

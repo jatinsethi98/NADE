@@ -1,0 +1,16 @@
+{
+  "id": "a0000004-0000-4000-8000-000000000004",
+  "name": "Flight Watcher",
+  "nl_definition": "do the thing with the stuff when it happens",
+  "status": "draft",
+  "trigger_summary": "Not set",
+  "schedule": null,
+  "last_run_at": null,
+  "approval_required": true,
+  "allowed_tools": [],
+  "compile_error": "I couldn't work out what should set this off or what it should do. Try naming the mail it should react to and what it should write.",
+  "when_span": null,
+  "do_span": null,
+  "trailing": null,
+  "spec": null
+}

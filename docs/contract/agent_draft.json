@@ -1,0 +1,45 @@
+{
+  "id": "a0000003-0000-4000-8000-000000000003",
+  "name": "Reply Drafter",
+  "nl_definition": "When someone asks when I'm free, draft a reply offering my availability. Always ask me first.",
+  "status": "draft",
+  "trigger_summary": "On new mail",
+  "schedule": null,
+  "last_run_at": "2026-08-16T14:38:20Z",
+  "approval_required": true,
+  "allowed_tools": [
+    "read_thread",
+    "draft_reply"
+  ],
+  "compile_error": null,
+  "when_span": "someone asks when I'm free",
+  "do_span": "draft a reply offering my availability",
+  "trailing": "Always ask me first.",
+  "spec": {
+    "version": 1,
+    "trigger": {
+      "kind": "mail",
+      "filters": {
+        "from_domains": [],
+        "from_contains": [],
+        "subject_contains": [],
+        "body_contains": [],
+        "label_ids": [
+          "INBOX"
+        ],
+        "has_attachment": null,
+        "newer_than_days": 30
+      },
+      "semantic": "The sender is asking when Jatin is available, or proposing times to meet."
+    },
+    "instruction": "Read the thread. Draft a reply that names the times Jatin has already said work, in his register: short, no filler, no exclamation marks. Never send it.",
+    "tools": [
+      "read_thread",
+      "draft_reply"
+    ],
+    "output": {
+      "kind": "draft",
+      "title_template": null
+    }
+  }
+}

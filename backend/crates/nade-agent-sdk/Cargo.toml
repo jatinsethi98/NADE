@@ -1,0 +1,42 @@
+[package]
+name = "nade-agent-sdk"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A generic, model-agnostic agent engine with a durable journal and human approval pauses."
+repository = "https://github.com/jatinsethi/nade"
+readme = "README.md"
+keywords = ["agent", "llm", "tool-calling", "durable", "journal"]
+categories = ["asynchronous", "api-bindings"]
+
+# Dependencies are pinned with explicit versions rather than `workspace = true`:
+# this crate is published on its own and must stand alone outside the workspace.
+# Keep this list small and boring — no HTTP client, no database driver, no
+# provider SDK, and no async runtime.
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = [
+  "clock",
+  "serde",
+  "std",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+uuid = { version = "1", features = ["serde", "v4", "v5"] }
+
+[dev-dependencies]
+# Only the test harness needs a runtime; the library itself is runtime-agnostic.
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+
+[features]
+default = []
+# Exposes the in-crate test doubles (`ScriptedLlm`, `MemoryJournal`, sample
+# tools) to downstream crates. They are always available to this crate's own
+# `cfg(test)` builds, so `cargo test -p nade-agent-sdk` needs no extra flags.
+testing = []
+
+[package.metadata.docs.rs]
+all-features = true

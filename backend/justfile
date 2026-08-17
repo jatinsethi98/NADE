@@ -1,0 +1,59 @@
+# NADE backend tasks. Run from `backend/`.
+#
+#   just            list the recipes
+#   just run        serve on 127.0.0.1:8080 with the embedded dev database
+#   just pair       print (or mint) a pairing code
+#
+# `just` itself: cargo install just
+
+set dotenv-load := true
+set positional-arguments := true
+
+export PATH := env_var('HOME') / '.cargo/bin:' + env_var('PATH')
+
+crate := "nade-server"
+
+# List the recipes.
+default:
+    @just --list --unsorted
+
+# Serve the API. Boots the embedded PostgreSQL if DATABASE_URL is unset.
+run *args:
+    NADE_ENV=${NADE_ENV:-dev} cargo run -p {{ crate }} -- "$@"
+
+# Compile everything, tests included.
+build:
+    cargo build -p {{ crate }} --all-targets
+
+# The whole suite. Each test gets its own freshly migrated database.
+test *args:
+    cargo test -p {{ crate }} -- "$@"
+
+# Create/upgrade the database, then exit.
+migrate:
+    NADE_ENV=${NADE_ENV:-dev} cargo run -q -p {{ crate }} -- --migrate
+
+# Print the live pairing code, or mint a fresh one if none is live.
+# The running server honours a code minted here on its next pairing attempt.
+pair:
+    @NADE_ENV=${NADE_ENV:-dev} cargo run -q -p {{ crate }} -- --print-pair-code
+
+# Stop the shared embedded PostgreSQL (it deliberately outlives `just run`).
+db-stop:
+    NADE_ENV=${NADE_ENV:-dev} cargo run -q -p {{ crate }} -- --stop-db
+
+# Open a psql on the dev database. Needs the embedded server to be running.
+db-shell:
+    @.pgcache/*/bin/psql "postgres://postgres:${NADE_PG_PASSWORD:-nade-dev}@127.0.0.1:${NADE_PG_PORT:-54329}/${NADE_DB_NAME:-nade}"
+
+fmt:
+    cargo fmt
+
+fmt-check:
+    cargo fmt --check
+
+lint:
+    cargo clippy -p {{ crate }} --all-targets -- -D warnings
+
+# Exactly what the P1 acceptance gate runs.
+ci: build lint fmt-check test

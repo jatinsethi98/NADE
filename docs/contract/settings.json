@@ -1,0 +1,7 @@
+{
+  "approval_required_default": true,
+  "sync_window_days": 30,
+  "spend_ceiling_usd_per_day": 1.0,
+  "app_version": "1.0",
+  "disclosure": "Your mail syncs to your own server and is processed by the AI models you connect."
+}

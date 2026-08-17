@@ -1,0 +1,29 @@
+# Rust
+backend/target/
+**/*.rs.bk
+
+# Secrets — never commit
+backend/secrets/
+backend/.env
+*.p8
+
+# Dev database (postgresql_embedded)
+backend/.pgdata/
+backend/.pgcache/
+
+# Real mail pulled from the live account for offline tests. Never committed:
+# it is personal mail, and the conformance corpus (backend/testdata/mime) is
+# what actually encodes the parser's specification.
+backend/testdata/live/
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/
+.swiftpm/
+*.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+
+# macOS
+.DS_Store
+
+# Screenshots are committed on purpose (docs/screens) — nothing to ignore there.

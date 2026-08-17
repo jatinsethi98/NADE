@@ -1,0 +1,63 @@
+{
+  "agents": [
+    {
+      "id": "a0000001-0000-4000-8000-000000000001",
+      "name": "Job Search Tracker",
+      "nl_definition": "When a recruiter emails about a tech role, pull out the next steps and save them to a note. Ask me before you save.",
+      "status": "published",
+      "trigger_summary": "On new mail",
+      "schedule": null,
+      "last_run_at": "2026-08-17T08:22:43Z",
+      "approval_required": true
+    },
+    {
+      "id": "a0000002-0000-4000-8000-000000000002",
+      "name": "Morning To-Do",
+      "nl_definition": "Every weekday at 8:00, build today's to-do list from the mail I haven't replied to and save it as a note.",
+      "status": "published",
+      "trigger_summary": "Every weekday at 08:00",
+      "schedule": {
+        "freq": "week",
+        "interval": 1,
+        "byweekday": [
+          "mon",
+          "tue",
+          "wed",
+          "thu",
+          "fri"
+        ],
+        "bymonthday": null,
+        "at": "08:00",
+        "tz": "America/Phoenix",
+        "ends": {
+          "kind": "never",
+          "date": null,
+          "count": null
+        },
+        "runs_done": 42
+      },
+      "last_run_at": "2026-08-16T15:00:02Z",
+      "approval_required": false
+    },
+    {
+      "id": "a0000003-0000-4000-8000-000000000003",
+      "name": "Reply Drafter",
+      "nl_definition": "When someone asks when I'm free, draft a reply offering my availability. Always ask me first.",
+      "status": "draft",
+      "trigger_summary": "On new mail",
+      "schedule": null,
+      "last_run_at": "2026-08-16T14:38:20Z",
+      "approval_required": true
+    },
+    {
+      "id": "a0000004-0000-4000-8000-000000000004",
+      "name": "Flight Watcher",
+      "nl_definition": "do the thing with the stuff when it happens",
+      "status": "draft",
+      "trigger_summary": "Not set",
+      "schedule": null,
+      "last_run_at": null,
+      "approval_required": true
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+From: shop@example.com
+To: jatinsethi98@gmail.com
+Subject: Your order
+Date: Mon, 10 Aug 2026 11:00:00 +0000
+Content-Type: multipart/related; boundary="BOUND10"; type="text/html"
+
+--BOUND10
+Content-Type: text/html; charset="utf-8"
+
+<html><body><p>Thanks!</p><img src="cid:logo@example.com" alt="logo"></body></html>
+
+--BOUND10
+Content-Type: image/png
+Content-Transfer-Encoding: base64
+Content-ID: <logo@example.com>
+Content-Disposition: inline; filename="logo.png"
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==
+
+--BOUND10--

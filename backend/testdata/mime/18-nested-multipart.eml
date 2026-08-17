@@ -1,0 +1,28 @@
+From: complex@example.com
+To: jatinsethi98@gmail.com
+Subject: Nested
+Date: Fri, 14 Aug 2026 09:00:00 +0000
+Content-Type: multipart/mixed; boundary="OUTER"
+
+--OUTER
+Content-Type: multipart/alternative; boundary="INNER"
+
+--INNER
+Content-Type: text/plain; charset="utf-8"
+
+Plain part inside the alternative.
+
+--INNER
+Content-Type: text/html; charset="utf-8"
+
+<p>HTML part inside the alternative.</p>
+
+--INNER--
+
+--OUTER
+Content-Type: text/plain; charset="utf-8"
+Content-Disposition: attachment; filename="notes.txt"
+
+Attached plain text.
+
+--OUTER--

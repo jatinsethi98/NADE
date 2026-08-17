@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "payload_too_large",
+    "message": "That is too big to send. The limit is 25 MB."
+  }
+}

@@ -1,0 +1,12 @@
+event: route
+data: {"kind":"answer"}
+
+event: token
+data: {"text":"Priya"}
+
+event: token
+data: {"text":" proposed"}
+
+event: error
+data: {"code":"upstream_unavailable","message":"The model didn't respond. Try that again in a moment."}
+

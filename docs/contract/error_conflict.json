@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "conflict",
+    "message": "Something changed while you were working. Reload and try again."
+  }
+}

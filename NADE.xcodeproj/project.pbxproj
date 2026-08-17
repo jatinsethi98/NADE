@@ -6,20 +6,88 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		2AF1000000000000000000F1 /* GRDB in Frameworks */ = {isa = PBXBuildFile; productRef = 2AF1000000000000000000F0 /* GRDB */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		2AF1000000000000000000A1 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 2A0F06953030540000D387FF /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2A0F069C3030540000D387FF;
+			remoteInfo = NADE;
+		};
+		2AF1000000000000000000A3 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 2A0F06953030540000D387FF /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2A0F069C3030540000D387FF;
+			remoteInfo = NADE;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		2A0F069D3030540000D387FF /* NADE.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = NADE.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		2AF1000000000000000000B1 /* NADETests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NADETests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		2AF1000000000000000000B2 /* NADEUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = NADEUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		2AF1000000000000000000C9 /* Exceptions for "NADE" folder in "NADE" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				CRITERIA.md,
+				Info.plist,
+			);
+			target = 2A0F069C3030540000D387FF /* NADE */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		2A0F069F3030540000D387FF /* NADE */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				2AF1000000000000000000C9 /* Exceptions for "NADE" folder in "NADE" target */,
+			);
 			path = NADE;
+			sourceTree = "<group>";
+		};
+		2AF1000000000000000000C1 /* NADETests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = NADETests;
+			sourceTree = "<group>";
+		};
+		2AF1000000000000000000C2 /* NADEUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = NADEUITests;
+			sourceTree = "<group>";
+		};
+		2AF1000000000000000000C3 /* contract (fixtures) */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			name = "contract (fixtures)";
+			path = docs/contract;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		2A0F069A3030540000D387FF /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2AF1000000000000000000F1 /* GRDB in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2AF1000000000000000000D2 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2AF1000000000000000000D5 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -33,6 +101,9 @@
 			isa = PBXGroup;
 			children = (
 				2A0F069F3030540000D387FF /* NADE */,
+				2AF1000000000000000000C1 /* NADETests */,
+				2AF1000000000000000000C2 /* NADEUITests */,
+				2AF1000000000000000000C3 /* contract (fixtures) */,
 				2A0F069E3030540000D387FF /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,6 +112,8 @@
 			isa = PBXGroup;
 			children = (
 				2A0F069D3030540000D387FF /* NADE.app */,
+				2AF1000000000000000000B1 /* NADETests.xctest */,
+				2AF1000000000000000000B2 /* NADEUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -65,10 +138,58 @@
 			);
 			name = NADE;
 			packageProductDependencies = (
+				2AF1000000000000000000F0 /* GRDB */,
 			);
 			productName = NADE;
 			productReference = 2A0F069D3030540000D387FF /* NADE.app */;
 			productType = "com.apple.product-type.application";
+		};
+		2AF1000000000000000000E1 /* NADETests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2AF1000000000000000000E5 /* Build configuration list for PBXNativeTarget "NADETests" */;
+			buildPhases = (
+				2AF1000000000000000000D1 /* Sources */,
+				2AF1000000000000000000D2 /* Frameworks */,
+				2AF1000000000000000000D3 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				2AF1000000000000000000A2 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				2AF1000000000000000000C1 /* NADETests */,
+				2AF1000000000000000000C3 /* contract (fixtures) */,
+			);
+			name = NADETests;
+			packageProductDependencies = (
+			);
+			productName = NADETests;
+			productReference = 2AF1000000000000000000B1 /* NADETests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		2AF1000000000000000000E2 /* NADEUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2AF1000000000000000000E6 /* Build configuration list for PBXNativeTarget "NADEUITests" */;
+			buildPhases = (
+				2AF1000000000000000000D4 /* Sources */,
+				2AF1000000000000000000D5 /* Frameworks */,
+				2AF1000000000000000000D6 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				2AF1000000000000000000A4 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				2AF1000000000000000000C2 /* NADEUITests */,
+			);
+			name = NADEUITests;
+			packageProductDependencies = (
+			);
+			productName = NADEUITests;
+			productReference = 2AF1000000000000000000B2 /* NADEUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
 
@@ -83,6 +204,14 @@
 					2A0F069C3030540000D387FF = {
 						CreatedOnToolsVersion = 26.6;
 					};
+					2AF1000000000000000000E1 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 2A0F069C3030540000D387FF;
+					};
+					2AF1000000000000000000E2 = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 2A0F069C3030540000D387FF;
+					};
 				};
 			};
 			buildConfigurationList = 2A0F06983030540000D387FF /* Build configuration list for PBXProject "NADE" */;
@@ -94,18 +223,37 @@
 			);
 			mainGroup = 2A0F06943030540000D387FF;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				2AF1000000000000000000F2 /* XCRemoteSwiftPackageReference "GRDB" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 2A0F069E3030540000D387FF /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				2A0F069C3030540000D387FF /* NADE */,
+				2AF1000000000000000000E1 /* NADETests */,
+				2AF1000000000000000000E2 /* NADEUITests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		2A0F069B3030540000D387FF /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2AF1000000000000000000D3 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2AF1000000000000000000D6 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -122,7 +270,34 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		2AF1000000000000000000D1 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2AF1000000000000000000D4 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		2AF1000000000000000000A2 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2A0F069C3030540000D387FF /* NADE */;
+			targetProxy = 2AF1000000000000000000A1 /* PBXContainerItemProxy */;
+		};
+		2AF1000000000000000000A4 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2A0F069C3030540000D387FF /* NADE */;
+			targetProxy = 2AF1000000000000000000A3 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		2A0F06A63030540200D387FF /* Debug */ = {
@@ -178,7 +353,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
@@ -236,7 +411,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 26.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
@@ -256,11 +431,13 @@
 				DEVELOPMENT_TEAM = T6BTHTJ6Y8;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = NADE/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -288,11 +465,13 @@
 				DEVELOPMENT_TEAM = T6BTHTJ6Y8;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = NADE/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -307,6 +486,92 @@
 				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		2AF1000000000000000000E7 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = T6BTHTJ6Y8;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = fsaas.NADETests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/NADE.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/NADE";
+			};
+			name = Debug;
+		};
+		2AF1000000000000000000E8 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = T6BTHTJ6Y8;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = fsaas.NADETests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/NADE.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/NADE";
+			};
+			name = Release;
+		};
+		2AF1000000000000000000E9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = T6BTHTJ6Y8;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = fsaas.NADEUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = NADE;
+			};
+			name = Debug;
+		};
+		2AF1000000000000000000EA /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = T6BTHTJ6Y8;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = fsaas.NADEUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = NADE;
 			};
 			name = Release;
 		};
@@ -331,7 +596,44 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		2AF1000000000000000000E5 /* Build configuration list for PBXNativeTarget "NADETests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2AF1000000000000000000E7 /* Debug */,
+				2AF1000000000000000000E8 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		2AF1000000000000000000E6 /* Build configuration list for PBXNativeTarget "NADEUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2AF1000000000000000000E9 /* Debug */,
+				2AF1000000000000000000EA /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		2AF1000000000000000000F2 /* XCRemoteSwiftPackageReference "GRDB" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/groue/GRDB.swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 7.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		2AF1000000000000000000F0 /* GRDB */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 2AF1000000000000000000F2 /* XCRemoteSwiftPackageReference "GRDB" */;
+			productName = GRDB;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 2A0F06953030540000D387FF /* Project object */;
 }

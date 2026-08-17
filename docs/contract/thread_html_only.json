@@ -1,0 +1,25 @@
+{
+  "id": "18f2705f4e3d2c1b",
+  "subject": "Föhn — Ihre Bestellung ist unterwegs 📦",
+  "mailbox_name": "Subscriptions",
+  "account_email": "jatinsethi98@gmail.com",
+  "messages": [
+    {
+      "gmail_id": "18f2705f4e3d2c1b",
+      "from_name": "Föhn Versand",
+      "from_email": "versand@foehn.de",
+      "to": [],
+      "cc": [],
+      "ts": "2026-08-16T12:55:31Z",
+      "body_text": "Guten Tag, Ihre Bestellung Nr. 88-2041 wurde versandt und trifft voraussichtlich am Dienstag ein. Sendungsverfolgung: FN-2041-88.",
+      "body_html": "<html><body><h1>Ihre Bestellung ist unterwegs 📦</h1><p>Guten Tag, Ihre Bestellung Nr. 88-2041 wurde versandt und trifft voraussichtlich am Dienstag ein.</p><p>Sendungsverfolgung: FN-2041-88.</p></body></html>",
+      "label_ids": [
+        "INBOX",
+        "CATEGORY_UPDATES",
+        "Label_1901000275082506782"
+      ],
+      "attachments": []
+    }
+  ],
+  "agent_cards": []
+}

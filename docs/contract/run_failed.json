@@ -1,0 +1,62 @@
+{
+  "id": "b0000005-0000-4000-8000-000000000005",
+  "agent_id": "a0000001-0000-4000-8000-000000000001",
+  "agent_name": "Job Search Tracker",
+  "status": "failed",
+  "trigger_kind": "mail",
+  "trigger_ref": "18f2a1b3c4d5e6f7",
+  "error": "Gmail was unavailable, so the thread could not be read.",
+  "journal": [
+    {
+      "seq": 1,
+      "kind": "run_started",
+      "payload": {
+        "trigger_kind": "mail",
+        "trigger_ref": "18f2a1b3c4d5e6f7"
+      },
+      "created_at": "2026-08-16T09:12:06Z"
+    },
+    {
+      "seq": 2,
+      "kind": "llm_response",
+      "payload": {
+        "model": "claude-sonnet-4-5-20250929",
+        "stop_reason": "tool_use",
+        "tokens_in": 1786,
+        "tokens_out": 88,
+        "text": "I'll read the thread first."
+      },
+      "created_at": "2026-08-16T09:12:09Z"
+    },
+    {
+      "seq": 3,
+      "kind": "step_started",
+      "payload": {
+        "tool": "read_thread",
+        "args": {
+          "thread_id": "18f2a1b3c4d5e6f7"
+        },
+        "args_hash": "sha256:e8c76de6a12df2985a4bf270f77ec35f89766ff3e84acfff7f312527830d2eb8",
+        "effect_id": "f3866d6f-cba8-5662-8b19-2f2d2e2d3d6d"
+      },
+      "created_at": "2026-08-16T09:12:09Z"
+    },
+    {
+      "seq": 4,
+      "kind": "step_failed",
+      "payload": {
+        "tool": "read_thread",
+        "error": "Gmail returned 503 for messages.get after 5 attempts."
+      },
+      "created_at": "2026-08-16T09:12:30Z"
+    },
+    {
+      "seq": 5,
+      "kind": "run_failed",
+      "payload": {
+        "error": "Gmail was unavailable, so the thread could not be read."
+      },
+      "created_at": "2026-08-16T09:12:31Z"
+    }
+  ]
+}

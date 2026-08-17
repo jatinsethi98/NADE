@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "needs_reauth",
+    "message": "Gmail needs to be reconnected. Sign in again in Settings."
+  }
+}

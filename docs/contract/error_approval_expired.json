@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "approval_expired",
+    "message": "This approval expired after 7 days. Run the agent again to get a fresh one."
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "notes": [
+    {
+      "id": "c2641905-fae1-56b8-909d-f5e5f1f2035e",
+      "run_id": "b0000003-0000-4000-8000-000000000003",
+      "thread_id": null,
+      "title": "To-do — 16 Aug",
+      "agent_name": "Morning To-Do",
+      "unread": true,
+      "updated_at": "2026-08-16T15:00:08Z"
+    },
+    {
+      "id": "e0000001-0000-4000-8000-000000000001",
+      "run_id": null,
+      "thread_id": null,
+      "title": "Welcome to NADE",
+      "agent_name": null,
+      "unread": false,
+      "updated_at": "2026-07-18T00:00:04Z"
+    }
+  ],
+  "next_cursor": null
+}
