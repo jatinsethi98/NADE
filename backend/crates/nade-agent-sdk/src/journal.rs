@@ -31,18 +31,38 @@ pub struct Entry {
     pub kind: EntryKind,
     /// The fact itself. One of the payload types in this module, as JSON.
     pub payload: serde_json::Value,
-    /// When the engine created it. Not necessarily when it committed.
+    /// When the **engine** created it. Not necessarily when it committed.
+    ///
+    /// A [`Journal`] must store and return this value unchanged rather than
+    /// substituting the database's own clock: replay uses the newest
+    /// `created_at` as a lower bound on the current time, so that an approval
+    /// which has objectively aged out cannot become approvable again just
+    /// because the resolving machine's clock jumped backwards.
     pub created_at: DateTime<Utc>,
 }
 
 impl Entry {
-    /// Build an entry, serialising a typed payload.
+    /// Build an entry, serialising a typed payload and stamping it now.
     pub fn new<P: Serialize>(seq: Seq, kind: EntryKind, payload: &P) -> Result<Self> {
+        Self::at(seq, kind, payload, Utc::now())
+    }
+
+    /// Build an entry with an explicit `created_at`.
+    ///
+    /// The engine uses this rather than reading the clock directly, so that a
+    /// run's entries never step backwards in time even if the machine's clock
+    /// does — the timestamps are what bound the expiry comparison from below.
+    pub fn at<P: Serialize>(
+        seq: Seq,
+        kind: EntryKind,
+        payload: &P,
+        created_at: DateTime<Utc>,
+    ) -> Result<Self> {
         Ok(Self {
             seq,
             kind,
             payload: serde_json::to_value(payload)?,
-            created_at: Utc::now(),
+            created_at,
         })
     }
 
@@ -295,9 +315,17 @@ pub struct ApprovalResolved {
 }
 
 /// Payload of [`EntryKind::RunWaiting`].
+///
+/// A **marker for readers**, not the durable fact. The wait itself lives on
+/// [`StepDone::wake_at`], committed with the step that asked for it; this entry
+/// exists so a host rendering the journal sees an explicit "parked" row, and
+/// replay treats it as agreeing with the `step_done` it follows. A journal
+/// missing it — because the process died in the gap — still replays to the same
+/// wait.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunWaiting {
-    /// The step whose tool asked for the pause.
+    /// The step whose tool asked for the pause, and the key
+    /// [`Resolution::Timer`](crate::Resolution::Timer) must quote back.
     pub step_seq: Seq,
     /// The earliest instant the host should resume at.
     pub wake_at: DateTime<Utc>,
@@ -306,6 +334,8 @@ pub struct RunWaiting {
 /// Payload of [`EntryKind::RunWoken`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunWoken {
+    /// The step whose wait this ends.
+    pub step_seq: Seq,
     /// When the timer actually fired.
     pub woken_at: DateTime<Utc>,
 }
@@ -340,19 +370,60 @@ pub struct RunEnded {
 /// The durable, append-only log of a run: the engine's recovery log and the
 /// host's UI log, deliberately the same thing.
 ///
+/// # ⚠ Every crash-safety property this crate claims is *your* property
+///
+/// **This crate contains no durable journal.** It does no fsync, opens no file,
+/// writes no WAL and starts no transaction; there is nothing here that could.
+/// The engine's entire recovery argument is the single assumption that
+/// [`append`](Journal::append) does not return `Ok` until the entry would
+/// survive a process death — and that assumption is discharged by *your*
+/// implementation, not by anything below this trait.
+///
+/// An implementation that returns `Ok` early — buffered, batched, async-flushed,
+/// or simply in memory — does not weaken the guarantee, it **voids** it. The
+/// fence stops fencing: a `step_started` that vanishes with the process leaves a
+/// run that re-executes a step it has no record of, and the run is then
+/// indistinguishable from one that never opened the step at all. The bug will
+/// not show up in testing, because it only appears in the crash.
+///
+/// `testing::MemoryJournal`, the only implementation that ships with this crate,
+/// is a **test double** and offers none of this. It is exactly as durable as the
+/// process.
+///
 /// # Storage contract
 ///
 /// An implementation must behave like a table with `primary key (run_id, seq)`:
 ///
 /// * **Append-only.** Entries are never updated or deleted.
 /// * **Durable before return.** [`append`](Journal::append) must not return `Ok`
-///   until the entry would survive a process death. The whole exactly-once
-///   argument rests on this.
+///   until the entry would survive a process death, a machine losing power, and
+///   a failover to a replica the host would subsequently read from. Concretely:
+///   a committed local transaction with `synchronous_commit = on` (not `off`,
+///   not `local` if you fail over), an `fsync`ed file whose *containing
+///   directory* has also been `fsync`ed, or a quorum-acknowledged write. Every
+///   sentence about crash safety in this crate is conditional on this one line.
 /// * **Unique.** A second append at a sequence that already exists must fail
 ///   with [`Error::SeqConflict`], not overwrite. That is what stops two workers
 ///   from driving one run into two different futures.
 /// * **Ordered.** [`load`](Journal::load) returns entries sorted by `seq`,
-///   ascending.
+///   ascending, with no gaps — replay rejects a journal whose sequences skip.
+/// * **Complete.** `load` returns *every* committed entry. A read that can miss
+///   a recently committed entry — a stale replica, a read-your-writes violation
+///   after failover — is a correctness bug of the same class as a lost write:
+///   the engine would re-execute from a truncated history and allocate
+///   sequences that already exist.
+/// * **Faithful.** Entries come back byte-identical, including `created_at`,
+///   which the engine assigns and uses as a lower bound on the wall clock. Do
+///   not overwrite it with the database's own `now()`.
+///
+/// # What a failed append means
+///
+/// An [`Err`] from `append` must mean "this entry may or may not have
+/// committed", and the engine treats it that way: it abandons the call and
+/// leaves the run for the next replay to sort out. It must never mean "the
+/// entry committed and something else went wrong" *silently* — that is fine and
+/// safe, because replay re-reads the journal, but the host must not then assume
+/// the entry is absent.
 ///
 /// # Entry vocabulary
 ///
@@ -361,24 +432,49 @@ pub struct RunEnded {
 /// | `run_started` | the run's input, recorded once | [`RunStarted`] |
 /// | `model_response` | one turn from the model, with normalised call ids | [`ModelResponse`] |
 /// | `step_started` | a tool is about to run; **the effect may happen after this** | [`StepStarted`] |
-/// | `step_done` | the tool's result, capped | [`StepDone`] |
+/// | `step_done` | the tool's result, capped, plus any `wake_at` it asked for | [`StepDone`] |
 /// | `approval_requested` | a gated call is waiting on a human | [`ApprovalRequested`] |
 /// | `approval_resolved` | the human's answer | [`ApprovalResolved`] |
-/// | `run_waiting` | a tool parked the run on a timer | [`RunWaiting`] |
+/// | `run_waiting` | a reader-facing marker that the run is parked | [`RunWaiting`] |
 /// | `run_woken` | the timer fired | [`RunWoken`] |
 /// | `cap_breached` | a cap was hit; the run is about to fail | [`CapBreached`] |
-/// | `run_ended` | the terminal state, recorded once | [`RunEnded`] |
+/// | `run_ended` | the terminal state, recorded once, always last | [`RunEnded`] |
 ///
 /// A **step** is identified by its `step_seq`: the sequence of the entry that
 /// opened it, either `step_started` or `approval_requested`. Every later entry
 /// about that step carries the same `step_seq`, and its
 /// [`effect_id`](crate::effect_id) is derived from it.
+///
+/// # Replay validates before it interprets
+///
+/// A journal is not trusted just because it loaded. Before rebuilding a run the
+/// engine checks that sequences start at 1 and increase by exactly one; that the
+/// first entry is `run_started` and the only one; that nothing follows
+/// `run_ended`; that every `step_seq` names a step that was really opened at
+/// that sequence; that each `effect_id` equals
+/// [`effect_id(run, step_seq)`](crate::effect_id) and each `args_hash` equals
+/// [`args_hash(args)`](crate::args_hash); that a repeated `step_started` agrees
+/// with the original in every field; and that an approval is resolved at most
+/// once. Anything else is [`Error::CorruptJournal`], refused *before* a step can
+/// reach dispatch under an arbitrary or colliding effect id.
 #[async_trait]
 pub trait Journal: Send + Sync {
-    /// Append `entry` at `entry.seq`, durably.
+    /// Append `entry` at `entry.seq`, **durably**.
     ///
     /// Returns the sequence actually committed, which must equal `entry.seq`.
     /// Fails with [`Error::SeqConflict`] if that sequence is already taken.
+    ///
+    /// # This is the crate's only crash-safety primitive
+    ///
+    /// Returning `Ok` is a promise that the entry would survive the process
+    /// being killed at the next instruction. The engine relies on it absolutely:
+    /// it appends `step_started`, waits for this call, and only then performs a
+    /// side effect it cannot take back. An implementation that returns before
+    /// the write is durable has not made the guarantee weaker — it has removed
+    /// it, silently, from every run.
+    ///
+    /// See the [trait docs](Journal#-every-crash-safety-property-this-crate-claims-is-your-property)
+    /// for what "durable" has to mean in practice.
     async fn append(&self, run: RunId, entry: Entry) -> Result<Seq>;
 
     /// Every entry for `run`, ordered by `seq` ascending. Empty for an unknown

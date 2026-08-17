@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use super::{assert_layout, config, engine, entries_of, only_payload};
+use super::{assert_layout, config, engine, entries_of, only_payload, pending_step};
 use crate::engine::EngineConfig;
 use crate::ids::{effect_id, RunId};
 use crate::journal::{ApprovalRequested, ApprovalResolved, EntryKind, RunEnded, StepStarted};
@@ -57,7 +57,7 @@ async fn pause_resume_round_trip_approve_completes() {
     );
 
     let done = engine
-        .resume(run, Resolution::Approve)
+        .resume(run, Resolution::approve(pending_step(&paused)))
         .await
         .expect("resume succeeds");
 
@@ -99,7 +99,7 @@ async fn approved_step_keeps_its_quoted_effect_id() {
     );
 
     engine
-        .resume(run, Resolution::Approve)
+        .resume(run, Resolution::approve(pending_step(&paused)))
         .await
         .expect("resume succeeds");
 
@@ -123,9 +123,9 @@ async fn skip_path_ends_skipped() {
     let (engine, _llm, journal) = engine(script(), vec![tool.clone()], config());
     let run = RunId::new();
 
-    engine.run(run, "draft").await.expect("run succeeds");
+    let paused = engine.run(run, "draft").await.expect("run succeeds");
     let outcome = engine
-        .resume(run, Resolution::Skip)
+        .resume(run, Resolution::skip(pending_step(&paused)))
         .await
         .expect("resume succeeds");
 
@@ -155,9 +155,9 @@ async fn expire_path_ends_expired() {
     let (engine, _llm, journal) = engine(script(), vec![tool.clone()], config());
     let run = RunId::new();
 
-    engine.run(run, "draft").await.expect("run succeeds");
+    let paused = engine.run(run, "draft").await.expect("run succeeds");
     let outcome = engine
-        .resume(run, Resolution::Expire)
+        .resume(run, Resolution::expire(pending_step(&paused)))
         .await
         .expect("resume succeeds");
 
@@ -197,8 +197,9 @@ async fn approval_gated_tool_never_runs_without_resolution() {
     assert_eq!(entries_of(&journal, run, EntryKind::RunStarted).len(), 1);
 
     // The only door is a resolution, and skipping keeps it shut.
+    let pending: ApprovalRequested = only_payload(&journal, run, EntryKind::ApprovalRequested);
     let skipped = engine
-        .resume(run, Resolution::Skip)
+        .resume(run, Resolution::skip(pending.step_seq))
         .await
         .expect("resume succeeds");
     assert_eq!(skipped.status(), RunStatus::Skipped);
@@ -212,9 +213,9 @@ async fn run_on_paused_run_is_noop() {
     let (engine, llm, journal) = engine(script(), vec![tool.clone()], config());
     let run = RunId::new();
 
-    engine.run(run, "draft").await.expect("run succeeds");
+    let paused = engine.run(run, "draft").await.expect("run succeeds");
     engine
-        .resume(run, Resolution::Approve)
+        .resume(run, Resolution::approve(pending_step(&paused)))
         .await
         .expect("resume succeeds");
     let entries = journal.entries(run).len();
@@ -239,15 +240,16 @@ async fn double_approve_executes_tool_once() {
     let (engine, _llm, journal) = engine(script(), vec![tool.clone()], config());
     let run = RunId::new();
 
-    engine.run(run, "draft").await.expect("run succeeds");
+    let paused = engine.run(run, "draft").await.expect("run succeeds");
+    let step = pending_step(&paused);
     let first = engine
-        .resume(run, Resolution::Approve)
+        .resume(run, Resolution::approve(step))
         .await
         .expect("first approve");
     let entries = journal.entries(run).len();
 
     let second = engine
-        .resume(run, Resolution::Approve)
+        .resume(run, Resolution::approve(step))
         .await
         .expect("second approve");
 
@@ -271,15 +273,19 @@ async fn duplicate_resume_of_finished_run_is_noop() {
     let (engine, _llm, journal) = engine(script(), vec![tool.clone()], config());
     let run = RunId::new();
 
-    engine.run(run, "draft").await.expect("run succeeds");
-    engine.resume(run, Resolution::Skip).await.expect("skip");
+    let paused = engine.run(run, "draft").await.expect("run succeeds");
+    let step = pending_step(&paused);
+    engine
+        .resume(run, Resolution::skip(step))
+        .await
+        .expect("skip");
     let entries = journal.entries(run).len();
 
     for resolution in [
-        Resolution::Approve,
-        Resolution::Skip,
-        Resolution::Expire,
-        Resolution::Timer,
+        Resolution::approve(step),
+        Resolution::skip(step),
+        Resolution::expire(step),
+        Resolution::timer(step),
     ] {
         let outcome = engine
             .resume(run, resolution)
@@ -322,7 +328,7 @@ async fn approve_after_expiry_expires_run() {
     );
 
     let outcome = engine
-        .resume(run, Resolution::Approve)
+        .resume(run, Resolution::approve(pending_step(&paused)))
         .await
         .expect("resume succeeds");
 
@@ -358,7 +364,7 @@ async fn absurd_ttl_and_leeway_clamp_instead_of_panicking() {
     assert!(paused.approval().expect("paused").expires_at.is_some());
 
     let outcome = engine
-        .resume(run, Resolution::Approve)
+        .resume(run, Resolution::approve(pending_step(&paused)))
         .await
         .expect("resume survives the config");
 
@@ -379,11 +385,11 @@ async fn approve_within_clock_skew_leeway_succeeds() {
     let (engine, _llm, _journal) = engine(script(), vec![tool.clone()], config);
     let run = RunId::new();
 
-    engine.run(run, "draft").await.expect("run succeeds");
+    let paused = engine.run(run, "draft").await.expect("run succeeds");
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let outcome = engine
-        .resume(run, Resolution::Approve)
+        .resume(run, Resolution::approve(pending_step(&paused)))
         .await
         .expect("resume succeeds");
 
@@ -407,7 +413,7 @@ async fn approval_without_ttl_never_expires() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     let outcome = engine
-        .resume(run, Resolution::Approve)
+        .resume(run, Resolution::approve(pending_step(&paused)))
         .await
         .expect("resume succeeds");
 
@@ -432,11 +438,11 @@ async fn resume_without_pending_approval_errors() {
 
     // A run that has never been started.
     assert!(matches!(
-        engine.resume(run, Resolution::Approve).await,
+        engine.resume(run, Resolution::approve(3)).await,
         Err(Error::NoPendingApproval(_))
     ));
     assert!(matches!(
-        engine.resume(run, Resolution::Timer).await,
+        engine.resume(run, Resolution::timer(3)).await,
         Err(Error::NotWaiting(_))
     ));
 
@@ -449,11 +455,11 @@ async fn resume_without_pending_approval_errors() {
     let entries = journal.entries(run).len();
 
     assert!(matches!(
-        engine.resume(run, Resolution::Approve).await,
+        engine.resume(run, Resolution::approve(3)).await,
         Err(Error::NoPendingApproval(_))
     ));
     assert!(matches!(
-        engine.resume(run, Resolution::Timer).await,
+        engine.resume(run, Resolution::timer(3)).await,
         Err(Error::NotWaiting(_))
     ));
     assert_eq!(
@@ -469,10 +475,12 @@ async fn timer_resume_when_not_waiting_errors() {
     let (engine, _llm, journal) = engine(script(), vec![tool], config());
     let run = RunId::new();
 
-    engine.run(run, "draft").await.expect("run succeeds");
+    let paused = engine.run(run, "draft").await.expect("run succeeds");
     let entries = journal.entries(run).len();
 
-    let result = engine.resume(run, Resolution::Timer).await;
+    let result = engine
+        .resume(run, Resolution::timer(pending_step(&paused)))
+        .await;
 
     assert!(matches!(result, Err(Error::NotWaiting(_))));
     assert_eq!(journal.entries(run).len(), entries);
@@ -514,7 +522,7 @@ async fn multi_call_turn_pauses_midway_and_resumes_in_order() {
     assert_eq!(requested.call_id, "c2");
 
     let done = engine
-        .resume(run, Resolution::Approve)
+        .resume(run, Resolution::approve(pending_step(&paused)))
         .await
         .expect("resume succeeds");
 

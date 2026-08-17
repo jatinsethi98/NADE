@@ -26,7 +26,7 @@ use crate::ids::{RunId, Seq};
 use crate::journal::{Entry, Journal};
 use crate::llm::Llm;
 use crate::message::{ChatRequest, ChatResponse, ToolCall};
-use crate::tool::{control, Tool};
+use crate::tool::{control, ReplayPolicy, Tool};
 
 /// A model that reads from a script.
 ///
@@ -275,10 +275,21 @@ impl Tool for EchoTool {
 /// [`ToolCall::effect_id`], exactly as a consumer is required to. A re-executed
 /// step therefore shows up as two executions and one effect, which is the whole
 /// point of the deterministic id.
+///
+/// # It is deliberately idempotent, including in what it returns
+///
+/// The bookkeeping is *observation*, not output: two attempts at one step
+/// produce byte-identical results, because a test double that returned
+/// `writes: 1` and then `writes: 2` would be modelling a tool that violates the
+/// contract this crate asks tools to keep — and quietly teaching every reader
+/// that doing so is fine. If you want a tool whose result drifts between
+/// attempts, that is [`DriftingTool`], and it exists to be caught.
 #[derive(Debug)]
 pub struct CountingTool {
     name: String,
     requires_approval: bool,
+    version: Option<String>,
+    replay_policy: ReplayPolicy,
     executions: Arc<AtomicU32>,
     effects: Arc<Mutex<HashMap<Uuid, u32>>>,
     calls: Arc<Mutex<Vec<ToolCall>>>,
@@ -290,6 +301,8 @@ impl CountingTool {
         Self {
             name: name.into(),
             requires_approval: false,
+            version: None,
+            replay_policy: ReplayPolicy::Retry,
             executions: Arc::new(AtomicU32::new(0)),
             effects: Arc::new(Mutex::new(HashMap::new())),
             calls: Arc::new(Mutex::new(Vec::new())),
@@ -303,6 +316,30 @@ impl CountingTool {
             requires_approval: true,
             ..Self::new(name)
         }
+    }
+
+    /// The same tool under a declared [`Tool::version`]. Chainable.
+    ///
+    /// Two `CountingTool`s that differ only here fingerprint differently, which
+    /// is how a test stands in for "the binary was redeployed".
+    #[must_use]
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = Some(version.into());
+        self
+    }
+
+    /// Flip the approval gate. Chainable.
+    #[must_use]
+    pub fn with_approval(mut self, requires_approval: bool) -> Self {
+        self.requires_approval = requires_approval;
+        self
+    }
+
+    /// Declare the tool unsafe to blind-retry. Chainable.
+    #[must_use]
+    pub fn with_replay_policy(mut self, policy: ReplayPolicy) -> Self {
+        self.replay_policy = policy;
+        self
     }
 
     /// How many times `execute` was actually called.
@@ -333,8 +370,16 @@ impl Tool for CountingTool {
         json!({"type": "object", "properties": {"note": {"type": "string"}}})
     }
 
+    fn version(&self) -> Option<&str> {
+        self.version.as_deref()
+    }
+
     fn requires_approval(&self, _call: &ToolCall) -> bool {
         self.requires_approval
+    }
+
+    fn replay_policy(&self, _call: &ToolCall) -> ReplayPolicy {
+        self.replay_policy
     }
 
     async fn execute(&self, call: &ToolCall) -> Result<Value> {
@@ -346,14 +391,55 @@ impl Tool for CountingTool {
         let id = call
             .effect_id()
             .ok_or_else(|| Error::tool("no effect id on the call"))?;
-        let writes = {
+        {
             let mut effects = self.effects.lock().expect("effects lock");
-            let counter = effects.entry(id).or_insert(0);
-            *counter += 1;
-            *counter
-        };
+            *effects.entry(id).or_insert(0) += 1;
+        }
 
-        Ok(json!({"effect_id": id, "writes": writes, "args": call.arguments}))
+        // Derived only from the call, so every attempt at one step returns the
+        // same bytes. The write count stays in `effects()`, where a test can
+        // read it without the tool having to leak it.
+        Ok(json!({"effect_id": id, "args": call.arguments}))
+    }
+}
+
+/// A tool whose result changes between attempts at the same step — the
+/// anti-pattern, kept so a test can show what it costs.
+///
+/// Returns the attempt's `replay` flag and a counter, so re-execution after a
+/// crash produces a *different* answer for the same `effect_id`. Nothing in the
+/// engine can fix this; it is what the idempotency contract asks a tool not to
+/// do.
+#[derive(Debug, Default)]
+pub struct DriftingTool {
+    executions: Arc<AtomicU32>,
+}
+
+impl DriftingTool {
+    /// A fresh drifting tool.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// How many times it ran.
+    pub fn executions(&self) -> u32 {
+        self.executions.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl Tool for DriftingTool {
+    fn name(&self) -> &str {
+        "drifts"
+    }
+
+    fn schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+
+    async fn execute(&self, call: &ToolCall) -> Result<Value> {
+        let attempt = self.executions.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(json!({"attempt": attempt, "replay": call.is_replay()}))
     }
 }
 
@@ -435,14 +521,21 @@ impl Tool for HugeTool {
 /// A tool that parks the run on a timer.
 #[derive(Debug)]
 pub struct WaitTool {
+    name: String,
     wake_at: DateTime<Utc>,
     executions: Arc<AtomicU32>,
 }
 
 impl WaitTool {
-    /// A tool that parks the run until `wake_at`.
+    /// A tool called `sleep` that parks the run until `wake_at`.
     pub fn new(wake_at: DateTime<Utc>) -> Self {
+        Self::named("sleep", wake_at)
+    }
+
+    /// The same under a chosen name, so one run can park twice on two tools.
+    pub fn named(name: impl Into<String>, wake_at: DateTime<Utc>) -> Self {
         Self {
+            name: name.into(),
             wake_at,
             executions: Arc::new(AtomicU32::new(0)),
         }
@@ -457,7 +550,7 @@ impl WaitTool {
 #[async_trait]
 impl Tool for WaitTool {
     fn name(&self) -> &str {
-        "sleep"
+        &self.name
     }
 
     fn schema(&self) -> Value {

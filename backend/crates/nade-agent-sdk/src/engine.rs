@@ -24,7 +24,7 @@ use crate::message::{CallContext, ChatRequest, Message, TokenUsage, ToolCall};
 use crate::run::{
     ApprovalRequest, Decision, FailureReason, Resolution, RunInput, RunOutcome, RunStats, RunStatus,
 };
-use crate::tool::{self, control, Tool, ToolSet};
+use crate::tool::{self, control, tool_fingerprint, ReplayPolicy, Tool, ToolSet};
 
 /// Caps and knobs. Every default is the one `PLAN.md` fixes for NADE, but
 /// nothing here is NADE-specific.
@@ -45,7 +45,9 @@ pub struct EngineConfig {
     ///
     /// Enforced twice: after a turn (the response that pushed the run over ends
     /// it) and before the next turn (a run with nothing left to spend does not
-    /// call the model at all). Spending *exactly* the budget is allowed.
+    /// call the model at all). Spending *exactly* the budget is allowed. The
+    /// after-a-turn rule is re-applied on replay, so a crash cannot let a run
+    /// take a step the turn that broke the budget had already forbidden.
     ///
     /// Default `50_000`.
     pub token_budget: u64,
@@ -69,10 +71,35 @@ pub struct EngineConfig {
     /// Default `Some(7 days)`.
     pub approval_ttl: Option<Duration>,
 
-    /// Grace added to every expiry comparison, to absorb clock skew between the
-    /// machine that wrote the approval and the one that resolves it.
+    /// Grace added to every expiry comparison, to absorb a resolver clock that
+    /// runs **ahead** of the machine that wrote the approval.
     ///
     /// An approval is refused only when `now > expires_at + leeway`.
+    ///
+    /// # The clock assumption, precisely
+    ///
+    /// Expiry is wall-clock arithmetic on timestamps written by possibly
+    /// different machines, so it is only as good as those clocks. This crate
+    /// bounds the damage from both directions:
+    ///
+    /// * **Resolver ahead of writer** — a decision made in time could look
+    ///   late. This leeway absorbs it; pick it larger than your worst expected
+    ///   skew (NTP-disciplined hosts are typically well under a second; 60 s is
+    ///   the default and is generous).
+    /// * **Resolver behind writer** — the dangerous direction, because a
+    ///   backwards jump would make an objectively stale approval approvable
+    ///   again. The engine therefore never reads a "now" earlier than the newest
+    ///   `created_at` in the run's own journal: time cannot run backwards past
+    ///   the last durable fact about the run. A machine whose clock jumps back
+    ///   an hour still cannot un-expire an approval whose journal has entries
+    ///   from ten minutes ago.
+    ///
+    /// What is *not* defended: a clock that jumps **forward** by more than
+    /// `leeway` expires approvals early, and a run whose journal has been idle
+    /// for the whole TTL has no recent entry to floor the comparison with. If
+    /// expiry has to be exact, expire from a sweep that reads
+    /// [`ApprovalRequest::expires_at`] out of your own database rather than
+    /// relying on the engine to notice.
     ///
     /// Default `60s`.
     pub clock_skew_leeway: Duration,
@@ -125,7 +152,7 @@ fn deadline(from: DateTime<Utc>, d: Duration) -> DateTime<Utc> {
 /// build one at startup and share it through an `Arc`.
 ///
 /// See the [crate docs](crate) for the journal-before-effect contract this
-/// implements.
+/// implements, and for the guarantee it does and does not provide.
 pub struct Engine<L, J> {
     llm: L,
     tools: ToolSet,
@@ -175,18 +202,26 @@ impl<L: Llm, J: Journal> Engine<L, J> {
 
     /// Start `run_id`, or carry on where a previous attempt left off.
     ///
-    /// This is the call a job worker makes, including after a crash. It is safe
-    /// to make it repeatedly:
+    /// This is the call a job worker makes, including after a crash, and it is
+    /// the **only** call needed to drive a run whose decisions are already on
+    /// record. It is safe to make repeatedly:
     ///
     /// * an empty journal starts the run and records `input`;
     /// * a journal that already has entries is **replayed**, and the `input`
     ///   argument is ignored in favour of the one recorded at the start;
     /// * a run that is finished, waiting on a human, or parked on a timer is
-    ///   returned as-is without appending anything or executing anything.
+    ///   returned as-is without appending anything or executing anything;
+    /// * a run whose approval was resolved but whose outcome never committed is
+    ///   carried through to that outcome — an approve executes, a skip ends
+    ///   `skipped`, an expire ends `expired`;
+    /// * a run whose final model response committed but whose `run_ended` did
+    ///   not is finished **from the recorded response**. The model is never
+    ///   asked to answer twice.
     ///
     /// Errors are transport failures — an unreachable model, a journal that
-    /// will not commit. They leave the run exactly where its journal says it
-    /// is, and the host should retry.
+    /// will not commit — or a refusal to proceed unsafely
+    /// ([`Error::CorruptJournal`], [`Error::ToolChanged`]). They leave the run
+    /// exactly where its journal says it is.
     pub async fn run(&self, run_id: RunId, input: impl Into<RunInput>) -> Result<RunOutcome> {
         let entries = self.journal.load(run_id).await?;
         let mut state = if entries.is_empty() {
@@ -204,10 +239,7 @@ impl<L: Llm, J: Journal> Engine<L, J> {
             RunState::replay(run_id, &entries)?
         };
 
-        if let Some(outcome) = self.parked_outcome(run_id, &state)? {
-            return Ok(outcome);
-        }
-        self.drive(run_id, &mut state).await
+        self.continue_run(run_id, &mut state).await
     }
 
     /// Settle a paused run: a human's answer to an approval, or a timer firing.
@@ -223,17 +255,35 @@ impl<L: Llm, J: Journal> Engine<L, J> {
     /// * [`Resolution::Timer`] wakes a run parked by
     ///   [`control::wait_until`](crate::control::wait_until).
     ///
-    /// Resolving a run that has already finished is a no-op: the recorded
-    /// terminal outcome is returned and nothing is appended. That is what makes
-    /// a replayed approval — the same button pressed twice, the same webhook
-    /// delivered twice — harmless.
+    /// # Every resolution names its step
+    ///
+    /// The `step_seq` on the resolution must be the step the run is actually
+    /// parked on. This is what makes a duplicate delivery safe in the case that
+    /// matters: an old approval arriving after the run has moved on to a *new*
+    /// approval is refused rather than silently applied to the new one. Take the
+    /// value from [`ApprovalRequest::step_seq`] or
+    /// [`RunOutcome::Waiting::step_seq`].
+    ///
+    /// | situation | result | appended | executed |
+    /// |---|---|---|---|
+    /// | names the pending step | settled | yes | per decision |
+    /// | run already finished | its recorded outcome | no | no |
+    /// | names an already-decided step | [`Error::AlreadyResolved`] | no | no |
+    /// | names some other step | [`Error::StepMismatch`] | no | no |
+    /// | nothing is pending | [`Error::NoPendingApproval`] / [`Error::NotWaiting`] | no | no |
+    ///
+    /// [`Error::AlreadyResolved`] is the answer to the same button pressed
+    /// twice or the same webhook delivered twice. Treat it as success: an
+    /// earlier delivery already won. If the run still needs driving — the
+    /// decision committed but the process died before acting on it — call
+    /// [`Engine::run`], which resumes from any recorded decision.
     pub async fn resume(&self, run_id: RunId, resolution: Resolution) -> Result<RunOutcome> {
         let entries = self.journal.load(run_id).await?;
         if entries.is_empty() {
             // Resolving a run that was never started. Report the mismatch the
             // caller actually made rather than "corrupt journal".
             return Err(match resolution {
-                Resolution::Timer => Error::NotWaiting(run_id),
+                Resolution::Timer { .. } => Error::NotWaiting(run_id),
                 _ => Error::NoPendingApproval(run_id),
             });
         }
@@ -245,86 +295,140 @@ impl<L: Llm, J: Journal> Engine<L, J> {
             return terminal_outcome(run_id, ended, state.stats());
         }
 
+        let step_seq = resolution.step_seq();
         match resolution {
-            Resolution::Timer => {
-                if state.waiting.is_none() {
+            Resolution::Timer { .. } => {
+                let Some(waiting) = state.waiting.clone() else {
                     return Err(Error::NotWaiting(run_id));
+                };
+                // A stale wake-up must not cut short a later, unrelated wait.
+                if waiting.step_seq != step_seq {
+                    return Err(Error::StepMismatch {
+                        run: run_id,
+                        expected: Some(waiting.step_seq),
+                        got: step_seq,
+                    });
                 }
                 let woken = RunWoken {
-                    woken_at: Utc::now(),
+                    step_seq,
+                    woken_at: self.now(&state),
                 };
                 self.append(run_id, &mut state, EntryKind::RunWoken, &woken)
                     .await?;
                 state.waiting = None;
             }
-            Resolution::Approve | Resolution::Skip | Resolution::Expire => {
+            Resolution::Approve { .. } | Resolution::Skip { .. } | Resolution::Expire { .. } => {
+                // A decision already on record is never re-applied, and never
+                // re-pointed at whatever else happens to be open. This is the
+                // whole reason a resolution carries a step.
+                if let Some(decision) = state.resolved_approvals.get(&step_seq).copied() {
+                    return Err(Error::AlreadyResolved {
+                        run: run_id,
+                        step_seq,
+                        decision,
+                    });
+                }
                 let Some(pending) = state.pending_approval.clone() else {
                     return Err(Error::NoPendingApproval(run_id));
                 };
+                if pending.step_seq != step_seq {
+                    return Err(Error::StepMismatch {
+                        run: run_id,
+                        expected: Some(pending.step_seq),
+                        got: step_seq,
+                    });
+                }
 
-                let decision = match resolution {
-                    Resolution::Skip => Decision::Skip,
-                    Resolution::Expire => Decision::Expire,
-                    // EDGE: approval expired, and EDGE: clock skew. The
-                    // comparison carries an explicit leeway so a resolver whose
-                    // clock runs ahead of the writer's cannot reject a decision
-                    // a human made in time.
-                    Resolution::Approve if self.is_expired(pending.expires_at, Utc::now()) => {
-                        Decision::Expire
-                    }
-                    _ => Decision::Approve,
-                };
-                let reason = (decision == Decision::Expire && resolution == Resolution::Approve)
-                    .then(|| "ttl_expired".to_string());
+                let now = self.now(&state);
+                let intent = resolution
+                    .decision()
+                    .expect("approve, skip and expire all carry a decision");
+                // EDGE: approval expired, and EDGE: clock skew. The comparison
+                // carries an explicit leeway so a resolver whose clock runs
+                // ahead of the writer's cannot reject a decision a human made in
+                // time, and `now` is floored by the journal so one whose clock
+                // runs behind cannot revive a decision that has objectively aged
+                // out.
+                let expired =
+                    intent == Decision::Approve && self.is_expired(pending.expires_at, now);
+                let decision = if expired { Decision::Expire } else { intent };
+                let reason = expired.then(|| "ttl_expired".to_string());
 
                 let resolved = ApprovalResolved {
-                    step_seq: pending.step_seq,
+                    step_seq,
                     decision,
-                    resolved_at: Utc::now(),
+                    resolved_at: now,
                     reason,
                 };
                 self.append(run_id, &mut state, EntryKind::ApprovalResolved, &resolved)
                     .await?;
                 state.pending_approval = None;
-                state.resolved_approvals.insert(pending.step_seq, decision);
-
-                match decision {
-                    Decision::Skip => {
-                        return self
-                            .end(run_id, &mut state, RunStatus::Skipped, None, None)
-                            .await
-                    }
-                    Decision::Expire => {
-                        return self
-                            .end(run_id, &mut state, RunStatus::Expired, None, None)
-                            .await
-                    }
-                    Decision::Approve => {}
-                }
+                state.resolved_approvals.insert(step_seq, decision);
+                // The terminal state a non-approval implies is now a fact about
+                // the run, whether or not this process survives to record it.
+                state.pending_terminal = terminal_for(decision);
             }
         }
 
-        self.drive(run_id, &mut state).await
+        self.continue_run(run_id, &mut state).await
     }
 
     // ---- internals ---------------------------------------------------------
 
-    /// The outcome of a run that is already finished or parked, if it is.
-    fn parked_outcome(&self, run_id: RunId, state: &RunState) -> Result<Option<RunOutcome>> {
+    /// Carry a replayed or freshly-resolved run to wherever it should stop.
+    ///
+    /// The single entry point into execution, so every caller applies the same
+    /// precedence: a run that has already ended stays ended; a decision on
+    /// record reaches its terminal state; a parked run is reported as-is; and
+    /// only then does anything execute.
+    async fn continue_run(&self, run_id: RunId, state: &mut RunState) -> Result<RunOutcome> {
         if let Some(ended) = &state.ended {
-            return terminal_outcome(run_id, ended, state.stats()).map(Some);
+            return terminal_outcome(run_id, ended, state.stats());
         }
+        // A committed Skip or Expire whose `run_ended` never landed. Without
+        // this the human's durable decision would be unreachable: `resume` has
+        // nothing pending to settle and the gated step must never execute.
+        if let Some(status) = state.pending_terminal.take() {
+            return self.end(run_id, state, status, None, None).await;
+        }
+        // A cap breach that was journaled but never finished with `run_ended`.
+        if let Some(reason) = state.breached.take() {
+            return self
+                .end(run_id, state, RunStatus::Failed, None, Some(reason))
+                .await;
+        }
+        if let Some(outcome) = self.parked_outcome(run_id, state) {
+            return Ok(outcome);
+        }
+        self.drive(run_id, state).await
+    }
+
+    /// The outcome of a run that is parked on a human or a timer, if it is.
+    fn parked_outcome(&self, run_id: RunId, state: &RunState) -> Option<RunOutcome> {
         if let Some(waiting) = &state.waiting {
-            return Ok(Some(RunOutcome::Waiting {
+            return Some(RunOutcome::Waiting {
                 run_id,
+                step_seq: waiting.step_seq,
                 wake_at: waiting.wake_at,
                 stats: state.stats(),
-            }));
+            });
         }
-        if let Some(pending) = &state.pending_approval {
-            return Ok(Some(pending_outcome(run_id, pending, state.stats())));
-        }
-        Ok(None)
+        state
+            .pending_approval
+            .as_ref()
+            .map(|pending| pending_outcome(run_id, pending, state.stats()))
+    }
+
+    /// The current instant, never earlier than the newest fact in this run's
+    /// journal.
+    ///
+    /// A wall clock that jumps backwards would otherwise make an approval that
+    /// has objectively aged out approvable again. The journal is a monotone
+    /// witness: whatever the local clock says, time is at least as late as the
+    /// last durable entry. See
+    /// [`EngineConfig::clock_skew_leeway`](EngineConfig::clock_skew_leeway).
+    fn now(&self, state: &RunState) -> DateTime<Utc> {
+        Utc::now().max(state.clock_floor)
     }
 
     fn is_expired(&self, expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
@@ -345,7 +449,8 @@ impl<L: Llm, J: Journal> Engine<L, J> {
             .last_seq
             .checked_add(1)
             .ok_or_else(|| Error::journal("journal sequence overflowed"))?;
-        let entry = Entry::new(seq, kind, payload)?;
+        let created_at = self.now(state);
+        let entry = Entry::at(seq, kind, payload, created_at)?;
         let committed = self.journal.append(run_id, entry).await?;
         if committed != seq {
             return Err(Error::journal(format!(
@@ -353,6 +458,7 @@ impl<L: Llm, J: Journal> Engine<L, J> {
             )));
         }
         state.last_seq = committed;
+        state.clock_floor = state.clock_floor.max(created_at);
         Ok(seq)
     }
 
@@ -374,6 +480,7 @@ impl<L: Llm, J: Journal> Engine<L, J> {
         };
         self.append(run_id, state, EntryKind::RunEnded, &ended)
             .await?;
+        state.ended = Some(ended.clone());
         terminal_outcome(run_id, &ended, state.stats())
     }
 
@@ -389,16 +496,48 @@ impl<L: Llm, J: Journal> Engine<L, J> {
         };
         self.append(run_id, state, EntryKind::CapBreached, &breach)
             .await?;
+        state.breached = None;
         self.end(run_id, state, RunStatus::Failed, None, Some(reason))
             .await
     }
 
     async fn drive(&self, run_id: RunId, state: &mut RunState) -> Result<RunOutcome> {
+        // EDGE: token budget already broken by a turn recorded before a crash.
+        // The rule that ends a run is applied to the journal, not only to the
+        // response as it arrives, so replay cannot smuggle in a tool step the
+        // original turn had already forbidden.
+        let spent = state.usage.total();
+        if spent > self.config.token_budget {
+            let reason = FailureReason::TokenBudgetExceeded {
+                limit: self.config.token_budget,
+                spent,
+            };
+            return self.breach(run_id, state, reason).await;
+        }
+
         // Terminates because every iteration that does not return opens at
         // least one new step, and `max_steps` bounds how many may be opened.
         loop {
             if let Some(outcome) = self.advance_calls(run_id, state).await? {
                 return Ok(outcome);
+            }
+            // A model turn with no tool calls **is** the run's answer, and it is
+            // durable. Finishing from it is not an optimisation: asking again
+            // would buy a fresh, nondeterministic response, and that response
+            // could carry tool calls the recorded answer never had.
+            if let Some(response) = state.final_response.take() {
+                // EDGE: empty or whitespace-only model output is a finished run
+                // with nothing to say, not a failure. The raw text stays in the
+                // journal; only the outcome is trimmed.
+                return self
+                    .end(
+                        run_id,
+                        state,
+                        RunStatus::Done,
+                        final_output(&response),
+                        None,
+                    )
+                    .await;
             }
             if let Some(outcome) = self.model_turn(run_id, state).await? {
                 return Ok(outcome);
@@ -470,22 +609,28 @@ impl<L: Llm, J: Journal> Engine<L, J> {
                     let step_seq = state.last_seq.saturating_add(1);
                     let eid = effect_id(run_id, step_seq);
                     let hash = args_hash(&call.arguments);
-                    let mut dispatched = call.clone();
-                    dispatched.context = Some(CallContext {
-                        run_id,
-                        step_seq,
-                        effect_id: eid,
-                        replay: false,
-                        dispatched_at: Utc::now(),
-                    });
+                    // Fixed once, here, and replayed verbatim on every later
+                    // attempt at this step.
+                    let opened_at = self.now(state);
+                    let probe = ToolCall {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        arguments: call.arguments.clone(),
+                        context: Some(CallContext {
+                            run_id,
+                            step_seq,
+                            effect_id: eid,
+                            replay: false,
+                            opened_at,
+                        }),
+                    };
 
                     // EDGE: the model named a tool that does not exist. It is
                     // not dispatched, but it does open a step: an agent that
                     // hallucinates names must not get unlimited free retries.
-                    let gated = self
-                        .tools
-                        .get(&call.name)
-                        .is_some_and(|t| t.requires_approval(&dispatched));
+                    let found = self.tools.get(&call.name);
+                    let gated = found.is_some_and(|t| t.requires_approval(&probe));
+                    let fingerprint = found.map(|t| tool_fingerprint(t.as_ref()));
 
                     let record = StepRecord {
                         step_seq,
@@ -497,14 +642,13 @@ impl<L: Llm, J: Journal> Engine<L, J> {
                         started: false,
                         done: false,
                         gated,
+                        opened_at,
+                        tool_fingerprint: fingerprint.clone(),
                     };
 
                     if gated {
-                        let requested_at = Utc::now();
-                        let expires_at = self
-                            .config
-                            .approval_ttl
-                            .map(|ttl| deadline(requested_at, ttl));
+                        let expires_at =
+                            self.config.approval_ttl.map(|ttl| deadline(opened_at, ttl));
                         let payload = ApprovalRequested {
                             step_seq,
                             call_id: call.id.clone(),
@@ -512,8 +656,9 @@ impl<L: Llm, J: Journal> Engine<L, J> {
                             args: call.arguments.clone(),
                             args_hash: hash,
                             effect_id: eid,
-                            requested_at,
+                            requested_at: opened_at,
                             expires_at,
+                            tool_fingerprint: fingerprint,
                         };
                         let seq = self
                             .append(run_id, state, EntryKind::ApprovalRequested, &payload)
@@ -538,7 +683,8 @@ impl<L: Llm, J: Journal> Engine<L, J> {
 
     /// Open an attempt at `record`'s step, run the tool, close the step.
     ///
-    /// Returns `Some` only when the tool parked the run on a timer.
+    /// Returns `Some` only when the run stops here — parked on a timer, or
+    /// halted because an interrupted step must not be retried.
     async fn execute(
         &self,
         run_id: RunId,
@@ -548,6 +694,35 @@ impl<L: Llm, J: Journal> Engine<L, J> {
     ) -> Result<Option<RunOutcome>> {
         let replay = record.started;
         let attempt = record.attempt.saturating_add(1);
+
+        // Every attempt at one step sees identical input; only `replay` moves.
+        let dispatched = ToolCall {
+            id: call.id.clone(),
+            name: record.tool.clone(),
+            arguments: record.args.clone(),
+            context: Some(CallContext {
+                run_id,
+                step_seq: record.step_seq,
+                effect_id: record.effect_id,
+                replay,
+                opened_at: record.opened_at,
+            }),
+        };
+
+        let found = self.tools.get(&record.tool);
+        if let Some(outcome) = self
+            .check_step_still_means_what_it_meant(
+                run_id,
+                state,
+                &record,
+                found,
+                &dispatched,
+                replay,
+            )
+            .await?
+        {
+            return Ok(Some(outcome));
+        }
 
         // Step 1 of the protocol: the fence. Once this commits, the engine must
         // assume the effect may exist.
@@ -564,28 +739,21 @@ impl<L: Llm, J: Journal> Engine<L, J> {
             args_hash: record.args_hash.clone(),
             effect_id: record.effect_id,
             attempt,
+            opened_at: record.opened_at,
+            tool_fingerprint: record.tool_fingerprint.clone(),
         };
         self.append(run_id, state, EntryKind::StepStarted, &started)
             .await?;
         if !record.started {
             state.steps_executed += 1;
         }
-
-        let dispatched = ToolCall {
-            id: call.id.clone(),
-            name: record.tool.clone(),
-            arguments: record.args.clone(),
-            context: Some(CallContext {
-                run_id,
-                step_seq: record.step_seq,
-                effect_id: record.effect_id,
-                replay,
-                dispatched_at: Utc::now(),
-            }),
-        };
+        if let Some(entry) = state.steps.get_mut(&call.id) {
+            entry.started = true;
+            entry.attempt = attempt;
+        }
 
         // Step 2: the effect.
-        let (raw, is_error) = match self.tools.get(&record.tool) {
+        let (raw, is_error) = match found {
             Some(t) => dispatch(t, &dispatched).await,
             None => (
                 tool::unknown_tool_error(&record.tool, &self.tools.names()),
@@ -605,7 +773,9 @@ impl<L: Llm, J: Journal> Engine<L, J> {
         // nothing downstream mistakes a fragment for the whole answer.
         let (result, truncated) = tool::cap_result(raw, self.config.max_tool_result_bytes);
 
-        // Step 3: close the step.
+        // Step 3: close the step — and, in the same committed entry, record any
+        // pause the tool asked for. A separate `run_waiting` append would leave
+        // a window in which a crash loses the delay entirely.
         let done = StepDone {
             step_seq: record.step_seq,
             call_id: call.id.clone(),
@@ -613,15 +783,14 @@ impl<L: Llm, J: Journal> Engine<L, J> {
             result,
             is_error,
             truncated,
+            wake_at: parked_until,
         };
         self.append(run_id, state, EntryKind::StepDone, &done)
             .await?;
 
         state.messages.push(tool_message(&done));
         if let Some(entry) = state.steps.get_mut(&call.id) {
-            entry.started = true;
             entry.done = true;
-            entry.attempt = attempt;
         }
 
         if let Some(until) = parked_until {
@@ -629,14 +798,83 @@ impl<L: Llm, J: Journal> Engine<L, J> {
                 step_seq: record.step_seq,
                 wake_at: until,
             };
+            state.waiting = Some(waiting.clone());
+            // A marker for readers of the journal. The wait is already durable
+            // on `step_done`, so losing this append costs nothing but a row.
             self.append(run_id, state, EntryKind::RunWaiting, &waiting)
                 .await?;
-            state.waiting = Some(waiting);
             return Ok(Some(RunOutcome::Waiting {
                 run_id,
+                step_seq: record.step_seq,
                 wake_at: until,
                 stats: state.stats(),
             }));
+        }
+
+        Ok(None)
+    }
+
+    /// Refuse to run a step under an implementation other than the one it was
+    /// opened under, and refuse to blind-retry a tool that forbids it.
+    ///
+    /// Replay preserves a step's *name*, but a deployment can change what that
+    /// name does. Executing anyway would run a different action under an
+    /// `effect_id` minted for the old one — and, worse, would execute ungated a
+    /// call the current build says needs a human.
+    async fn check_step_still_means_what_it_meant(
+        &self,
+        run_id: RunId,
+        state: &mut RunState,
+        record: &StepRecord,
+        found: Option<&Arc<dyn Tool>>,
+        dispatched: &ToolCall,
+        replay: bool,
+    ) -> Result<Option<RunOutcome>> {
+        let current = found.map(|t| tool_fingerprint(t.as_ref()));
+        if current != record.tool_fingerprint {
+            let describe = |f: &Option<String>| match f {
+                Some(hash) => hash.clone(),
+                None => "<no such tool>".to_string(),
+            };
+            return Err(Error::ToolChanged {
+                run: run_id,
+                step_seq: record.step_seq,
+                tool: record.tool.clone(),
+                detail: format!(
+                    "fingerprint was {}, is now {}",
+                    describe(&record.tool_fingerprint),
+                    describe(&current)
+                ),
+            });
+        }
+
+        let Some(t) = found else { return Ok(None) };
+
+        // The part that matters most: a build that now gates this call must not
+        // execute it just because an older build opened the step ungated.
+        if !record.gated && t.requires_approval(dispatched) {
+            return Err(Error::ToolChanged {
+                run: run_id,
+                step_seq: record.step_seq,
+                tool: record.tool.clone(),
+                detail: "the tool now requires approval, but this step was opened without a gate"
+                    .to_string(),
+            });
+        }
+
+        // An interrupted attempt at a tool that declared itself unsafe to
+        // repeat. The engine will not guess; it stops and quotes the effect id
+        // so the host can reconcile against its own records.
+        if replay && t.replay_policy(dispatched) == ReplayPolicy::Halt {
+            let reason = FailureReason::AmbiguousEffect {
+                tool: record.tool.clone(),
+                step_seq: record.step_seq,
+                effect_id: record.effect_id,
+            };
+            return self
+                .end(run_id, state, RunStatus::Failed, None, Some(reason))
+                .await
+                .map(Some);
         }
 
         Ok(None)
@@ -687,6 +925,10 @@ impl<L: Llm, J: Journal> Engine<L, J> {
             tool_calls: calls.clone(),
         });
         state.calls = calls;
+        // EDGE: `stop_reason: tool_use` with no calls is treated as the end of
+        // the run, which is also what stops a model from looping on empty turns
+        // forever. `drive` settles it, by exactly the path replay takes.
+        state.final_response = state.calls.is_empty().then_some(payload);
 
         // EDGE: token budget exceeded by the turn just received. Spending
         // exactly the budget is allowed; a single token more is not.
@@ -696,26 +938,8 @@ impl<L: Llm, J: Journal> Engine<L, J> {
                 limit: self.config.token_budget,
                 spent,
             };
+            state.final_response = None;
             return self.breach(run_id, state, reason).await.map(Some);
-        }
-
-        if state.calls.is_empty() {
-            // EDGE: empty or whitespace-only model output is a finished run
-            // with nothing to say, not a failure. The raw text stays in the
-            // journal; only the outcome is trimmed.
-            // EDGE: `stop_reason: tool_use` with no calls is treated as the end
-            // of the run, which is also what stops a model from looping on
-            // empty turns forever.
-            let output = response
-                .text
-                .as_deref()
-                .map(str::trim)
-                .filter(|t| !t.is_empty())
-                .map(str::to_string);
-            return self
-                .end(run_id, state, RunStatus::Done, output, None)
-                .await
-                .map(Some);
         }
 
         Ok(None)
@@ -800,6 +1024,25 @@ fn tool_message(done: &StepDone) -> Message {
     }
 }
 
+/// The run's closing prose: the recorded text, trimmed, or nothing.
+fn final_output(response: &ModelResponse) -> Option<String> {
+    response
+        .text
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+}
+
+/// The terminal state a decision implies, if it ends the run.
+fn terminal_for(decision: Decision) -> Option<RunStatus> {
+    match decision {
+        Decision::Approve => None,
+        Decision::Skip => Some(RunStatus::Skipped),
+        Decision::Expire => Some(RunStatus::Expired),
+    }
+}
+
 fn pending_outcome(run_id: RunId, pending: &ApprovalRequested, stats: RunStats) -> RunOutcome {
     let call = ToolCall {
         id: pending.call_id.clone(),
@@ -810,7 +1053,7 @@ fn pending_outcome(run_id: RunId, pending: &ApprovalRequested, stats: RunStats) 
             step_seq: pending.step_seq,
             effect_id: pending.effect_id,
             replay: false,
-            dispatched_at: pending.requested_at,
+            opened_at: pending.requested_at,
         }),
     };
     RunOutcome::PendingApproval {
@@ -877,6 +1120,10 @@ struct StepRecord {
     done: bool,
     /// Opened by `approval_requested` rather than `step_started`.
     gated: bool,
+    /// Fixed when the step was opened; every attempt sees this value.
+    opened_at: DateTime<Utc>,
+    /// The implementation the step was opened under.
+    tool_fingerprint: Option<String>,
 }
 
 /// Everything about a run, rebuilt from its journal.
@@ -894,11 +1141,22 @@ struct RunState {
     calls: Vec<ToolCall>,
     /// One record per step, keyed by the (normalised) call id.
     steps: HashMap<String, StepRecord>,
+    /// Step sequence to call id, so an entry naming a step can be checked
+    /// against the entry that opened it.
+    steps_by_seq: HashMap<Seq, String>,
     seen_call_ids: HashSet<String>,
     pending_approval: Option<ApprovalRequested>,
     resolved_approvals: HashMap<Seq, Decision>,
     waiting: Option<RunWaiting>,
     ended: Option<RunEnded>,
+    /// A cap breach on record whose `run_ended` never committed.
+    breached: Option<FailureReason>,
+    /// A Skip or Expire on record whose `run_ended` never committed.
+    pending_terminal: Option<RunStatus>,
+    /// The last model turn asked for no tools, so it is the run's answer.
+    final_response: Option<ModelResponse>,
+    /// The newest `created_at` in the journal: a lower bound on "now".
+    clock_floor: DateTime<Utc>,
 }
 
 impl RunState {
@@ -912,11 +1170,16 @@ impl RunState {
             steps_executed: 0,
             calls: Vec::new(),
             steps: HashMap::new(),
+            steps_by_seq: HashMap::new(),
             seen_call_ids: HashSet::new(),
             pending_approval: None,
             resolved_approvals: HashMap::new(),
             waiting: None,
             ended: None,
+            breached: None,
+            pending_terminal: None,
+            final_response: None,
+            clock_floor: DateTime::<Utc>::MIN_UTC,
         }
     }
 
@@ -928,54 +1191,124 @@ impl RunState {
         }
     }
 
-    /// Rebuild a run from its journal.
+    /// Rebuild a run from its journal, refusing anything that does not add up.
     ///
     /// The conversation is reconstructed from the recorded model turns and tool
     /// results, so resuming never pays a provider for a turn it already bought.
+    ///
+    /// Validation is not decoration. An entry whose `effect_id` or `step_seq`
+    /// disagrees with the sequence that opened its step would put a *different*
+    /// identity on a side effect, which is the one thing this crate exists to
+    /// prevent — so every such claim is checked here, before anything can be
+    /// dispatched.
     fn replay(run_id: RunId, entries: &[Entry]) -> Result<Self> {
+        let corrupt = |message: String| Error::CorruptJournal {
+            run: run_id,
+            message,
+        };
+
         let Some(first) = entries.first() else {
-            return Err(Error::CorruptJournal {
-                run: run_id,
-                message: "journal is empty".to_string(),
-            });
+            return Err(corrupt("journal is empty".to_string()));
         };
         if first.kind != EntryKind::RunStarted {
-            return Err(Error::CorruptJournal {
-                run: run_id,
-                message: format!("first entry is '{}', expected 'run_started'", first.kind),
-            });
+            return Err(corrupt(format!(
+                "first entry is '{}', expected 'run_started'",
+                first.kind
+            )));
         }
         let started: RunStarted = first.payload_as(run_id)?;
         let mut state = Self::fresh(&started.input);
 
-        for entry in entries {
-            // Sequences must be strictly increasing; anything else means the
-            // journal is not the ordered log the engine depends on.
-            if entry.seq <= state.last_seq {
-                return Err(Error::CorruptJournal {
-                    run: run_id,
-                    message: format!("entry seq {} does not follow {}", entry.seq, state.last_seq),
-                });
+        for (index, entry) in entries.iter().enumerate() {
+            // Sequences start at 1 and increase by exactly one: the journal is
+            // the ordered, gapless log the engine allocates against, and a gap
+            // means entries are missing rather than merely out of order.
+            let expected = state
+                .last_seq
+                .checked_add(1)
+                .ok_or_else(|| corrupt("journal sequence overflowed".to_string()))?;
+            if entry.seq != expected {
+                return Err(corrupt(format!(
+                    "entry {} of the journal has seq {}, expected {expected}",
+                    index + 1,
+                    entry.seq
+                )));
+            }
+            // Nothing follows a terminal state.
+            if state.ended.is_some() {
+                return Err(corrupt(format!(
+                    "entry {} ('{}') follows 'run_ended'",
+                    entry.seq, entry.kind
+                )));
             }
             state.last_seq = entry.seq;
+            state.clock_floor = state.clock_floor.max(entry.created_at);
 
             match entry.kind {
-                EntryKind::RunStarted => {}
+                EntryKind::RunStarted => {
+                    if index != 0 {
+                        return Err(corrupt(format!(
+                            "entry {} is a second 'run_started'",
+                            entry.seq
+                        )));
+                    }
+                }
                 EntryKind::ModelResponse => {
                     let payload: ModelResponse = entry.payload_as(run_id)?;
+                    if payload.turn != state.turn + 1 {
+                        return Err(corrupt(format!(
+                            "entry {} is turn {} but the run is on turn {}",
+                            entry.seq, payload.turn, state.turn
+                        )));
+                    }
                     state.turn = payload.turn;
                     state.usage.add(payload.usage);
                     for call in &payload.tool_calls {
-                        state.seen_call_ids.insert(call.id.clone());
+                        if !state.seen_call_ids.insert(call.id.clone()) {
+                            return Err(corrupt(format!(
+                                "entry {} reuses call id '{}'",
+                                entry.seq, call.id
+                            )));
+                        }
                     }
                     state.messages.push(Message::Assistant {
                         text: payload.text.clone(),
                         tool_calls: payload.tool_calls.clone(),
                     });
-                    state.calls = payload.tool_calls;
+                    state.calls = payload.tool_calls.clone();
+                    // A turn with no calls is the run's recorded answer. If no
+                    // `run_ended` follows, that answer still finishes the run.
+                    state.final_response = payload.tool_calls.is_empty().then_some(payload);
                 }
                 EntryKind::ApprovalRequested => {
                     let payload: ApprovalRequested = entry.payload_as(run_id)?;
+                    check_identity(
+                        run_id,
+                        entry.seq,
+                        payload.step_seq,
+                        Some(entry.seq),
+                        &payload.args,
+                        &payload.args_hash,
+                        payload.effect_id,
+                    )?;
+                    if !state.seen_call_ids.contains(&payload.call_id) {
+                        return Err(corrupt(format!(
+                            "entry {} opens a step for call '{}', which no model turn produced",
+                            entry.seq, payload.call_id
+                        )));
+                    }
+                    if state.steps.contains_key(&payload.call_id) {
+                        return Err(corrupt(format!(
+                            "entry {} re-opens call '{}'",
+                            entry.seq, payload.call_id
+                        )));
+                    }
+                    if let Some(open) = &state.pending_approval {
+                        return Err(corrupt(format!(
+                            "entry {} asks for a second approval while step {} is still pending",
+                            entry.seq, open.step_seq
+                        )));
+                    }
                     state.open_step(
                         payload.call_id.clone(),
                         StepRecord {
@@ -988,39 +1321,109 @@ impl RunState {
                             started: false,
                             done: false,
                             gated: true,
+                            opened_at: payload.requested_at,
+                            tool_fingerprint: payload.tool_fingerprint.clone(),
                         },
                     );
                     state.pending_approval = Some(payload);
                 }
                 EntryKind::ApprovalResolved => {
                     let payload: ApprovalResolved = entry.payload_as(run_id)?;
+                    // Exactly one resolution per approval, and only for the one
+                    // that is open: anything else would settle a step that no
+                    // longer — or never did — await a decision.
+                    let Some(pending) = state.pending_approval.take() else {
+                        return Err(corrupt(format!(
+                            "entry {} resolves step {}, but no approval is pending",
+                            entry.seq, payload.step_seq
+                        )));
+                    };
+                    if pending.step_seq != payload.step_seq {
+                        return Err(corrupt(format!(
+                            "entry {} resolves step {}, but step {} is the one pending",
+                            entry.seq, payload.step_seq, pending.step_seq
+                        )));
+                    }
                     state
                         .resolved_approvals
                         .insert(payload.step_seq, payload.decision);
-                    if state
-                        .pending_approval
-                        .as_ref()
-                        .is_some_and(|p| p.step_seq == payload.step_seq)
-                    {
-                        state.pending_approval = None;
-                    }
+                    state.pending_terminal = terminal_for(payload.decision);
                 }
                 EntryKind::StepStarted => {
                     let payload: StepStarted = entry.payload_as(run_id)?;
-                    match state.steps.get_mut(&payload.call_id) {
+                    check_identity(
+                        run_id,
+                        entry.seq,
+                        payload.step_seq,
+                        None,
+                        &payload.args,
+                        &payload.args_hash,
+                        payload.effect_id,
+                    )?;
+                    if !state.seen_call_ids.contains(&payload.call_id) {
+                        return Err(corrupt(format!(
+                            "entry {} starts a step for call '{}', which no model turn produced",
+                            entry.seq, payload.call_id
+                        )));
+                    }
+                    match state.steps.get(&payload.call_id).cloned() {
                         // Either a gated step that has now been approved, or —
                         // when `started` is already set — a retry after a crash.
                         // A retry is not a new step and must not consume budget
-                        // a second time.
+                        // a second time, nor may it disagree with the record it
+                        // is retrying.
                         Some(existing) => {
+                            if let Some(message) = existing.disagreement(&payload) {
+                                return Err(corrupt(format!(
+                                    "entry {} disagrees with the entry that opened step {}: {message}",
+                                    entry.seq, existing.step_seq
+                                )));
+                            }
+                            if existing.done {
+                                return Err(corrupt(format!(
+                                    "entry {} re-opens step {}, which already completed",
+                                    entry.seq, existing.step_seq
+                                )));
+                            }
+                            if payload.attempt <= existing.attempt {
+                                return Err(corrupt(format!(
+                                    "entry {} is attempt {} of step {}, which is already at {}",
+                                    entry.seq, payload.attempt, existing.step_seq, existing.attempt
+                                )));
+                            }
+                            if existing.gated
+                                && state.resolved_approvals.get(&existing.step_seq)
+                                    != Some(&Decision::Approve)
+                            {
+                                return Err(corrupt(format!(
+                                    "entry {} starts gated step {} with no approval on record",
+                                    entry.seq, existing.step_seq
+                                )));
+                            }
                             let first_attempt = !existing.started;
-                            existing.started = true;
-                            existing.attempt = existing.attempt.max(payload.attempt);
+                            let record = state
+                                .steps
+                                .get_mut(&payload.call_id)
+                                .expect("the record was just read");
+                            record.started = true;
+                            record.attempt = payload.attempt;
                             if first_attempt {
                                 state.steps_executed += 1;
                             }
                         }
                         None => {
+                            if payload.step_seq != entry.seq {
+                                return Err(corrupt(format!(
+                                    "entry {} opens a step but claims step_seq {}",
+                                    entry.seq, payload.step_seq
+                                )));
+                            }
+                            if payload.attempt != 1 {
+                                return Err(corrupt(format!(
+                                    "entry {} opens step {} at attempt {}, expected 1",
+                                    entry.seq, payload.step_seq, payload.attempt
+                                )));
+                            }
                             state.open_step(
                                 payload.call_id.clone(),
                                 StepRecord {
@@ -1033,6 +1436,8 @@ impl RunState {
                                     started: true,
                                     done: false,
                                     gated: false,
+                                    opened_at: payload.opened_at,
+                                    tool_fingerprint: payload.tool_fingerprint.clone(),
                                 },
                             );
                             state.steps_executed += 1;
@@ -1041,30 +1446,100 @@ impl RunState {
                 }
                 EntryKind::StepDone => {
                     let payload: StepDone = entry.payload_as(run_id)?;
-                    if let Some(existing) = state.steps.get_mut(&payload.call_id) {
-                        existing.started = true;
-                        existing.done = true;
+                    let Some(existing) = state.steps.get_mut(&payload.call_id) else {
+                        return Err(corrupt(format!(
+                            "entry {} closes call '{}', which was never opened",
+                            entry.seq, payload.call_id
+                        )));
+                    };
+                    if existing.step_seq != payload.step_seq || existing.tool != payload.tool {
+                        return Err(corrupt(format!(
+                            "entry {} closes step {} ('{}') but call '{}' is step {} ('{}')",
+                            entry.seq,
+                            payload.step_seq,
+                            payload.tool,
+                            payload.call_id,
+                            existing.step_seq,
+                            existing.tool
+                        )));
                     }
+                    if !existing.started {
+                        return Err(corrupt(format!(
+                            "entry {} closes step {}, which never started",
+                            entry.seq, payload.step_seq
+                        )));
+                    }
+                    if existing.done {
+                        return Err(corrupt(format!(
+                            "entry {} closes step {} twice",
+                            entry.seq, payload.step_seq
+                        )));
+                    }
+                    existing.done = true;
                     state.messages.push(tool_message(&payload));
+                    // The wait is durable here, with the step that asked for it.
+                    if let Some(wake_at) = payload.wake_at {
+                        state.waiting = Some(RunWaiting {
+                            step_seq: payload.step_seq,
+                            wake_at,
+                        });
+                    }
                 }
                 EntryKind::RunWaiting => {
-                    state.waiting = Some(entry.payload_as(run_id)?);
+                    let payload: RunWaiting = entry.payload_as(run_id)?;
+                    let step = state.step_at(payload.step_seq).ok_or_else(|| {
+                        corrupt(format!(
+                            "entry {} parks on step {}, which was never opened",
+                            entry.seq, payload.step_seq
+                        ))
+                    })?;
+                    if !step.done {
+                        return Err(corrupt(format!(
+                            "entry {} parks on step {}, which has not completed",
+                            entry.seq, payload.step_seq
+                        )));
+                    }
+                    if let Some(current) = &state.waiting {
+                        if current != &payload {
+                            return Err(corrupt(format!(
+                                "entry {} disagrees with the wait recorded on step {}",
+                                entry.seq, current.step_seq
+                            )));
+                        }
+                    }
+                    state.waiting = Some(payload);
                 }
                 EntryKind::RunWoken => {
-                    state.waiting = None;
+                    let payload: RunWoken = entry.payload_as(run_id)?;
+                    let Some(waiting) = state.waiting.take() else {
+                        return Err(corrupt(format!(
+                            "entry {} wakes a run that is not parked",
+                            entry.seq
+                        )));
+                    };
+                    if waiting.step_seq != payload.step_seq {
+                        return Err(corrupt(format!(
+                            "entry {} wakes step {}, but the run is parked on step {}",
+                            entry.seq, payload.step_seq, waiting.step_seq
+                        )));
+                    }
                 }
-                EntryKind::CapBreached => {}
+                EntryKind::CapBreached => {
+                    let payload: CapBreached = entry.payload_as(run_id)?;
+                    state.breached = Some(payload.reason);
+                }
                 EntryKind::RunEnded => {
                     state.ended = Some(entry.payload_as(run_id)?);
+                    // The terminal entry supersedes anything it was recording.
+                    state.pending_terminal = None;
+                    state.breached = None;
+                    state.final_response = None;
                 }
                 EntryKind::Other(_) => {
-                    return Err(Error::CorruptJournal {
-                        run: run_id,
-                        message: format!(
-                            "entry {} has kind '{}', which this version does not understand",
-                            entry.seq, entry.kind
-                        ),
-                    });
+                    return Err(corrupt(format!(
+                        "entry {} has kind '{}', which this version does not understand",
+                        entry.seq, entry.kind
+                    )));
                 }
             }
         }
@@ -1074,8 +1549,94 @@ impl RunState {
 
     fn open_step(&mut self, call_id: String, record: StepRecord) {
         self.seen_call_ids.insert(call_id.clone());
+        self.steps_by_seq.insert(record.step_seq, call_id.clone());
         if self.steps.insert(call_id, record).is_none() {
             self.steps_opened += 1;
         }
     }
+
+    /// The step opened at `seq`, if there is one.
+    fn step_at(&self, seq: Seq) -> Option<&StepRecord> {
+        self.steps_by_seq
+            .get(&seq)
+            .and_then(|call_id| self.steps.get(call_id))
+    }
+}
+
+impl StepRecord {
+    /// How a repeated `step_started` differs from the entry that opened this
+    /// step, if it does. Everything but `attempt` must be identical: a retry is
+    /// the *same* action, not a new one wearing the same sequence number.
+    fn disagreement(&self, payload: &StepStarted) -> Option<String> {
+        if self.step_seq != payload.step_seq {
+            return Some(format!(
+                "step_seq {} != {}",
+                payload.step_seq, self.step_seq
+            ));
+        }
+        if self.tool != payload.tool {
+            return Some(format!("tool '{}' != '{}'", payload.tool, self.tool));
+        }
+        if self.args != payload.args {
+            return Some("arguments differ".to_string());
+        }
+        if self.args_hash != payload.args_hash {
+            return Some(format!(
+                "args_hash {} != {}",
+                payload.args_hash, self.args_hash
+            ));
+        }
+        if self.effect_id != payload.effect_id {
+            return Some(format!(
+                "effect_id {} != {}",
+                payload.effect_id, self.effect_id
+            ));
+        }
+        if self.opened_at != payload.opened_at {
+            return Some("opened_at differs".to_string());
+        }
+        if self.tool_fingerprint != payload.tool_fingerprint {
+            return Some("tool fingerprint differs".to_string());
+        }
+        None
+    }
+}
+
+/// Check the claims an entry makes about the step it belongs to.
+///
+/// `must_open_at` is `Some(seq)` for an entry that is required to *open* its
+/// step, so its `step_seq` has to be its own sequence.
+fn check_identity(
+    run_id: RunId,
+    seq: Seq,
+    step_seq: Seq,
+    must_open_at: Option<Seq>,
+    args: &Value,
+    hash: &str,
+    eid: Uuid,
+) -> Result<()> {
+    let corrupt = |message: String| Error::CorruptJournal {
+        run: run_id,
+        message,
+    };
+    if let Some(own) = must_open_at {
+        if step_seq != own {
+            return Err(corrupt(format!(
+                "entry {seq} opens a step but claims step_seq {step_seq}"
+            )));
+        }
+    }
+    let expected = effect_id(run_id, step_seq);
+    if eid != expected {
+        return Err(corrupt(format!(
+            "entry {seq} claims effect id {eid}, but step {step_seq} derives {expected}"
+        )));
+    }
+    let recomputed = args_hash(args);
+    if hash != recomputed {
+        return Err(corrupt(format!(
+            "entry {seq} claims args_hash {hash}, but its arguments hash to {recomputed}"
+        )));
+    }
+    Ok(())
 }

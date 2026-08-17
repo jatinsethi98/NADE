@@ -573,12 +573,45 @@ gated step keeps the id minted at `approval_requested` right through approval
 and execution. That is precisely what makes a post-crash re-execution upsert
 instead of duplicating.
 
+Three fields exist purely so a resumed run cannot drift from the one that was
+interrupted:
+
+- **`opened_at`** is stamped when the step opens and is replayed, not
+  regenerated. Every attempt at a step therefore sees byte-identical input, so
+  the same `effect_id` implies the same written value.
+- **`tool_fingerprint`** hashes the tool's *interface* — name, description,
+  version, schema. It is checked before every dispatch, including after an
+  approval, so a step opened under one build cannot execute under another. It
+  covers the interface, not the behaviour behind it: a silent behaviour change
+  is caught only if the author bumps the tool's version, which is a limit no
+  hash can remove.
+- **`wake_at`** rides on `step_done` rather than in a following entry, so
+  completing a step and recording the pause it asked for are one committed
+  write. Split across two, a crash in the gap loses the delay silently.
+
+### 6.2 What the runtime actually guarantees
+
+**At-least-once execution with stable idempotency keys**, conditional on a
+durable journal and idempotent effects. Not exactly-once — nothing that
+survives a process death can be.
+
+What holds: the intention commits before the act; an interrupted step is
+executed again; every attempt gets the same `effect_id` and identical input;
+and replay *finishes what is recorded* rather than restarting it. Exactly-once
+**effects** are then the consumer's to achieve, by upserting on `effect_id`.
+
+The consequence for NADE: a mutating tool must write its row with
+`insert … on conflict (id) do update`, never a plain insert and never a fresh
+id. **Human approval is not an idempotency mechanism** — it authorises an
+action, it does not make a re-run of that action harmless. An effect with no
+natural key needs an outbox keyed on `effect_id` regardless of who approved it.
+
 | `kind` | `payload` |
 |---|---|
 | `run_started` | `{"trigger_kind": "mail", "trigger_ref": "…"\|null}` |
 | `llm_response` | `{"model": "…", "stop_reason": "tool_use"\|"end_turn"\|"max_tokens", "tokens_in": 1840, "tokens_out": 96, "text": "…"}` |
-| `step_started` | `{"tool": "read_thread", "step_seq": 3, "args": {…}, "args_hash": "sha256:…", "effect_id": "…"}` — `step_seq` equals this entry's own `seq` for an ungated call, or the `approval_requested` seq for a gated one |
-| `step_done` | `{"tool": "read_thread", "step_seq": 3, "result": {…}, "result_bytes": 1204, "truncated": false}` |
+| `step_started` | `{"tool": "read_thread", "step_seq": 3, "opened_at": "…", "args": {…}, "args_hash": "sha256:…", "effect_id": "…", "tool_fingerprint": "sha256:…"\|null}` — `step_seq` equals this entry's own `seq` for an ungated call, or the `approval_requested` seq for a gated one |
+| `step_done` | `{"tool": "read_thread", "step_seq": 3, "result": {…}, "result_bytes": 1204, "truncated": false, "wake_at": "…"\|null}` |
 | `step_failed` | `{"tool": "…", "step_seq": 3, "error": "…"}` |
 | `approval_requested` | `{"tool": "write_note", "feed_item_id": "…", "effect_id": "…", "summary": "…"}` |
 | `approval_granted` | `{"feed_item_id": "…"}` |

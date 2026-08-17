@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::ids::{effect_id, RunId};
 use crate::journal::{
-    ApprovalRequested, CapBreached, Entry, EntryKind, ModelResponse, RunEnded, RunStarted,
-    RunWaiting, StepDone, StepStarted,
+    ApprovalRequested, ApprovalResolved, CapBreached, Entry, EntryKind, ModelResponse, RunEnded,
+    RunStarted, RunWaiting, RunWoken, StepDone, StepStarted,
 };
 use crate::message::{
     CallContext, ChatRequest, ChatResponse, Message, StopReason, TokenUsage, ToolCall, ToolSchema,
@@ -40,7 +40,7 @@ fn sample_call() -> ToolCall {
             step_seq: 3,
             effect_id: effect_id(RunId::from_uuid(Uuid::nil()), 3),
             replay: true,
-            dispatched_at: Utc::now(),
+            opened_at: Utc::now(),
         }),
     }
 }
@@ -123,6 +123,8 @@ fn journal_payloads_round_trip() {
         args_hash: "sha256:00".to_string(),
         effect_id: effect_id(run, 3),
         attempt: 2,
+        opened_at: now,
+        tool_fingerprint: Some("sha256:aa".to_string()),
     });
     round_trip(&StepDone {
         step_seq: 3,
@@ -131,6 +133,7 @@ fn journal_payloads_round_trip() {
         result: json!({"id": 1}),
         is_error: false,
         truncated: true,
+        wake_at: Some(now),
     });
     round_trip(&ApprovalRequested {
         step_seq: 3,
@@ -141,10 +144,21 @@ fn journal_payloads_round_trip() {
         effect_id: effect_id(run, 3),
         requested_at: now,
         expires_at: Some(now + ChronoDuration::days(7)),
+        tool_fingerprint: Some("sha256:aa".to_string()),
+    });
+    round_trip(&ApprovalResolved {
+        step_seq: 3,
+        decision: Decision::Expire,
+        resolved_at: now,
+        reason: Some("ttl_expired".to_string()),
     });
     round_trip(&RunWaiting {
         step_seq: 3,
         wake_at: now,
+    });
+    round_trip(&RunWoken {
+        step_seq: 3,
+        woken_at: now,
     });
     round_trip(&CapBreached {
         reason: FailureReason::TokenBudgetExceeded {
@@ -211,6 +225,7 @@ fn outcomes_and_resolutions_round_trip() {
     });
     round_trip(&RunOutcome::Waiting {
         run_id: run,
+        step_seq: 3,
         wake_at: Utc::now(),
         stats,
     });
@@ -226,13 +241,24 @@ fn outcomes_and_resolutions_round_trip() {
     round_trip(&RunOutcome::Expired { run_id: run, stats });
 
     for resolution in [
-        Resolution::Approve,
-        Resolution::Skip,
-        Resolution::Expire,
-        Resolution::Timer,
+        Resolution::approve(3),
+        Resolution::skip(3),
+        Resolution::expire(3),
+        Resolution::timer(3),
     ] {
         round_trip(&resolution);
+        assert_eq!(resolution.step_seq(), 3, "the step survives the wire");
     }
+    // The step binding is part of the wire form, not a local convenience.
+    assert_eq!(
+        serde_json::to_value(Resolution::approve(7)).expect("serialises"),
+        json!({"resolution": "approve", "step_seq": 7})
+    );
+    assert_eq!(
+        Resolution::approve(7).effect_id(run),
+        Some(effect_id(run, 7)),
+        "a host can derive the effect id from the resolution alone"
+    );
     for decision in [Decision::Approve, Decision::Skip, Decision::Expire] {
         round_trip(&decision);
         assert_eq!(

@@ -6,15 +6,55 @@ code that handles it. Tests are preferred; the table records which.
 
 ---
 
+## 0. The guarantee, stated honestly
+
+> **At-least-once execution with stable idempotency keys**, conditional on a
+> durable journal and idempotent effects.
+
+Not exactly-once, and the earlier drafts of this file that said otherwise were
+wrong. Nothing that survives a process death can be exactly-once: at the instant
+the process dies, whether the effect landed is a fact about the outside world
+that the engine has no record of.
+
+What the crate does provide:
+
+1. the intention is durably recorded **before** the act;
+2. a step interrupted between those two moments is executed again;
+3. every attempt at one step is handed the same `effect_id` and byte-identical
+   input;
+4. replay *finishes what is recorded* — it never re-asks the model for an answer
+   it already has, never re-decides a decision a human already made, and never
+   loses one.
+
+Exactly-once **effects** are therefore achievable, by the consumer: upsert on
+`effect_id`, and supply a journal whose `append` is really durable. Neither
+condition is checkable from inside this crate, and both are load-bearing.
+
+Two claims this crate specifically does **not** make:
+
+* **Approval is not idempotency.** `requires_approval` decides *whether*
+  something may happen, once, before it happens. An approved step is fenced and
+  replayed exactly like an unapproved one, so an approved email can still go
+  twice. Effects with no natural key need an outbox keyed on `effect_id`;
+  `ReplayPolicy::Halt` is a guard rail that converts a silent double-send into a
+  loud stop, not a fix.
+* **Durability is the consumer's.** The crate does no fsync, opens no file,
+  starts no transaction. `MemoryJournal` is a test double. An `append` that
+  returns before the write is durable does not weaken the guarantee — it removes
+  it.
+
+---
+
 ## 1. Scope
 
 A generic, model-agnostic, runtime-agnostic agent engine:
 
 * three traits — `Llm`, `Tool`, `Journal`;
 * an `Engine` that drives a tool-calling loop over them;
-* a durable **journal-before-effect** protocol so a crashed run can be replayed
-  without duplicating side effects;
-* a human-approval gate that owns the tool loop;
+* a **journal-before-effect** protocol so a crashed run can be replayed without
+  duplicating side effects — given a durable journal and idempotent effects;
+* a human-approval gate that owns the tool loop, with every resolution bound to
+  the step it settles;
 * caps (steps, tokens, tool-result bytes) that fail the run loudly.
 
 **Out of scope for P1** (P4 owns them): the Postgres journal driver, real LLM
@@ -39,6 +79,7 @@ email. No `nade-server` dependency, ever.
 | A7 | Dependency list is small and boring | manual: no HTTP, no DB, no provider SDK, no async runtime in `[dependencies]` |
 | A8 | Engine is `Send + Sync + 'static` and works behind `Arc` | `engine_is_send_sync_and_static` compile-time assertion test |
 | A9 | Public contract documented | crate-level rustdoc + `README.md`; README example compiles as a doctest |
+| A10 | The documented guarantee is exactly what the code delivers — no more | §0 of this file, the crate docs, and `README.md` all say "at-least-once, conditional"; every condition names the test that pins it |
 
 ### State machine (must match `PLAN.md` §Agent runtime exactly)
 
@@ -61,15 +102,34 @@ rest. Every transition has a test.
 3. append `step_done { step_seq, result }`.
 
 Replay: a step with `step_done` is skipped; a step with `step_started` and no
-`step_done` is **re-executed** (safe because the effect id is deterministic and
-consumers upsert on it).
+`step_done` is **re-executed** (safe *only* because the effect id is
+deterministic and consumers upsert on it).
+
+Replay also finishes what is recorded rather than restarting it: a committed
+final model response completes the run without a new turn; a committed
+Skip/Expire reaches `skipped`/`expired`; a committed `cap_breached` fails the
+run without journalling a second breach. An absent `run_ended` means "finish
+what is recorded", not "start again".
+
+Replay validates before it interprets. Sequences must start at 1 and increase by
+exactly one; the first entry must be the only `run_started`; nothing may follow
+`run_ended`; every `step_seq` must name a step really opened at that sequence;
+every `effect_id` must equal `effect_id(run, step_seq)` and every `args_hash`
+must equal `args_hash(args)`; a repeated `step_started` must agree with the
+original in every field but `attempt`; an approval is resolved at most once.
+Anything else is `CorruptJournal`, refused before a step can reach dispatch
+under an arbitrary or colliding effect id.
 
 ---
 
 ## 3. Edge-case checklist
 
-**Status: all 46 pass.** Every row is a test; there are no `// EDGE:`-only
+**Status: all 62 pass.** Every row is a test; there are no `// EDGE:`-only
 cases, though the code also carries `// EDGE:` comments at each handling site.
+
+E47–E62 came from an adversarial review of the first green build. Ten of them
+were real protocol defects, three critical; the review is why §0 of this file
+now says "at-least-once" where it used to say "exactly-once".
 
 | # | Edge case | Expected behaviour | Covered by |
 |---|---|---|---|
@@ -119,6 +179,22 @@ cases, though the code also carries `// EDGE:` comments at each handling site.
 | E44 | Every public type survives a JSON round trip | a host stores all of them; tags match the database columns | `conversation_types_round_trip`, `journal_payloads_round_trip`, `outcomes_and_resolutions_round_trip`, `run_id_is_transparent_on_the_wire` |
 | E45 | Crash before `model_response` commits | the turn is bought again; no effect can have happened, so none can duplicate | `crash_before_model_response_commit_re_asks_the_model` |
 | E46 | System prompt | prepended to every turn and recorded in `run_started` | `system_prompt_is_prepended_to_every_turn` |
+| E47 | **Stale approval delivered after the run reached a *second* approval** | the duplicate is refused as `AlreadyResolved`; the later step does **not** execute | `stale_approval_does_not_approve_a_later_step` |
+| E48 | Resolution naming a step that is neither pending nor decided | `Error::StepMismatch`, journal untouched | `resolution_for_an_unrelated_step_is_rejected` |
+| E49 | Stale `Timer` delivered after the run parked on a *second* wait | refused as `StepMismatch`; the later wait is not cut short | `a_stale_timer_does_not_wake_a_later_wait` |
+| E50 | **Crash after the final model response, before `run_ended`** | the run finishes from the recorded response; the model is not re-asked and its new answer cannot execute anything | `crash_after_final_model_response_finishes_from_the_journal` |
+| E51 | **Crash between `step_done` and `run_waiting`** | the wait survives — it is committed *on* `step_done`, not in a separate entry | `crash_between_step_done_and_run_waiting_keeps_the_wait` |
+| E52 | **Committed Skip with no `run_ended`** | `run` carries it to `skipped`; previously no public API could finish the run | `committed_skip_without_run_ended_still_completes` |
+| E53 | Committed Expire with no `run_ended` | `run` carries it to `expired` | `committed_expire_without_run_ended_still_completes` |
+| E54 | Committed `cap_breached` with no `run_ended` | `run` fails with that breach and does not journal it twice | `committed_cap_breach_without_run_ended_still_completes` |
+| E55 | Recorded approval, crash before the tool ran | `resume` reports `AlreadyResolved`; `run` alone completes the run | `run_alone_completes_a_run_whose_approval_is_already_recorded` |
+| E56 | Tool implementation changed under an open step | `Error::ToolChanged`; the new implementation never runs under the old step's `effect_id` | `a_changed_tool_cannot_execute_an_open_step` |
+| E57 | Tool that **now** requires approval, over a step opened ungated | refused, not executed — the case that matters most | `a_tool_that_now_requires_approval_is_not_executed_ungated` |
+| E58 | Non-idempotent tool interrupted mid-effect | not blind-retried; run fails `AmbiguousEffect` with the `effect_id` quoted | `a_non_idempotent_tool_is_not_blind_retried` |
+| E59 | Two attempts at one step | identical `run_id`, `step_seq`, `effect_id`, `opened_at`, args; only `replay` differs | `every_attempt_at_a_step_sees_identical_input` |
+| E60 | Clock moving backwards under an expiry check | `now` is floored by the newest journal entry, so a stale approval cannot be revived | `expiry_is_floored_by_the_newest_journal_entry` |
+| E61 | Malformed journal (14 shapes: gaps, wrong first entry, foreign/colliding `effect_id`, mismatched `args_hash`, `step_seq` ≠ opening seq, disagreeing retry, orphan/duplicate `step_done`, post-terminal entry, unpaired wake, turn skew, phantom call, unknown kind) | `CorruptJournal` before anything dispatches | `src/tests/integrity.rs`, 15 tests plus a healthy control |
+| E62 | Test double modelling non-idempotency as normal | `CountingTool` now returns byte-identical results across attempts; the anti-pattern lives in `DriftingTool`, which exists to be caught | `every_attempt_at_a_step_sees_identical_input` |
 
 E43 and E44 were found by the self-review pass, not the first draft: E43 was a
 real panic (`DateTime + TimeDelta` panics on overflow, so a config value could
@@ -158,8 +234,15 @@ can opt in with `features = ["testing"]`.
   **before** the entry commits or **after** it commits (the two distinct crash
   shapes).
 * Tools — `EchoTool`, `CountingTool` (execution counter + `effect_id → count`
-  upsert store, optional approval requirement), `PanicTool`, `HugeTool`,
-  `FailingTool`, `WaitTool`.
+  upsert store; optional approval gate, declared `version`, and `ReplayPolicy`),
+  `PanicTool`, `HugeTool`, `FailingTool`, `WaitTool`, `DriftingTool`.
+
+`CountingTool` returns **byte-identical results across attempts**. It used to
+return `writes: 1` then `writes: 2`, which modelled a tool that breaks the
+idempotency contract as though that were fine — and taught every reader the same
+thing. The write count is still observable through `effects()`, where a test can
+read it without the tool having to leak it into its own output. `DriftingTool`
+is the anti-pattern, kept deliberately so a test can show what it costs.
 
 ---
 
@@ -185,7 +268,27 @@ can opt in with `features = ["testing"]`.
 8. `EntryKind` keeps an `Other(String)` variant so a journal written by a newer
    version can be *read*, but replay refuses to interpret one — better a loud
    `CorruptJournal` than a silent misreading of a step's state.
-9. A step's gate decision is made once, when the step is opened, and journaled.
-   Re-execution after a crash does **not** re-consult
-   `Tool::requires_approval`: the fence has already committed, so the effect may
-   already exist, and pausing at that point would be theatre.
+9. **Reversed by the review.** A step's gate decision is journaled when the step
+   opens, but `Tool::requires_approval` **is** re-consulted before every
+   dispatch, including a re-execution. The original reasoning ("the fence has
+   committed, so pausing is theatre") only covers the case where the answer is
+   unchanged. It misses the one that matters: a redeployment where the tool now
+   requires approval, under which the old ungated step would execute a call the
+   current build says needs a human. The engine refuses that with
+   `Error::ToolChanged` rather than executing or silently re-gating, because it
+   cannot mint a new `effect_id` for a step whose fence has already committed.
+10. A resolution carries the `step_seq` it settles. `Resolution` is therefore a
+   struct-variant enum rather than a plain tag. Without the binding, a delayed
+   duplicate of an old decision and a fresh decision about a *new* pending step
+   are the same value, and the engine settles the wrong one.
+11. An already-decided step answers `Error::AlreadyResolved` rather than an `Ok`
+   no-op. A typed error is what "reports already resolved" means, and it
+   composes with `API.md` §7's `409 token_consumed`, which the client also
+   treats as success. The cost is that a worker retrying `resume` must fall back
+   to `run`; that path is tested (`run_alone_completes_…`) so the run is never
+   stranded.
+12. `step_done` carries the `wake_at`, and `run_waiting` is demoted to a marker
+   for readers. One committed entry cannot lose half of itself; two can.
+13. `ReplayPolicy::Halt` ends the run `Failed` rather than raising a bare `Err`.
+   A failed run is terminal, carries the `effect_id` to the host, and cannot
+   strand the run — a repeated `Err` would.

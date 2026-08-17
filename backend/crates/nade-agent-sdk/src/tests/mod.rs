@@ -5,6 +5,7 @@ mod caps;
 mod defects;
 mod edges;
 mod happy;
+mod integrity;
 mod replay;
 mod wire;
 
@@ -41,11 +42,23 @@ fn engine(
     Arc<ScriptedLlm>,
     MemoryJournal,
 ) {
-    let llm = Arc::new(ScriptedLlm::new(responses));
     let journal = MemoryJournal::new();
-    let engine = Engine::new(Arc::clone(&llm), tools, journal.clone(), config)
-        .expect("engine builds from a valid tool set");
+    let (engine, llm) = engine_over(responses, tools, config, journal.clone());
     (engine, llm, journal)
+}
+
+/// The same, over a journal the caller already holds — which is how a test
+/// stands in for "the process restarted, with a different binary".
+fn engine_over(
+    responses: Vec<crate::message::ChatResponse>,
+    tools: Vec<Arc<dyn Tool>>,
+    config: EngineConfig,
+    journal: MemoryJournal,
+) -> (Engine<Arc<ScriptedLlm>, MemoryJournal>, Arc<ScriptedLlm>) {
+    let llm = Arc::new(ScriptedLlm::new(responses));
+    let engine = Engine::new(Arc::clone(&llm), tools, journal, config)
+        .expect("engine builds from a valid tool set");
+    (engine, llm)
 }
 
 /// Pin the exact `(seq, kind)` shape of a run's journal.
@@ -78,6 +91,14 @@ fn only_payload<P: serde::de::DeserializeOwned>(
         found.len()
     );
     found[0].payload_as(run).expect("payload decodes")
+}
+
+/// The step a paused run is waiting on — what a resolution must quote back.
+fn pending_step(outcome: &crate::run::RunOutcome) -> Seq {
+    outcome
+        .approval()
+        .expect("the run is paused on an approval")
+        .step_seq
 }
 
 /// Dig a nested field out of a JSON value by path.

@@ -274,8 +274,12 @@ async fn waiting_then_timer_resumes_and_completes() {
     assert_eq!(still.status(), RunStatus::Waiting);
     assert_eq!(tool.executions(), 1);
 
+    let step_seq = match &parked {
+        RunOutcome::Waiting { step_seq, .. } => *step_seq,
+        other => panic!("expected a wait, got {other:?}"),
+    };
     let outcome = engine
-        .resume(run, Resolution::Timer)
+        .resume(run, Resolution::timer(step_seq))
         .await
         .expect("timer fires");
 

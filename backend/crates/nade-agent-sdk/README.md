@@ -11,6 +11,24 @@ your domain, your provider, or your database.
 nade-agent-sdk = "0.1"
 ```
 
+## What it guarantees
+
+> **At-least-once execution with stable idempotency keys**, conditional on a
+> durable journal and idempotent effects.
+
+Not exactly-once. Nothing that survives a process death can be: at the instant
+the process dies, whether the effect landed is a fact about the outside world
+that the engine has no record of. What the engine does guarantee is that it
+writes down its intention *before* it acts, that a step interrupted between
+those two moments is retried, and that every retry is handed the same
+identifier and the same input — so an effect written as an upsert on that
+identifier collapses the retries into one.
+
+Exactly-once *effects* are therefore available, and they are yours to build:
+upsert on `effect_id`, and give the engine a journal that is really durable.
+Both conditions are load-bearing, and neither is checkable from inside this
+crate.
+
 ## Why the journal is not a log
 
 An agent that only computes can be retried freely. An agent that *acts* — writes
@@ -55,16 +73,53 @@ row an agent creates must come from the engine, never from a fresh `uuid4()` or
 an auto-increment column. Get it right and two attempts collapse into one row.
 Get it wrong and you have two.
 
-Effects with no natural key — an email actually leaving a server — belong behind
-`Tool::requires_approval`, where a human is the fence.
+Every attempt at one step also sees the same *input*: same arguments, same
+`effect_id`, same `opened_at`. The only field that moves between attempts is
+`call.is_replay()`, and it is advisory — a tool whose effect depends on it is
+not idempotent, whatever key it upserts on.
+
+## Approval is not idempotency
+
+`Tool::requires_approval` controls **authorisation**: it answers "is this
+allowed to happen?", once, before anything happens. It does not answer "has this
+already happened?", and it cannot.
+
+An approved step is fenced and replayed exactly like an unapproved one. The
+human says yes; `approval_resolved` commits; `step_started` commits; the tool
+sends the email; the process dies before `step_done` commits. On the next run
+the journal shows a step that started and never finished, and the engine does
+the only safe thing it knows — it runs it again. **The email goes twice.** The
+gate was passed before the ambiguity existed.
+
+So an effect with no natural key needs an **outbox**, not an approval. In one
+transaction write the effect row keyed on `effect_id` *and* a row saying "this
+needs sending"; deliver it from a sweeper that marks it sent. Re-execution
+rewrites the same two rows and the sweeper still sends once. Approval decides
+*whether*; the outbox decides *how many times*.
+
+If an effect truly cannot be keyed, `Tool::replay_policy` → `ReplayPolicy::Halt`
+is the guard rail: the engine refuses to blind-retry the step and stops the run
+with `FailureReason::AmbiguousEffect`, quoting the `effect_id` so a human can
+reconcile. Damage control, not a fix — it turns a silent double-send into a loud
+stop.
 
 ## Approval
 
 When `requires_approval` returns `true`, the engine appends
 `approval_requested`, returns `RunOutcome::PendingApproval` with everything the
 host needs to build its own approval record, and **executes nothing**. The only
-route from there to execution is `Engine::resume(run_id, Resolution::Approve)`.
-Calling `run` again does not open that door, however many times it is called.
+route from there to execution is
+`Engine::resume(run_id, Resolution::approve(step_seq))`. Calling `run` again does
+not open that door, however many times it is called.
+
+Every resolution names the step it settles. Without that binding a delayed
+duplicate of an old decision is indistinguishable from a fresh decision about
+whatever the run is parked on *now* — and the engine would settle the wrong
+step, executing something no human ever saw. A resolution that names the wrong
+step is `Error::StepMismatch`; one that names a step already decided is
+`Error::AlreadyResolved`, which appends nothing and executes nothing. Treat that
+as success: an earlier delivery already won. If the run still needs driving,
+call `run`, which resumes from any recorded decision.
 
 ```text
 queued → running → done | failed
@@ -124,6 +179,7 @@ impl Tool for WriteNote {
     }
 }
 
+// NOT durable: a `Vec` behind a mutex makes none of the guarantees above.
 #[derive(Default)]
 struct Log(Mutex<Vec<Entry>>);
 #[async_trait]
@@ -152,14 +208,37 @@ assert_eq!(outcome.status(), RunStatus::Done);
 # }
 ```
 
+## Durability is yours
+
+**This crate contains no durable journal.** No fsync, no WAL, no transaction —
+there is nothing here that could be. The only implementation that ships is
+`testing::MemoryJournal`, a `HashMap` behind a mutex, exactly as durable as the
+process.
+
+`Journal::append` returning `Ok` is a promise that the entry would survive the
+process being killed at the next instruction. An implementation that returns
+before the write is durable does not make the guarantee weaker — it removes it,
+silently, from every run: the fence stops fencing, and a step whose effect
+landed comes back as a step that was never opened. The bug never shows up in
+testing, because it only exists in the crash.
+
+Concretely: a committed transaction with `synchronous_commit = on`, an `fsync`ed
+file whose containing directory is also `fsync`ed, or a quorum-acknowledged
+write. And `load` must return every committed entry — a stale replica read is a
+correctness bug of the same class as a lost write.
+
 ## What a consumer must guarantee
 
+The guarantee at the top of this file is conditional on all four. Miss one and
+what is left is a tool-calling loop with a nice log.
+
 1. **Durability** — `Journal::append` returns `Ok` only once the entry would
-   survive a crash.
+   survive a crash. This is the load-bearing one.
 2. **Uniqueness** — a second append at an existing sequence fails with
    `Error::SeqConflict` instead of overwriting. Model it on
    `primary key (run_id, seq)`.
-3. **Idempotent effects**, keyed on `call.effect_id()`, upserted.
+3. **Idempotent effects**, keyed on `call.effect_id()`, upserted — including
+   effects behind an approval gate, which the gate does nothing to protect.
 4. **One driver per run** — two workers on one run id will collide on the
    journal's primary key, but that should be the backstop, not the plan. Hold a
    lease.
