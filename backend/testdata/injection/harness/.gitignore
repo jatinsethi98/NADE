@@ -1,0 +1,4 @@
+# Build output. The harness deliberately has its own target dir rather than
+# sharing backend/target, so concurrent builds in backend/crates never contend
+# with it for the cargo lock.
+target/

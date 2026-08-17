@@ -1,0 +1,50 @@
+# The injection red-team harness.
+#
+# A DELIBERATELY DETACHED crate: the empty `[workspace]` table below makes this
+# its own workspace root, so `cargo` at backend/ never builds it and the three
+# agents working in backend/crates are never disturbed by it. It path-depends
+# INTO those crates, which cargo allows across the detachment.
+#
+# It is not a workspace member and is not built by `just ci`. It is wired into
+# CI at P5 (docs/PLAN.md), when nade-server is stable. Until then, run it here:
+#
+#     cd backend/testdata/injection/harness && cargo test
+#     cargo test --features real_parser     # also cross-checks the real parse.rs
+#
+# The default build depends only on stable crates (nade-agent-sdk, mail-parser,
+# lol_html) so it builds even while nade-server is mid-change. `real_parser`
+# additionally runs the real extractor to prove the reference agrees with it.
+[package]
+name = "nade-injection-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+
+# Detach from the parent workspace. Do not remove: without it, `cargo` at the
+# repo root tries to fold this crate in and the isolation is lost.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+nade-agent-sdk = { path = "../../../crates/nade-agent-sdk", features = ["testing"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+mail-parser = "0.11"
+lol_html = "3"
+async-trait = "0.1"
+
+# Optional: the real sync-path extractor, so the harness can prove its reference
+# fence agrees with `nade_server::mail::parse` on the cases the real extractor
+# already handles. Off by default so the harness builds without nade-server.
+nade-server = { path = "../../../crates/nade-server", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[features]
+default = []
+real_parser = ["dep:nade-server"]

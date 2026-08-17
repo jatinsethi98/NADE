@@ -491,7 +491,16 @@ pub fn decode_entities(text: &str) -> String {
             continue;
         }
         // `&` ... `;` within a sane distance, otherwise it is a literal `&`.
-        let limit = (index + 32).min(text.len());
+        //
+        // EDGE (unicode): `index + 32` is a *byte* offset and lands wherever it
+        // lands — frequently inside a multi-byte character, because entities and
+        // curly quotes keep close company in real mail. Slicing there panics and
+        // takes the whole sync down with it. `index` is always a boundary; the
+        // limit has to be walked back to one.
+        let mut limit = (index + 32).min(text.len());
+        while limit > index && !text.is_char_boundary(limit) {
+            limit -= 1;
+        }
         match text[index..limit].find(';') {
             Some(offset) if offset > 1 => {
                 let body = &text[index + 1..index + offset];
@@ -531,6 +540,43 @@ fn decode_one(body: &str, table: &HashMap<&str, char>) -> Option<char> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression, found by the first live sync rather than by this suite.
+    ///
+    /// `decode_entities` scanned for the closing `;` of an entity within 32
+    /// **bytes** of the `&`. That offset lands wherever it lands, and in real
+    /// mail it lands inside a multi-byte character often — entities and curly
+    /// quotes keep close company. The slice then panicked, the sync job died,
+    /// and it died again on every retry because the same message came back.
+    ///
+    /// The corpus missed it because its entity cases are pure ASCII: the bug
+    /// needs a multi-byte character at a *specific* byte distance from an `&`,
+    /// which no hand-written case happened to produce.
+    #[test]
+    fn an_entity_followed_by_a_multibyte_char_does_not_panic() {
+        // Walk the curly quote across every byte offset the scan can reach, so
+        // the test covers the boundary rather than one lucky position.
+        for pad in 0..40 {
+            let text = format!("&amp;{}’ and more text", "x".repeat(pad));
+            let decoded = decode_entities(&text);
+            assert!(decoded.contains('’'), "pad {pad}: the quote survived");
+            assert!(decoded.starts_with('&'), "pad {pad}: the entity decoded");
+        }
+
+        // The literal shape from the live failure: a bare `&` with no closing
+        // `;` in range, and a multi-byte character straddling the 32-byte mark.
+        for pad in 0..40 {
+            let text = format!("& {}’", "y".repeat(pad));
+            let _ = decode_entities(&text);
+        }
+
+        // Astral plane, four bytes, same treatment.
+        for pad in 0..40 {
+            let text = format!("&nbsp;{}🚀 tail", "z".repeat(pad));
+            let decoded = decode_entities(&text);
+            assert!(decoded.contains('🚀'), "pad {pad}: the emoji survived");
+        }
+    }
 
     /// Criterion J6 - the trap that started all of this. A single-pass version
     /// pours every `<style>` block into `body_text`.
