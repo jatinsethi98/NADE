@@ -6,13 +6,33 @@
 //! parentheses, `{…}` grouping, quoted phrases, and the operators below.
 //!
 //! **Anything it does not recognise becomes a free-text term**, because Gmail
-//! never rejects a query — it just searches for the text. A simulator that
-//! returned `400` for an unknown operator would teach a client to fear its own
-//! search box.
+//! never rejects a query — it just searches for the text. There is no published
+//! evidence that `messages.list` has *ever* returned `400` for a malformed `q`;
+//! the observed answer is `200` with the body `{"resultSizeEstimate": 0}`. The
+//! operational consequence is the important part, and this crate reproduces it
+//! faithfully: **a malformed query is indistinguishable from an empty inbox.**
+//! A client must validate `q` itself, because no error is coming — which matters
+//! most for LLM-generated queries, where a hallucinated operator looks exactly
+//! like a quiet mailbox.
 //!
-//! What is *not* modelled, and is safe not to be: relevance ranking (Gmail
-//! orders `messages.list` by recency, and so does the simulator), stemming,
-//! synonyms, and Gmail's own spam/category classification.
+//! Three places where being *stricter* than a permissive parser is the faithful
+//! choice, because Gmail documents only the narrow form and silently treats the
+//! rest as text:
+//!
+//! * `newer_than:`/`older_than:` take **only** `d`, `m`, `y`. `w`, `h` and a
+//!   bare number are undocumented and are refused.
+//! * A bare date means **midnight Pacific**, not midnight UTC, and only the
+//!   unambiguous `YYYY/MM/DD` order is accepted. Ranges are half-open
+//!   `[after, before)`.
+//! * `OR` and `AND` are **case-sensitive**; a lowercase `or` is the literal
+//!   word, so lowercasing a user's query silently changes its meaning.
+//!
+//! What is *not* modelled, and is safe not to be: stemming, synonyms, `AROUND`,
+//! wildcards, and Gmail's own spam/category classification. Ordering is
+//! newest-first, which is what Google's list-messages guide documents; the real
+//! sort key looks like message id descending, so two messages delivered in the
+//! same second can come back in the opposite order to their timestamps. The
+//! simulator's tie-break is id descending for exactly that reason.
 
 use crate::{clock::DAY_MS, label::normalise_label_query};
 
@@ -312,10 +332,15 @@ fn tokenise(input: &str) -> Vec<Token> {
             _ => {
                 let (word, next) = read_word(&chars, index);
                 index = next;
-                if word == "OR" || word == "|" {
+                // EDGE: `OR` and `AND` are **case-sensitive** in Gmail. A
+                // lowercase `or` is searched for as the literal word — so
+                // lowercasing a user's query silently changes what it means, and
+                // a simulator that accepted `or` would hide that. `|` is not
+                // documented as an OR at all and is therefore a plain term here.
+                if word == "OR" {
                     out.push(Token::Or);
                 } else if word == "AND" {
-                    // Implicit already; drop it.
+                    // Documented, but implicit already; drop it.
                 } else if !word.is_empty() {
                     out.push(Token::Word(word));
                 }
@@ -452,6 +477,14 @@ fn parse_term(word: &str) -> Term {
         return Term::Text(word.to_ascii_lowercase());
     };
     let value = value.trim_matches('"');
+    // EDGE: `from: x` — a space after the colon. The tokeniser has already split
+    // that into `from:` and `x`, and Gmail treats a bare `from:` as free text
+    // rather than as an operator with an empty argument. Without this, an empty
+    // argument would `contains("")` and match **every** message, turning a
+    // client's stray space into a silently unfiltered sync.
+    if value.is_empty() {
+        return Term::Text(word.to_ascii_lowercase());
+    }
     let folded = value.to_ascii_lowercase();
     match operator.to_ascii_lowercase().as_str() {
         "newer_than" => span_ms(&folded).map_or_else(fallback(word), Term::NewerThan),
@@ -482,10 +515,16 @@ fn parse_term(word: &str) -> Term {
         },
         "larger" | "size" => byte_size(&folded).map_or_else(fallback(word), Term::Larger),
         "smaller" => byte_size(&folded).map_or_else(fallback(word), Term::Smaller),
+        // Gmail's documented tab categories. `category:primary` maps to
+        // `CATEGORY_PERSONAL` — Gmail has no `CATEGORY_PRIMARY` label at all,
+        // and `reservations`/`purchases` are documented `q` values with **no**
+        // label id, so `q` is the only way to ask for them.
+        "category" => category_label(&folded).map_or_else(fallback(word), Term::Label),
         // EDGE: an operator Gmail knows and this does not (`deliveredto:`,
-        // `category:`, …), or an unknown one entirely. Free text, never an
-        // error. It will simply match nothing, which is also what an unindexed
-        // operator does.
+        // `header:`, `AROUND`, …), or an unknown one entirely. Free text, never
+        // an error. It matches nothing, which is also what an unindexed operator
+        // does — and which is indistinguishable from an empty inbox, exactly as
+        // it is against the real API.
         _ => Term::Text(word.to_ascii_lowercase()),
     }
 }
@@ -495,15 +534,31 @@ fn fallback(word: &str) -> impl FnOnce(()) -> Term + '_ {
     move |()| Term::Text(word.to_ascii_lowercase())
 }
 
-/// `30d`, `2w`, `6m`, `1y`, and a bare number meaning days.
+/// `30d`, `6m`, `1y` — and **nothing else**.
+///
+/// Google documents exactly three units for `newer_than:`/`older_than:`: `d`,
+/// `m`, `y` ([Gmail search operators][ops]). `w` for weeks and a bare number
+/// with no unit are **not** documented anywhere, so they are refused here and
+/// fall back to free text. That is the conservative choice and the one that
+/// helps: if Gmail parses `newer_than:1w` as a search *term* rather than a
+/// duration — which is what an unrecognised operator argument becomes — then a
+/// simulator that helpfully accepted it would hand back a plausible-looking
+/// seven-day window that the real API never produces, and the client would ship
+/// a sync window that silently does not exist.
+///
+/// `m` is 30 days and `y` is 365. Whether Gmail means calendar months and years
+/// is undocumented; this is a stated approximation, and it is why NADE's own
+/// sync should compute its window and pass `after:`/`before:` in epoch seconds
+/// rather than lean on `newer_than:` at all.
+///
+/// [ops]: https://support.google.com/mail/answer/7190
 fn span_ms(value: &str) -> Result<i64, ()> {
     let (digits, unit) = value.split_at(value.len().saturating_sub(1));
-    let (digits, multiplier) = match unit {
-        "d" => (digits, DAY_MS),
-        "w" => (digits, 7 * DAY_MS),
-        "m" => (digits, 30 * DAY_MS),
-        "y" => (digits, 365 * DAY_MS),
-        _ => (value, DAY_MS),
+    let multiplier = match unit {
+        "d" => DAY_MS,
+        "m" => 30 * DAY_MS,
+        "y" => 365 * DAY_MS,
+        _ => return Err(()),
     };
     digits
         .parse::<i64>()
@@ -513,23 +568,66 @@ fn span_ms(value: &str) -> Result<i64, ()> {
         .ok_or(())
 }
 
-/// `YYYY/MM/DD`, `YYYY-MM-DD`, or epoch seconds.
+/// Gmail interprets a bare date as **midnight Pacific**, not midnight UTC.
+///
+/// Straight from the API's own filtering guide: *"All dates used in the search
+/// query are interpreted as midnight on that date in the PST timezone. To
+/// specify accurate dates for other timezones pass the value in seconds
+/// instead."*
+///
+/// Modelling UTC here would put every date bound eight hours out, and a
+/// 30-day-window sync that straddles a boundary would disagree with production
+/// by a whole day's mail at the edge.
+///
+/// **Fixed UTC−8**, because that is what Google's word "PST" literally says.
+/// Google never states whether it means the fixed offset or DST-aware
+/// `America/Los_Angeles`, so between mid-March and early November there is a
+/// documented-ambiguity window of one hour that no simulator can resolve. The
+/// safe client behaviour — and the one NADE should adopt — is to pass epoch
+/// seconds, which this also accepts and which has no ambiguity at all.
+const PACIFIC_OFFSET_MS: i64 = 8 * 60 * 60 * 1000;
+
+/// `YYYY/MM/DD`, `YYYY-MM-DD` (midnight Pacific), or epoch seconds (exact).
+///
+/// `MM/DD/YYYY` is *also* documented by Google, and is deliberately **not**
+/// accepted: `03/04/2004` is genuinely ambiguous between the two documented
+/// orders and Google publishes no disambiguation rule. Refusing it makes a
+/// client that sends it get zero results here — loud and safe — rather than a
+/// confidently wrong three months.
 fn date_ms(value: &str) -> Result<i64, ()> {
     let parts: Vec<&str> = value.split(['/', '-']).collect();
     if parts.len() == 3 {
         let year: i32 = parts[0].parse().map_err(|_| ())?;
+        // Only the unambiguous year-first order.
+        if parts[0].len() != 4 {
+            return Err(());
+        }
         let month: u32 = parts[1].parse().map_err(|_| ())?;
         let day: u32 = parts[2].parse().map_err(|_| ())?;
         let date = chrono::NaiveDate::from_ymd_opt(year, month, day).ok_or(())?;
         return date
             .and_hms_opt(0, 0, 0)
-            .map(|at| at.and_utc().timestamp_millis())
+            .map(|at| at.and_utc().timestamp_millis() + PACIFIC_OFFSET_MS)
             .ok_or(());
     }
+    // Epoch seconds: exact, timezone-free, and what Google tells you to use.
     value
         .parse::<i64>()
         .map_err(|_| ())
         .and_then(|seconds| seconds.checked_mul(1_000).ok_or(()))
+}
+
+/// Map a documented `category:` value onto the label it means.
+fn category_label(value: &str) -> Result<String, ()> {
+    match value {
+        // There is no `CATEGORY_PRIMARY`. Google's docs call it the "Personal
+        // tab" and the UI calls it "Primary".
+        "primary" | "personal" => Ok("category_personal".to_owned()),
+        "social" | "promotions" | "updates" | "forums" => Ok(format!("category_{value}")),
+        // Documented `q` values with **no** label id at all, so they can never
+        // match a label the mailbox holds. Left as free text by the caller.
+        _ => Err(()),
+    }
 }
 
 /// `10M`, `500K`, `1024`.
@@ -697,15 +795,39 @@ mod tests {
     }
 
     #[test]
-    fn span_units_all_work() {
+    fn only_the_three_documented_span_units_are_accepted() {
+        // Google documents exactly `d`, `m`, `y`.
         assert_eq!(span_ms("30d"), Ok(30 * DAY_MS));
-        assert_eq!(span_ms("2w"), Ok(14 * DAY_MS));
         assert_eq!(span_ms("6m"), Ok(180 * DAY_MS));
         assert_eq!(span_ms("1y"), Ok(365 * DAY_MS));
-        assert_eq!(span_ms("7"), Ok(7 * DAY_MS), "a bare number means days");
+
+        // `w`, `h` and a bare number are documented **nowhere**. Accepting them
+        // would hand back a plausible window the real API never produces.
+        for undocumented in ["2w", "6h", "7", "30D", "30 d", ""] {
+            assert!(
+                span_ms(undocumented).is_err(),
+                "{undocumented:?} is not a documented span"
+            );
+        }
         assert!(span_ms("abc").is_err());
         assert!(span_ms("-3d").is_err());
         assert!(span_ms("99999999999999999999d").is_err());
+    }
+
+    #[test]
+    fn an_undocumented_span_unit_degrades_to_free_text_and_matches_nothing() {
+        // The whole point: `newer_than:1w` must not quietly behave like a
+        // seven-day window. It becomes a search term, finds nothing, and the
+        // client notices.
+        assert_eq!(
+            Query::parse("newer_than:1w"),
+            Query::Term(Term::Text("newer_than:1w".to_owned()))
+        );
+        assert!(!hit("newer_than:1w", &[], 1));
+        assert!(
+            hit("newer_than:7d", &[], 1),
+            "the documented form still works"
+        );
     }
 
     #[test]
@@ -745,6 +867,56 @@ mod tests {
     }
 
     #[test]
+    fn or_is_case_sensitive_and_pipe_is_not_an_or() {
+        // Gmail searches for a lowercase `or` as the literal word, which is why
+        // lowercasing a user's query silently changes what it means.
+        assert_eq!(
+            Query::parse("a or b"),
+            Query::And(vec![
+                Query::Term(Term::Text("a".to_owned())),
+                Query::Term(Term::Text("or".to_owned())),
+                Query::Term(Term::Text("b".to_owned())),
+            ])
+        );
+        // `|` is not documented as an OR anywhere; it is a plain term.
+        assert!(!hit("from:paypal | from:stripe", &[], 1));
+        // …and `AND` is documented, but redundant.
+        assert!(hit("from:stripe AND is:unread", &["UNREAD"], 1));
+    }
+
+    #[test]
+    fn a_space_after_the_colon_is_free_text_not_a_match_everything() {
+        // EDGE: `from: x`. An operator with an empty argument would
+        // `contains("")` and match every message in the mailbox — a stray space
+        // turning into a silently unfiltered sync.
+        assert_eq!(
+            Query::parse("from:"),
+            Query::Term(Term::Text("from:".to_owned()))
+        );
+        assert!(
+            !hit("from: stripe", &[], 1),
+            "neither term is in the haystack"
+        );
+        assert!(hit("from:stripe", &[], 1), "no space, real operator");
+    }
+
+    #[test]
+    fn category_maps_onto_the_label_gmail_actually_uses() {
+        // There is no CATEGORY_PRIMARY; the label is CATEGORY_PERSONAL.
+        assert!(hit("category:primary", &["CATEGORY_PERSONAL"], 1));
+        assert!(!hit("category:primary", &["CATEGORY_PROMOTIONS"], 1));
+        assert!(hit("category:promotions", &["CATEGORY_PROMOTIONS"], 1));
+        assert!(hit("category:updates", &["CATEGORY_UPDATES"], 1));
+        // `reservations` and `purchases` are documented `q` values with no label
+        // id at all, so they can never match a label the mailbox holds.
+        assert!(!hit("category:reservations", &["CATEGORY_UPDATES"], 1));
+        assert_eq!(
+            Query::parse("category:purchases"),
+            Query::Term(Term::Text("category:purchases".to_owned()))
+        );
+    }
+
+    #[test]
     fn quoted_phrases_stay_one_term() {
         assert!(hit("subject:\"july invoice\"", &[], 1));
         assert!(!hit("subject:\"august invoice\"", &[], 1));
@@ -781,14 +953,48 @@ mod tests {
     }
 
     #[test]
-    fn absolute_dates_parse_in_both_shapes() {
-        assert_eq!(date_ms("2026/08/01"), Ok(NOW));
-        assert_eq!(date_ms("2026-08-01"), Ok(NOW));
-        assert_eq!(date_ms("1785542400"), Ok(NOW));
+    fn a_bare_date_means_midnight_pacific_not_midnight_utc() {
+        // Google: "All dates used in the search query are interpreted as
+        // midnight on that date in the PST timezone." Eight hours, and a
+        // 30-day window that straddles the boundary disagrees by a day's mail.
+        const UTC_MIDNIGHT: i64 = 1_785_542_400_000; // 2026-08-01T00:00:00Z
+        assert_eq!(date_ms("2026/08/01"), Ok(UTC_MIDNIGHT + 8 * 3_600_000));
+        assert_eq!(date_ms("2026-08-01"), Ok(UTC_MIDNIGHT + 8 * 3_600_000));
+
+        // Epoch seconds are exact and timezone-free — what Google tells you to
+        // send, and the only form with no ambiguity at all.
+        assert_eq!(date_ms("1785542400"), Ok(UTC_MIDNIGHT));
+
+        // `MM/DD/YYYY` is also documented by Google and is refused here on
+        // purpose: `03/04/2004` cannot be disambiguated and Google publishes no
+        // rule. Zero results is loud; three wrong months is not.
+        assert!(date_ms("08/01/2026").is_err());
+        assert!(date_ms("03/04/2004").is_err());
+
         assert!(date_ms("2026/13/01").is_err());
         assert!(date_ms("nope").is_err());
-        assert!(hit("after:2026/07/01", &[], 5));
-        assert!(!hit("before:2026/07/01", &[], 5));
+    }
+
+    #[test]
+    fn a_date_range_is_half_open() {
+        // Forced by Google's own worked example: `after:2014/01/01
+        // before:2014/02/01` "retrieves all messages sent in January 2014", so
+        // `after` includes its day and `before` excludes its own.
+        let labels: Vec<String> = Vec::new();
+        let boundary = date_ms("2026/08/01").unwrap();
+        let at = |ms: i64| Facts {
+            internal_date_ms: ms,
+            label_ids: &labels,
+            size: 1,
+            now_ms: NOW,
+        };
+        let after = Query::parse("after:2026/08/01");
+        assert!(after.matches(&text(), at(boundary), &names), "inclusive");
+        assert!(!after.matches(&text(), at(boundary - 1), &names));
+
+        let before = Query::parse("before:2026/08/01");
+        assert!(!before.matches(&text(), at(boundary), &names), "exclusive");
+        assert!(before.matches(&text(), at(boundary - 1), &names));
     }
 
     #[test]

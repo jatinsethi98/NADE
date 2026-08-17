@@ -16,7 +16,10 @@
 //! decode the `Content-Transfer-Encoding` so that `body.data` holds the decoded
 //! bytes.
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+    Engine as _,
+};
 
 /// One node of the `payload` tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -318,38 +321,41 @@ fn decode_transfer_encoding(node: &MimePart, body: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Base64 that never fails.
+/// Base64 that never fails, in one pass.
 ///
 /// EDGE: corpus case 22 is deliberately malformed base64. Gmail still returns
 /// *something* for such a part, and a simulator that panicked would turn a
-/// client-robustness test into a simulator crash. Decodes as much as it can and
-/// stops at the first byte it cannot use.
+/// client-robustness test into a simulator crash.
+///
+/// The obvious lenient implementation — try to decode, shorten by one, try
+/// again — is **quadratic**, and an 8 MB attachment whose last byte is wrong
+/// would take minutes. This is linear instead: the strict decoder gets first
+/// refusal, and the fallback drops everything outside the alphabet, trims the
+/// one length remainder that no byte string can produce (`len % 4 == 1`), and
+/// decodes once.
 #[must_use]
 pub fn decode_base64_lenient(body: &[u8]) -> Vec<u8> {
-    let filtered: Vec<u8> = body
+    let compact: Vec<u8> = body
         .iter()
         .copied()
         .filter(|byte| !byte.is_ascii_whitespace())
         .collect();
-    let mut end = filtered.len();
-    while end > 0 {
-        let trimmed = &filtered[..end];
-        if let Ok(decoded) = STANDARD.decode(trimmed) {
-            return decoded;
-        }
-        // Also try without trailing padding, which some senders get wrong.
-        if let Ok(decoded) = base64::engine::general_purpose::STANDARD_NO_PAD.decode(
-            trimmed
-                .iter()
-                .copied()
-                .take_while(|b| *b != b'=')
-                .collect::<Vec<_>>(),
-        ) {
-            return decoded;
-        }
-        end -= 1;
+    // The overwhelmingly common case: it is simply valid.
+    if let Ok(decoded) = STANDARD.decode(&compact) {
+        return decoded;
     }
-    Vec::new()
+    let mut alphabet: Vec<u8> = compact
+        .into_iter()
+        .filter(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'-' | b'_'))
+        .collect();
+    // A remainder of 1 encodes no whole byte, so it can only be damage.
+    if alphabet.len() % 4 == 1 {
+        alphabet.pop();
+    }
+    base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(&alphabet)
+        .or_else(|_| URL_SAFE_NO_PAD.decode(&alphabet))
+        .unwrap_or_default()
 }
 
 /// Quoted-printable, soft line breaks and all.
@@ -537,6 +543,27 @@ mod tests {
         assert!(
             decoded.starts_with(b"Hell"),
             "expected a best-effort prefix, got {decoded:?}"
+        );
+    }
+
+    /// EDGE: a large body whose base64 is damaged. The naive lenient decoder
+    /// was quadratic here and took minutes; this must be instant.
+    #[test]
+    fn malformed_base64_at_scale_is_linear_not_quadratic() {
+        let mut payload = b"A".repeat(2 * 1024 * 1024);
+        payload.extend_from_slice(b"!!!");
+        let raw = [
+            b"Content-Transfer-Encoding: base64\r\n\r\n".to_vec(),
+            payload,
+        ]
+        .concat();
+        let started = std::time::Instant::now();
+        let decoded = parse_message(&raw).body;
+        assert!(!decoded.is_empty(), "it must still recover the good prefix");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "decoding took {:?}",
+            started.elapsed()
         );
     }
 

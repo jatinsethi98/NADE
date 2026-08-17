@@ -23,9 +23,7 @@ use crate::{
     mailbox::Mailbox,
     message::MessageSpec,
     query::Query,
-    render::{
-        self, fingerprint, Format, HistoryCursor, PageCursor,
-    },
+    render::{self, fingerprint, Format, HistoryCursor, PageCursor},
 };
 
 /// How the simulator treats the `Authorization` header.
@@ -214,7 +212,9 @@ impl Simulator {
         // A poisoned lock means a test panicked mid-mutation. Recovering is
         // right here: the panic is the failure the test will report, and a
         // second panic from the lock would bury it.
-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     // -- driving the world -------------------------------------------------
@@ -510,9 +510,7 @@ impl Simulator {
         }
         let inner = self.lock();
         match request.bearer_token() {
-            Some(token)
-                if token == inner.auth.access_token && !inner.auth.access_token_expired =>
-            {
+            Some(token) if token == inner.auth.access_token && !inner.auth.access_token_expired => {
                 None
             }
             _ => Some(ApiError::InvalidCredentials),
@@ -585,6 +583,14 @@ impl Simulator {
         };
 
         let inner = self.lock();
+        // EDGE: `labelIds` is **case-sensitive** and an unknown id is a `400`,
+        // not an empty result. `labelIds=sent` is the classic version of this —
+        // Gmail answers `Invalid label: sent` and means `SENT`. Matching nothing
+        // instead would let a client that lowercases its label ids look like a
+        // mailbox that simply has no mail in that label.
+        if let Some(bad) = unknown_label(&inner.mailbox, &label_filter) {
+            return error_response(&ApiError::InvalidArgument(format!("Invalid label: {bad}")));
+        }
         let parsed = Query::parse(&raw_query);
         let all = inner
             .mailbox
@@ -695,6 +701,10 @@ impl Simulator {
         };
 
         let inner = self.lock();
+        // Same case-sensitive `labelIds` rule as `messages.list`.
+        if let Some(bad) = unknown_label(&inner.mailbox, &label_filter) {
+            return error_response(&ApiError::InvalidArgument(format!("Invalid label: {bad}")));
+        }
         let parsed = Query::parse(&raw_query);
         let matched = inner
             .mailbox
@@ -719,8 +729,7 @@ impl Simulator {
                 None => true,
                 Some(cursor) => {
                     *date < cursor.after_internal_date_ms
-                        || (*date == cursor.after_internal_date_ms
-                            && *newest < cursor.after_id)
+                        || (*date == cursor.after_internal_date_ms && *newest < cursor.after_id)
                 }
             })
             .collect();
@@ -1122,6 +1131,16 @@ fn clamp_max_results(raw: Option<&str>, default: usize, ceiling: usize) -> usize
         .filter(|value| *value > 0)
         .unwrap_or(default)
         .min(ceiling)
+}
+
+/// The first `labelIds` value the mailbox does not have, matched **exactly**.
+///
+/// Case-sensitive on purpose: `labelIds` is, even though `q=label:` is not.
+fn unknown_label(mailbox: &Mailbox, wanted: &[String]) -> Option<String> {
+    wanted
+        .iter()
+        .find(|id| mailbox.label(id).is_none())
+        .cloned()
 }
 
 /// Is this message strictly after the cursor in `(internalDate desc, id desc)`?

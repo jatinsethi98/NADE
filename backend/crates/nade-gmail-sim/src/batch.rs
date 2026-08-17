@@ -114,10 +114,7 @@ pub fn boundary_of(content_type: &str) -> Option<String> {
 /// # Errors
 /// [`BatchParseError`] when the content type is wrong, the body holds no parts,
 /// or there are more than [`MAX_BATCH_CALLS`] of them.
-pub fn parse_request(
-    content_type: &str,
-    body: &[u8],
-) -> Result<Vec<SubRequest>, BatchParseError> {
+pub fn parse_request(content_type: &str, body: &[u8]) -> Result<Vec<SubRequest>, BatchParseError> {
     let boundary = boundary_of(content_type).ok_or(BatchParseError::NotMultipart)?;
     let chunks = split_on_boundary(body, &boundary);
     if chunks.is_empty() {
@@ -197,15 +194,14 @@ pub fn build_response(
         for (name, value) in &response.headers {
             out.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
         }
-        out.extend_from_slice(format!("Content-Length: {}\r\n\r\n", response.body.len()).as_bytes());
+        out.extend_from_slice(
+            format!("Content-Length: {}\r\n\r\n", response.body.len()).as_bytes(),
+        );
         out.extend_from_slice(&response.body);
         out.extend_from_slice(b"\r\n");
     }
     out.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-    (
-        format!("multipart/mixed; boundary={boundary}"),
-        out,
-    )
+    (format!("multipart/mixed; boundary={boundary}"), out)
 }
 
 fn reason_phrase(status: u16) -> &'static str {
@@ -298,10 +294,8 @@ mod tests {
             out.extend_from_slice(b"Content-Transfer-Encoding: binary\r\n");
             out.extend_from_slice(format!("Content-ID: <item-{index}>\r\n\r\n").as_bytes());
             out.extend_from_slice(
-                format!(
-                    "GET /gmail/v1/users/me/messages/msg{index}?format=raw HTTP/1.1\r\n\r\n"
-                )
-                .as_bytes(),
+                format!("GET /gmail/v1/users/me/messages/msg{index}?format=raw HTTP/1.1\r\n\r\n")
+                    .as_bytes(),
             );
             out.extend_from_slice(b"\r\n");
         }
@@ -340,7 +334,10 @@ mod tests {
         let (content_type, out) = build_response(
             1,
             BatchOrder::Reversed,
-            vec![("item-0".to_owned(), SimResponse::json(200, &json!({"id": "m"})))],
+            vec![(
+                "item-0".to_owned(),
+                SimResponse::json(200, &json!({"id": "m"})),
+            )],
         );
         assert!(content_type.starts_with("multipart/mixed; boundary=batch_nadesim_"));
         let text = String::from_utf8(out).unwrap();
@@ -353,7 +350,9 @@ mod tests {
     fn a_batch_of_one_hundred_parses_and_one_of_one_hundred_and_one_does_not() {
         let body = client_body("b", 100);
         assert_eq!(
-            parse_request("multipart/mixed; boundary=b", &body).unwrap().len(),
+            parse_request("multipart/mixed; boundary=b", &body)
+                .unwrap()
+                .len(),
             100
         );
         let body = client_body("b", 101);
@@ -450,7 +449,11 @@ mod tests {
                      --b\r\nContent-Type: application/http\r\nContent-ID: <c>\r\n\r\n\
                      GET /ok HTTP/1.1\r\n\r\n--b--\r\n";
         let parsed = parse_request("multipart/mixed; boundary=b", body).unwrap();
-        assert_eq!(parsed.len(), 2, "the client asked twice; it gets two answers");
+        assert_eq!(
+            parsed.len(),
+            2,
+            "the client asked twice; it gets two answers"
+        );
         assert_eq!(parsed[0].content_id, "a");
         assert_eq!(parsed[1].request.path, "/ok");
     }

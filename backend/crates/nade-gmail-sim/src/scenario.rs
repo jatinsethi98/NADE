@@ -240,13 +240,10 @@ impl Scenario {
                 Step::SetTimeMs(at) => clock.set_ms(*at),
                 Step::Insert(spec) => {
                     let id = sim.insert_message(spec)?;
-                    let history = sim.mailbox(|mailbox| {
-                        mailbox.message(&id).map(|message| message.history_id)
-                    });
+                    let history = sim
+                        .mailbox(|mailbox| mailbox.message(&id).map(|message| message.history_id));
                     outcome.inserted.push(id);
-                    if let Some(Some(history)) = Some(history) {
-                        outcome.history_ids.push(history);
-                    }
+                    record(&mut outcome, history);
                 }
                 Step::Delete(target) => {
                     let id = target.resolve(&outcome.inserted)?;
@@ -455,7 +452,15 @@ mod tests {
             .run(&sim)
             .unwrap();
         assert_eq!(outcome.labels, ["Label_1"]);
-        assert_eq!(sim.handle(&sim.authorized("/gmail/v1/users/me/profile")).status, 500);
-        assert_eq!(sim.handle(&sim.authorized("/gmail/v1/users/me/profile")).status, 200);
+        assert_eq!(
+            sim.handle(&sim.authorized("/gmail/v1/users/me/profile"))
+                .status,
+            500
+        );
+        assert_eq!(
+            sim.handle(&sim.authorized("/gmail/v1/users/me/profile"))
+                .status,
+            200
+        );
     }
 }

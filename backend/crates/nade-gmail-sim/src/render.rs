@@ -242,6 +242,11 @@ pub fn thread_json(
 }
 
 /// A `users.threads.list` entry: id, snippet, and the thread's `historyId`.
+///
+/// `messages` arrives oldest-first, the way `Mailbox::thread` returns it. The
+/// snippet comes from the **newest** message, which is what a thread list shows
+/// and what Gmail returns — taking the oldest would make a long thread's
+/// preview permanently stale.
 #[must_use]
 pub fn thread_reference(thread_id: &str, messages: &[&StoredMessage]) -> Value {
     let history = messages
@@ -251,7 +256,7 @@ pub fn thread_reference(thread_id: &str, messages: &[&StoredMessage]) -> Value {
         .unwrap_or_default();
     json!({
         "id": thread_id,
-        "snippet": messages.first().map(|m| m.snippet()).unwrap_or_default(),
+        "snippet": messages.last().map(|m| m.snippet()).unwrap_or_default(),
         "historyId": history.to_string(),
     })
 }

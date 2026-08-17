@@ -346,11 +346,16 @@ mod tests {
     #[test]
     fn evenly_spaced_seeding_ignores_the_date_headers() {
         let mut mailbox = Mailbox::new("me@example.com");
-        let options = SeedOptions::default().evenly_spaced(1_000_000, 1_000).limit(5);
+        let options = SeedOptions::default()
+            .evenly_spaced(1_000_000, 1_000)
+            .limit(5);
         let seeded = seed_mime_corpus(&mut mailbox, &options).unwrap();
         assert_eq!(seeded.len(), 5);
         let dates: Vec<i64> = seeded.iter().map(|entry| entry.internal_date_ms).collect();
-        assert_eq!(dates, [1_000_000, 1_001_000, 1_002_000, 1_003_000, 1_004_000]);
+        assert_eq!(
+            dates,
+            [1_000_000, 1_001_000, 1_002_000, 1_003_000, 1_004_000]
+        );
     }
 
     #[test]
