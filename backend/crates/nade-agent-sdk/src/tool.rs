@@ -40,6 +40,10 @@ pub enum ReplayPolicy {
     /// — write the intent inside the same transaction as the effect row, deliver
     /// it once from a sweeper — turns the problem back into
     /// [`Retry`](ReplayPolicy::Retry) and needs no human at all.
+    ///
+    /// The choice is recorded on the entry that opens the step, so the refusal
+    /// is as durable as the step itself. See
+    /// [`Tool::replay_policy`](Tool::replay_policy).
     Halt,
 }
 
@@ -87,6 +91,12 @@ pub enum ReplayPolicy {
 /// with [`Error::ToolChanged`](crate::Error::ToolChanged) rather than guess. The
 /// decision may depend on the arguments — "drafting a reply needs approval,
 /// reading a thread does not" is a property of the call, not only of the tool.
+///
+/// The rule, in both directions: **a step never executes ungated if the tool
+/// now requires approval, and a step opened gated must still hold a recorded
+/// approval.** The second half does not consult this method at all — a step
+/// opened behind a gate stays behind it for life, because the authority is the
+/// human's recorded yes and not the current build's policy.
 #[async_trait]
 pub trait Tool: Send + Sync {
     /// The name the model calls this by. Must be unique within an engine.
@@ -132,6 +142,17 @@ pub trait Tool: Send + Sync {
     /// [`ReplayPolicy::Halt`](ReplayPolicy::Halt) only for an effect that truly
     /// cannot be keyed, and read that variant's docs first — it stops the run
     /// rather than fixing anything.
+    ///
+    /// # When it is asked, and which answer counts
+    ///
+    /// The answer given when the step **opens** is written to the journal and is
+    /// the one that binds: a step opened under `Halt` is never blind-retried,
+    /// however a later build answers. The method is asked again before a
+    /// re-dispatch, but only so the decision can become *stricter* — a build
+    /// that newly declares an effect unkeyable stops a step opened under
+    /// `Retry`. It can never go the other way, because "this must not run twice"
+    /// is a fact about an effect that may already exist, and re-asking a tool is
+    /// not a way to unlearn it.
     fn replay_policy(&self, _call: &ToolCall) -> ReplayPolicy {
         ReplayPolicy::Retry
     }

@@ -7,11 +7,17 @@
 //!                            --skip----->  skipped
 //!                            --expire--->  expired
 //! running → waiting(wake_at) --timer---->  running
+//! any non-terminal state     --cancel--->  failed { cancelled }
 //! ```
 //!
 //! `queued` belongs to the host — it is the state of a run that exists in the
 //! host's tables but has not been handed to [`Engine::run`](crate::Engine::run)
 //! yet. Everything from `running` onwards is what this crate reports.
+//!
+//! `cancel` is [`Engine::cancel`](crate::Engine::cancel), the host's own way out
+//! of a run that cannot proceed. It reaches [`RunStatus::Failed`] with
+//! [`FailureReason::Cancelled`] rather than a status of its own, so the tag set
+//! a host stores is unchanged.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -157,6 +163,17 @@ pub enum FailureReason {
         /// The id the effect would have been keyed on.
         effect_id: Uuid,
     },
+    /// The host ended the run itself, through
+    /// [`Engine::cancel`](crate::Engine::cancel).
+    ///
+    /// Not a cap and not a failure of the model or a tool: it is the escape
+    /// hatch for a run that can no longer make progress but must still reach a
+    /// terminal state — the canonical case being a step whose tool changed
+    /// under it after a human had already approved the old one.
+    Cancelled {
+        /// Why the host gave up, verbatim.
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for FailureReason {
@@ -182,6 +199,7 @@ impl std::fmt::Display for FailureReason {
                      reconcile effect {effect_id}"
                 )
             }
+            Self::Cancelled { detail } => write!(f, "cancelled by the host: {detail}"),
         }
     }
 }

@@ -18,6 +18,7 @@ use crate::error::{Error, Result};
 use crate::ids::{RunId, Seq};
 use crate::message::{StopReason, TokenUsage, ToolCall};
 use crate::run::{Decision, FailureReason, RunInput, RunStatus};
+use crate::tool::ReplayPolicy;
 
 /// One durable fact about a run.
 ///
@@ -173,12 +174,50 @@ impl<'de> Deserialize<'de> for EntryKind {
     }
 }
 
+/// The journal format this build writes, and the only one it will replay.
+///
+/// Stamped on every run's [`RunStarted`] entry and checked before any other
+/// payload is decoded. A journal carrying a different number — older or newer —
+/// is refused with [`Error::UnsupportedJournalFormat`], which is a deliberate,
+/// typed answer; the alternative is a `serde` failure at whichever entry first
+/// happens to disagree, reported as a corrupt journal, which tells a host
+/// nothing it can act on.
+///
+/// # The compatibility policy, stated
+///
+/// This crate does **not** migrate journals. Entry payloads gain required
+/// fields as the protocol is tightened, and inventing values for the ones an
+/// older writer never recorded would mean guessing at facts the protocol exists
+/// to pin down — a step's open time, the replay policy a decision was taken
+/// under. So a format change is a hard break: bump this number, and a run in
+/// flight across the upgrade is refused rather than reinterpreted.
+///
+/// `0` is reserved for "written before the format was versioned at all".
+pub const JOURNAL_FORMAT: u16 = 1;
+
 /// Payload of [`EntryKind::RunStarted`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RunStarted {
     /// The input the run was started with. Replay uses this, not the argument
     /// passed to a later [`Engine::run`](crate::Engine::run) call.
     pub input: RunInput,
+    /// The [`JOURNAL_FORMAT`] the rest of this run's entries are written in.
+    ///
+    /// Defaults to `0` when absent, which is what a journal written before the
+    /// format was versioned looks like. Replay checks this **first**, so an
+    /// unsupported journal is refused before any other payload is decoded.
+    #[serde(default)]
+    pub journal_format: u16,
+}
+
+impl RunStarted {
+    /// Record `input` in the format this build writes.
+    pub fn new(input: RunInput) -> Self {
+        Self {
+            input,
+            journal_format: JOURNAL_FORMAT,
+        }
+    }
 }
 
 /// Payload of [`EntryKind::ModelResponse`].
@@ -240,6 +279,13 @@ pub struct StepStarted {
     /// implementation other than the one it was opened under.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_fingerprint: Option<String>,
+    /// The [`ReplayPolicy`] the tool declared when this step was **opened**.
+    ///
+    /// Recorded so the decision to refuse a blind retry is durable rather than
+    /// re-derived by asking the tool again at replay time. A step opened under
+    /// [`ReplayPolicy::Halt`] is never blind-retried, whatever a later build
+    /// answers; the tool's current policy may only make the decision stricter.
+    pub replay_policy: ReplayPolicy,
 }
 
 /// Payload of [`EntryKind::StepDone`].
@@ -297,6 +343,11 @@ pub struct ApprovalRequested {
     /// `tool` does invalidates an approval taken for the old one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_fingerprint: Option<String>,
+    /// The [`ReplayPolicy`] the tool declared when this step was **opened**.
+    ///
+    /// See [`StepStarted::replay_policy`] — a gated step is fenced and replayed
+    /// exactly like an ungated one, so it needs the same durable decision.
+    pub replay_policy: ReplayPolicy,
 }
 
 /// Payload of [`EntryKind::ApprovalResolved`].
@@ -447,16 +498,40 @@ pub struct RunEnded {
 ///
 /// # Replay validates before it interprets
 ///
-/// A journal is not trusted just because it loaded. Before rebuilding a run the
-/// engine checks that sequences start at 1 and increase by exactly one; that the
-/// first entry is `run_started` and the only one; that nothing follows
-/// `run_ended`; that every `step_seq` names a step that was really opened at
-/// that sequence; that each `effect_id` equals
-/// [`effect_id(run, step_seq)`](crate::effect_id) and each `args_hash` equals
-/// [`args_hash(args)`](crate::args_hash); that a repeated `step_started` agrees
-/// with the original in every field; and that an approval is resolved at most
-/// once. Anything else is [`Error::CorruptJournal`], refused *before* a step can
-/// reach dispatch under an arbitrary or colliding effect id.
+/// A journal is not trusted just because it loaded, and the distinction that
+/// matters is between a field **checked against something the engine wrote
+/// earlier** and one merely **recomputed from the payload that claims it**. A
+/// field of the second kind is not checked at all: a self-consistent forgery
+/// satisfies it. Before rebuilding a run the engine therefore checks that
+///
+/// * the run's [`JOURNAL_FORMAT`] is one this build writes — first, before any
+///   other payload is decoded;
+/// * sequences start at 1 and increase by exactly one; the first entry is
+///   `run_started` and the only one; nothing follows `run_ended`;
+/// * no entry claims a `created_at` further ahead of the local clock than
+///   [`EngineConfig::max_journal_clock_drift`](crate::EngineConfig::max_journal_clock_drift),
+///   and no step claims to have opened after the entry recording it was made;
+/// * **the tool and arguments of an opening entry are the ones the model
+///   actually asked for** — resolved back to the call in the current
+///   `model_response`, not merely to a call id seen at some point in the run;
+/// * every `step_seq` names a step really opened at that sequence, each
+///   `effect_id` equals [`effect_id(run, step_seq)`](crate::effect_id) and each
+///   `args_hash` equals [`args_hash(args)`](crate::args_hash);
+/// * a repeated `step_started` agrees with the original in every field but
+///   `attempt`, and an approval is resolved at most once;
+/// * the turn order holds: a `model_response` never abandons a step that has
+///   started and not finished, and nothing follows the turn that answered the
+///   run.
+///
+/// Anything else is [`Error::CorruptJournal`], refused *before* a step can reach
+/// dispatch under an arbitrary or colliding effect id — or under a tool the
+/// model never named.
+///
+/// What replay does **not** second-guess is the facts the journal exists to
+/// record: a `model_response`'s text and usage, an `approval_resolved`'s
+/// decision, a `step_done`'s result. Those *are* the run's history; a host that
+/// cannot trust its own journal's contents has a storage problem this crate
+/// cannot detect from the inside.
 #[async_trait]
 pub trait Journal: Send + Sync {
     /// Append `entry` at `entry.seq`, **durably**.

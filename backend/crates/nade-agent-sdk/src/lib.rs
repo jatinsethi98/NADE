@@ -61,6 +61,43 @@
 //! `skipped`; a run whose cap breach was journaled is failed with that breach.
 //! An absent `run_ended` means "finish what is recorded", not "start again".
 //!
+//! # Replay trusts the journal's *facts*, not its *claims*
+//!
+//! A journal is the run's history, so replay takes its facts as given: what the
+//! model said, what a human decided, what a tool returned. It does not take its
+//! **claims** as given, and the line between the two is whether a field can be
+//! checked against something the engine wrote earlier or is merely recomputed
+//! from the payload asserting it. A recomputed field is not a check at all: any
+//! self-consistent forgery satisfies it.
+//!
+//! So a step's tool and arguments are resolved back to the call in the current
+//! `model_response` — not merely to a call id seen somewhere in the run — and a
+//! step whose action is not the one the model asked for is
+//! [`Error::CorruptJournal`], before anything is dispatched. The turn order is
+//! enforced with it: no turn abandons a step that started and did not finish,
+//! and nothing follows the turn that answered the run. See the [`Journal`] trait
+//! docs for the full list.
+//!
+//! Two other things replay refuses rather than absorbs. A journal written in a
+//! format this build does not read is [`Error::UnsupportedJournalFormat`] —
+//! see [`JOURNAL_FORMAT`], which also states the (deliberately unforgiving)
+//! compatibility policy. And an entry stamped implausibly far in the future is
+//! refused rather than allowed to displace the run's clock, because the clock
+//! floor that protects expiry from a *backwards* jump is built out of those
+//! timestamps: see
+//! [`EngineConfig::max_journal_clock_drift`](EngineConfig::max_journal_clock_drift).
+//!
+//! # No run is stranded
+//!
+//! Every refusal above is permanent by design — a fingerprint mismatch does not
+//! heal, and a decision already on record cannot be retaken. That would leave a
+//! run with nothing able to move it, so there is one more entry point:
+//! [`Engine::cancel`] ends a run with [`FailureReason::Cancelled`], executing
+//! nothing, idempotently. **A run whose journal replays can always be driven to
+//! a terminal state** — by [`Engine::run`], [`Engine::resume`], or
+//! [`Engine::cancel`]. A journal that does *not* replay is a storage problem,
+//! and the host owns it.
+//!
 //! # What that costs you: the idempotency contract
 //!
 //! Re-execution is only safe because every attempt at a step is handed the same
@@ -108,7 +145,9 @@
 //! rail: the engine refuses to blind-retry the step and stops the run with
 //! [`FailureReason::AmbiguousEffect`], quoting the `effect_id` so a human can
 //! reconcile. That is damage control, not a solution — it converts a silent
-//! double-send into a loud stop.
+//! double-send into a loud stop. The policy is recorded when the step opens, so
+//! the refusal survives a redeployment that answers differently; the current
+//! build may only make it stricter.
 //!
 //! # The approval gate
 //!
@@ -150,6 +189,7 @@
 //!                            --skip----->  skipped
 //!                            --expire--->  expired
 //! running → waiting(wake_at) --timer---->  running
+//! any non-terminal state     --cancel--->  failed { cancelled }
 //! ```
 //!
 //! `queued` is the host's: a run that exists in its tables but has not been
@@ -291,7 +331,7 @@ pub use crate::error::{BoxError, Error, Result};
 pub use crate::ids::{args_hash, effect_id, RunId, Seq, EFFECT_NAMESPACE};
 pub use crate::journal::{
     ApprovalRequested, ApprovalResolved, CapBreached, Entry, EntryKind, Journal, ModelResponse,
-    RunEnded, RunStarted, RunWaiting, RunWoken, StepDone, StepStarted,
+    RunEnded, RunStarted, RunWaiting, RunWoken, StepDone, StepStarted, JOURNAL_FORMAT,
 };
 pub use crate::llm::Llm;
 pub use crate::message::{

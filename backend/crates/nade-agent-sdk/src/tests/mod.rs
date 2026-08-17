@@ -5,6 +5,7 @@ mod caps;
 mod defects;
 mod edges;
 mod happy;
+mod hardening;
 mod integrity;
 mod replay;
 mod wire;

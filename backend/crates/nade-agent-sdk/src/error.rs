@@ -136,6 +136,15 @@ pub enum Error {
     /// thing under an identity — and an
     /// [`effect_id`](crate::effect_id) — that was minted for something else, so
     /// the engine refuses and the host must decide.
+    ///
+    /// # Deciding
+    ///
+    /// Two options, and deliberately only two. Deploy the implementation the
+    /// step was opened under and let the run finish, or end the run with
+    /// [`Engine::cancel`](crate::Engine::cancel) and start one the human can
+    /// approve on its own terms. There is no "re-approve under the new
+    /// implementation": rebinding the step would run a different action under an
+    /// identity somebody authorised for something else.
     #[error("run {run}: step {step_seq} was opened under a different '{tool}': {detail}")]
     ToolChanged {
         /// The run whose step cannot be re-dispatched.
@@ -177,6 +186,26 @@ pub enum Error {
         run: RunId,
         /// What was wrong with it.
         message: String,
+    },
+
+    /// The journal was written in a format this build does not replay.
+    ///
+    /// Checked on the run's `run_started` entry before any other payload is
+    /// decoded, so an incompatible journal is a deliberate refusal rather than
+    /// a `serde` failure at whichever entry first happens to disagree. See
+    /// [`JOURNAL_FORMAT`](crate::JOURNAL_FORMAT) for the compatibility policy:
+    /// this crate does not migrate journals, so a run in flight across a format
+    /// change is refused rather than reinterpreted.
+    #[error(
+        "run {run}: journal format {found} is not supported by this build, which reads {expected}"
+    )]
+    UnsupportedJournalFormat {
+        /// The run whose journal cannot be replayed.
+        run: RunId,
+        /// The format the journal claims.
+        found: u16,
+        /// The format this build reads.
+        expected: u16,
     },
 
     /// A value could not be encoded to or decoded from JSON.
@@ -255,6 +284,7 @@ impl Error {
             Self::ToolChanged { .. } => "tool_changed",
             Self::AmbiguousEffect { .. } => "ambiguous_effect",
             Self::CorruptJournal { .. } => "corrupt_journal",
+            Self::UnsupportedJournalFormat { .. } => "unsupported_journal_format",
             Self::Json(_) => "json_error",
         }
     }

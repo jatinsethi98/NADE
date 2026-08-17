@@ -377,6 +377,16 @@ async fn a_tool_that_now_requires_approval_is_not_executed_ungated() {
 /// A tool that declares itself unsafe to repeat is not blind-retried after a
 /// crash. The run stops with the `effect_id` quoted, so the host can reconcile
 /// against its own outbox — the thing that would have made this unnecessary.
+///
+/// # Reproducing the failure this pins
+///
+/// This test never had a committed red version, which is a fair complaint: a
+/// green test proves the code does something, not that the something matters.
+/// To see it fail, disable the guard in
+/// `Engine::check_step_still_means_what_it_meant` — the `if replay && (…Halt…)`
+/// block — and run this test alone. The run reaches `Done` with `steps: 1`, and
+/// `tool.executions()` is **2**: the send left twice, once before the crash and
+/// once on the replay that the policy exists to refuse.
 #[tokio::test]
 async fn a_non_idempotent_tool_is_not_blind_retried() {
     let tool = Arc::new(
@@ -482,6 +492,12 @@ async fn every_attempt_at_a_step_sees_identical_input() {
 /// The clock cannot be moved inside a test, so the equivalent is asserted from
 /// the other side: a journal whose newest entry is already past `expires_at`
 /// expires the approval even though the local `Utc::now()` says otherwise.
+///
+/// The distances are deliberately small. The floor is bounded from above by
+/// [`EngineConfig::max_journal_clock_drift`], so an entry an hour into the
+/// future is now a corrupt journal rather than a very late clock — see
+/// `an_entry_stamped_far_in_the_future_is_refused`. Both bounds hold at once:
+/// a few minutes of skew is honoured, a decade of it is refused.
 #[tokio::test]
 async fn expiry_is_floored_by_the_newest_journal_entry() {
     use crate::journal::{ApprovalRequested, Entry, EntryKind, ModelResponse, RunStarted};
@@ -511,9 +527,7 @@ async fn expiry_is_floored_by_the_newest_journal_entry() {
             Entry::at(
                 1,
                 EntryKind::RunStarted,
-                &RunStarted {
-                    input: RunInput::user("draft"),
-                },
+                &RunStarted::new(RunInput::user("draft")),
                 now,
             )
             .expect("builds"),
@@ -547,11 +561,14 @@ async fn expiry_is_floored_by_the_newest_journal_entry() {
                     args_hash: crate::args_hash(&json!({})),
                     effect_id: crate::effect_id(run, 3),
                     requested_at: now,
-                    // Still an hour away by the local clock.
-                    expires_at: Some(now + ChronoDuration::hours(1)),
+                    // Still a minute away by the local clock.
+                    expires_at: Some(now + ChronoDuration::minutes(1)),
                     tool_fingerprint: fingerprint,
+                    replay_policy: crate::ReplayPolicy::Retry,
                 },
-                entry_written_at,
+                // Never earlier than `requested_at`: a step cannot open after
+                // the entry that records it was created.
+                entry_written_at.max(now),
             )
             .expect("builds"),
         );
@@ -570,7 +587,7 @@ async fn expiry_is_floored_by_the_newest_journal_entry() {
         "an approval inside its TTL is approvable"
     );
     assert_eq!(
-        attempt(now + ChronoDuration::hours(2)).await,
+        attempt(now + ChronoDuration::minutes(4)).await,
         RunStatus::Expired,
         "but not once the run's own journal has moved past the deadline"
     );

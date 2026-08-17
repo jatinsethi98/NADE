@@ -17,7 +17,7 @@ use crate::error::{Error, Result};
 use crate::ids::{args_hash, effect_id, RunId, Seq};
 use crate::journal::{
     ApprovalRequested, ApprovalResolved, CapBreached, Entry, EntryKind, Journal, ModelResponse,
-    RunEnded, RunStarted, RunWaiting, RunWoken, StepDone, StepStarted,
+    RunEnded, RunStarted, RunWaiting, RunWoken, StepDone, StepStarted, JOURNAL_FORMAT,
 };
 use crate::llm::Llm;
 use crate::message::{CallContext, ChatRequest, Message, TokenUsage, ToolCall};
@@ -104,6 +104,30 @@ pub struct EngineConfig {
     /// Default `60s`.
     pub clock_skew_leeway: Duration,
 
+    /// How far ahead of the local clock a journal entry's `created_at` may sit
+    /// before the journal is refused. `None` disables the bound.
+    ///
+    /// The floor described on [`clock_skew_leeway`](EngineConfig::clock_skew_leeway)
+    /// only defends the backwards direction, and it does so by taking the newest
+    /// `created_at` in the run's journal as a lower bound on "now". That makes
+    /// the floor as trustworthy as the journal: **one entry stamped in the
+    /// future displaces the run's clock for the rest of its life**, and every
+    /// timestamp the run subsequently writes — including the `expires_at` of
+    /// later approvals — is displaced with it.
+    ///
+    /// A faithful [`Journal`] cannot produce such an entry: only `Entry`'s own
+    /// `created_at` feeds the floor, and the engine assigns it. A buggy or
+    /// hostile implementation can, and this crate is not entitled to assume one.
+    /// So the floor is bounded from above as well: an entry further ahead than
+    /// this is [`Error::CorruptJournal`] rather than silently accepted.
+    ///
+    /// Pick it larger than the skew between machines that write one run's
+    /// journal, and far smaller than
+    /// [`approval_ttl`](EngineConfig::approval_ttl).
+    ///
+    /// Default `Some(5 minutes)`.
+    pub max_journal_clock_drift: Option<Duration>,
+
     /// Model identifier passed through on every [`ChatRequest`]. Adapters that
     /// serve one model can ignore it.
     pub model: Option<String>,
@@ -123,6 +147,7 @@ impl Default for EngineConfig {
             max_tool_result_bytes: 16 * 1024,
             approval_ttl: Some(Duration::from_secs(7 * 24 * 60 * 60)),
             clock_skew_leeway: Duration::from_secs(60),
+            max_journal_clock_drift: Some(Duration::from_secs(5 * 60)),
             model: None,
             max_output_tokens: None,
             temperature: None,
@@ -220,8 +245,10 @@ impl<L: Llm, J: Journal> Engine<L, J> {
     ///
     /// Errors are transport failures — an unreachable model, a journal that
     /// will not commit — or a refusal to proceed unsafely
-    /// ([`Error::CorruptJournal`], [`Error::ToolChanged`]). They leave the run
-    /// exactly where its journal says it is.
+    /// ([`Error::CorruptJournal`], [`Error::UnsupportedJournalFormat`],
+    /// [`Error::ToolChanged`]). They leave the run exactly where its journal
+    /// says it is. A refusal that repeats is not a dead end: as long as the
+    /// journal replays, [`Engine::cancel`] will end the run.
     pub async fn run(&self, run_id: RunId, input: impl Into<RunInput>) -> Result<RunOutcome> {
         let entries = self.journal.load(run_id).await?;
         let mut state = if entries.is_empty() {
@@ -231,15 +258,69 @@ impl<L: Llm, J: Journal> Engine<L, J> {
                 run_id,
                 &mut state,
                 EntryKind::RunStarted,
-                &RunStarted { input },
+                &RunStarted::new(input),
             )
             .await?;
             state
         } else {
-            RunState::replay(run_id, &entries)?
+            RunState::replay(run_id, &entries, &self.config)?
         };
 
         self.continue_run(run_id, &mut state).await
+    }
+
+    /// End `run_id` because the host has decided it cannot or should not
+    /// continue. The escape hatch, and the only one.
+    ///
+    /// Appends `run_ended` with [`RunStatus::Failed`] and
+    /// [`FailureReason::Cancelled`], executing nothing. It is **idempotent**: a
+    /// run that has already reached a terminal state is returned as-is, and a
+    /// second cancel appends nothing.
+    ///
+    /// # Why this exists
+    ///
+    /// Everything else in this crate refuses to proceed when proceeding would
+    /// be unsafe, and a refusal that repeats forever is not a resolution. The
+    /// case that forced the issue: a step's tool fingerprint changes *after* an
+    /// approval has committed. The decision is on record so it cannot be
+    /// retaken ([`Error::AlreadyResolved`]), and the step cannot execute under
+    /// an implementation other than the one a human agreed to
+    /// ([`Error::ToolChanged`]) — leaving [`run`](Engine::run) and
+    /// [`resume`](Engine::resume) both permanently stuck. Cancelling is the
+    /// host saying "then it does not happen", and recording that as a fact.
+    ///
+    /// # What it deliberately does not offer
+    ///
+    /// There is no "re-approve under the new implementation". The step's
+    /// [`effect_id`](crate::effect_id) was minted for the action the human was
+    /// shown; rebinding it would run a *different* action under an identity
+    /// somebody authorised for something else, which is the exact failure the
+    /// rest of this crate is built to prevent. Cancel, and start a run the human
+    /// can approve on its own terms.
+    ///
+    /// # Its one precondition
+    ///
+    /// The journal must still replay. A run refused with
+    /// [`Error::CorruptJournal`] or [`Error::UnsupportedJournalFormat`] cannot
+    /// be cancelled either, because the engine cannot know which sequence to
+    /// append at — that is a storage problem, and the host owns it.
+    pub async fn cancel(&self, run_id: RunId, detail: impl Into<String>) -> Result<RunOutcome> {
+        let entries = self.journal.load(run_id).await?;
+        if entries.is_empty() {
+            return Err(Error::CorruptJournal {
+                run: run_id,
+                message: "cannot cancel a run that was never started".to_string(),
+            });
+        }
+        let mut state = RunState::replay(run_id, &entries, &self.config)?;
+        if let Some(ended) = &state.ended {
+            return terminal_outcome(run_id, ended, state.stats());
+        }
+        let reason = FailureReason::Cancelled {
+            detail: detail.into(),
+        };
+        self.end(run_id, &mut state, RunStatus::Failed, None, Some(reason))
+            .await
     }
 
     /// Settle a paused run: a human's answer to an approval, or a timer firing.
@@ -287,7 +368,7 @@ impl<L: Llm, J: Journal> Engine<L, J> {
                 _ => Error::NoPendingApproval(run_id),
             });
         }
-        let mut state = RunState::replay(run_id, &entries)?;
+        let mut state = RunState::replay(run_id, &entries, &self.config)?;
 
         // EDGE: duplicate resume of a finished run. The terminal entry is the
         // authority; no second run, no second effect, no new journal entries.
@@ -568,23 +649,9 @@ impl<L: Llm, J: Journal> Engine<L, J> {
                 // effect landed, so it runs it again; the effect id is
                 // unchanged, so a consumer that upserts ends up with one row.
                 Some(record) => {
-                    // Belt and braces behind the approval gate: a gated step is
-                    // dispatched only after an explicit approval is on record.
-                    // Reaching here otherwise would mean the journal and the
-                    // state machine disagree, and the safe reading of that is
-                    // "do not run the thing a human has not agreed to".
-                    if record.gated
-                        && state.resolved_approvals.get(&record.step_seq)
-                            != Some(&Decision::Approve)
-                    {
-                        return Err(Error::CorruptJournal {
-                            run: run_id,
-                            message: format!(
-                                "step {} needs approval but none is recorded",
-                                record.step_seq
-                            ),
-                        });
-                    }
+                    // The approval gate is enforced in `execute`, on the single
+                    // path every dispatch takes — including the one below, for a
+                    // step that was never gated at all.
                     if let Some(outcome) = self.execute(run_id, state, &call, record).await? {
                         return Ok(Some(outcome));
                     }
@@ -610,8 +677,12 @@ impl<L: Llm, J: Journal> Engine<L, J> {
                     let eid = effect_id(run_id, step_seq);
                     let hash = args_hash(&call.arguments);
                     // Fixed once, here, and replayed verbatim on every later
-                    // attempt at this step.
+                    // attempt at this step. It also raises the clock floor, so
+                    // the entry that records the step cannot end up stamped
+                    // *earlier* than the step it opens if the wall clock steps
+                    // backwards between the two reads.
                     let opened_at = self.now(state);
+                    state.clock_floor = state.clock_floor.max(opened_at);
                     let probe = ToolCall {
                         id: call.id.clone(),
                         name: call.name.clone(),
@@ -631,6 +702,10 @@ impl<L: Llm, J: Journal> Engine<L, J> {
                     let found = self.tools.get(&call.name);
                     let gated = found.is_some_and(|t| t.requires_approval(&probe));
                     let fingerprint = found.map(|t| tool_fingerprint(t.as_ref()));
+                    // Fixed here, with the rest of the step's identity: the
+                    // decision to refuse a blind retry must not depend on
+                    // re-asking the tool after a crash. See `StepStarted`.
+                    let policy = found.map_or(ReplayPolicy::default(), |t| t.replay_policy(&probe));
 
                     let record = StepRecord {
                         step_seq,
@@ -644,6 +719,7 @@ impl<L: Llm, J: Journal> Engine<L, J> {
                         gated,
                         opened_at,
                         tool_fingerprint: fingerprint.clone(),
+                        replay_policy: policy,
                     };
 
                     if gated {
@@ -659,6 +735,7 @@ impl<L: Llm, J: Journal> Engine<L, J> {
                             requested_at: opened_at,
                             expires_at,
                             tool_fingerprint: fingerprint,
+                            replay_policy: policy,
                         };
                         let seq = self
                             .append(run_id, state, EntryKind::ApprovalRequested, &payload)
@@ -741,6 +818,7 @@ impl<L: Llm, J: Journal> Engine<L, J> {
             attempt,
             opened_at: record.opened_at,
             tool_fingerprint: record.tool_fingerprint.clone(),
+            replay_policy: record.replay_policy,
         };
         self.append(run_id, state, EntryKind::StepStarted, &started)
             .await?;
@@ -814,13 +892,24 @@ impl<L: Llm, J: Journal> Engine<L, J> {
         Ok(None)
     }
 
-    /// Refuse to run a step under an implementation other than the one it was
-    /// opened under, and refuse to blind-retry a tool that forbids it.
+    /// The three conditions every dispatch must satisfy, checked in full on
+    /// every attempt — including a re-dispatch after a crash.
     ///
-    /// Replay preserves a step's *name*, but a deployment can change what that
-    /// name does. Executing anyway would run a different action under an
-    /// `effect_id` minted for the old one — and, worse, would execute ungated a
-    /// call the current build says needs a human.
+    /// 1. **Same implementation.** The tool's fingerprint must equal the one
+    ///    recorded when the step opened. Replay preserves a step's *name*, but a
+    ///    deployment can change what that name does, and executing anyway would
+    ///    run a different action under an `effect_id` minted for the old one.
+    /// 2. **The gate still holds**, in both directions. A step may never execute
+    ///    ungated if the tool now requires approval — so
+    ///    [`Tool::requires_approval`] is re-evaluated unconditionally rather
+    ///    than short-circuited for a step that happens to be gated already. And
+    ///    a step opened gated must still hold a recorded [`Decision::Approve`],
+    ///    which does not consult the tool at all: the human's yes is the
+    ///    authority, not the current build's policy.
+    /// 3. **The retry is permitted.** A step opened under
+    ///    [`ReplayPolicy::Halt`] is never blind-retried, and neither is one
+    ///    whose tool *now* says `Halt`. The recorded policy makes the decision
+    ///    durable; the current one may only make it stricter, never looser.
     async fn check_step_still_means_what_it_meant(
         &self,
         run_id: RunId,
@@ -830,6 +919,24 @@ impl<L: Llm, J: Journal> Engine<L, J> {
         dispatched: &ToolCall,
         replay: bool,
     ) -> Result<Option<RunOutcome>> {
+        // Rule 2, first half — and first of all, because it is the one that
+        // asks whether anybody agreed to this happening. A step opened behind a
+        // gate stays behind it for life, whatever the current build's policy
+        // says: the human's yes is the authority. Reaching here without one
+        // means the journal and the state machine disagree, and the safe
+        // reading of that is "do not run the thing nobody agreed to".
+        if record.gated
+            && state.resolved_approvals.get(&record.step_seq) != Some(&Decision::Approve)
+        {
+            return Err(Error::CorruptJournal {
+                run: run_id,
+                message: format!(
+                    "step {} was opened behind an approval gate but no approval is recorded",
+                    record.step_seq
+                ),
+            });
+        }
+
         let current = found.map(|t| tool_fingerprint(t.as_ref()));
         if current != record.tool_fingerprint {
             let describe = |f: &Option<String>| match f {
@@ -850,9 +957,13 @@ impl<L: Llm, J: Journal> Engine<L, J> {
 
         let Some(t) = found else { return Ok(None) };
 
-        // The part that matters most: a build that now gates this call must not
-        // execute it just because an older build opened the step ungated.
-        if !record.gated && t.requires_approval(dispatched) {
+        // Rule 2. Evaluated unconditionally, so the check says what it means
+        // rather than relying on a caller having already covered one side.
+        let needs_approval = t.requires_approval(dispatched);
+        if needs_approval && !record.gated {
+            // The part that matters most: a build that now gates this call must
+            // not execute it just because an older build opened the step
+            // ungated.
             return Err(Error::ToolChanged {
                 run: run_id,
                 step_seq: record.step_seq,
@@ -861,20 +972,26 @@ impl<L: Llm, J: Journal> Engine<L, J> {
                     .to_string(),
             });
         }
-
-        // An interrupted attempt at a tool that declared itself unsafe to
-        // repeat. The engine will not guess; it stops and quotes the effect id
-        // so the host can reconcile against its own records.
-        if replay && t.replay_policy(dispatched) == ReplayPolicy::Halt {
+        // Rule 3. An interrupted attempt at a tool that declared itself unsafe
+        // to repeat. The engine will not guess; it stops and quotes the effect
+        // id so the host can reconcile against its own records.
+        //
+        // The policy that decides this was fixed when the step opened and is on
+        // the journal, so the decision cannot flip if a redeployment — or a
+        // non-deterministic implementation — later answers differently. Asking
+        // the tool again can only add a halt, never remove one.
+        if replay
+            && (record.replay_policy == ReplayPolicy::Halt
+                || t.replay_policy(dispatched) == ReplayPolicy::Halt)
+        {
             let reason = FailureReason::AmbiguousEffect {
                 tool: record.tool.clone(),
                 step_seq: record.step_seq,
                 effect_id: record.effect_id,
             };
-            return self
-                .end(run_id, state, RunStatus::Failed, None, Some(reason))
-                .await
-                .map(Some);
+            // Journaled as a breach first, so the refusal is durable even if the
+            // `run_ended` that follows it does not commit.
+            return self.breach(run_id, state, reason).await.map(Some);
         }
 
         Ok(None)
@@ -1124,6 +1241,9 @@ struct StepRecord {
     opened_at: DateTime<Utc>,
     /// The implementation the step was opened under.
     tool_fingerprint: Option<String>,
+    /// The retry policy the tool declared when the step was opened. Durable, so
+    /// a halt cannot be undone by re-asking the tool.
+    replay_policy: ReplayPolicy,
 }
 
 /// Everything about a run, rebuilt from its journal.
@@ -1201,7 +1321,14 @@ impl RunState {
     /// identity on a side effect, which is the one thing this crate exists to
     /// prevent — so every such claim is checked here, before anything can be
     /// dispatched.
-    fn replay(run_id: RunId, entries: &[Entry]) -> Result<Self> {
+    ///
+    /// The distinction that governs what is worth checking: a field is either
+    /// **compared against something the engine wrote earlier** or merely
+    /// **recomputed from the payload asserting it**. Only the first kind is
+    /// checked at all — a self-consistent forgery satisfies the second — which
+    /// is why a step's tool and arguments are resolved back to the model call
+    /// that requested them rather than taken from the entry that claims them.
+    fn replay(run_id: RunId, entries: &[Entry], config: &EngineConfig) -> Result<Self> {
         let corrupt = |message: String| Error::CorruptJournal {
             run: run_id,
             message,
@@ -1217,7 +1344,23 @@ impl RunState {
             )));
         }
         let started: RunStarted = first.payload_as(run_id)?;
+        // Before anything else is decoded: a journal in a format this build does
+        // not write is refused as such, rather than as whichever payload field
+        // happens to be missing first.
+        if started.journal_format != JOURNAL_FORMAT {
+            return Err(Error::UnsupportedJournalFormat {
+                run: run_id,
+                found: started.journal_format,
+                expected: JOURNAL_FORMAT,
+            });
+        }
         let mut state = Self::fresh(&started.input);
+
+        // One reading of the wall clock for the whole replay, so the bound below
+        // cannot drift between entries.
+        let ceiling = config
+            .max_journal_clock_drift
+            .map(|drift| deadline(Utc::now(), drift));
 
         for (index, entry) in entries.iter().enumerate() {
             // Sequences start at 1 and increase by exactly one: the journal is
@@ -1241,6 +1384,20 @@ impl RunState {
                     entry.seq, entry.kind
                 )));
             }
+            // The clock floor is only as trustworthy as the timestamps it is
+            // built from, and it is permanent: one entry from the future would
+            // displace this run's clock — and every deadline it goes on to
+            // compute — for the rest of its life. Bound it.
+            if let Some(ceiling) = ceiling {
+                if entry.created_at > ceiling {
+                    return Err(corrupt(format!(
+                        "entry {} is stamped {}, too far in the future for this engine to \
+                         accept as a lower bound on the current time",
+                        entry.seq,
+                        entry.created_at.to_rfc3339()
+                    )));
+                }
+            }
             state.last_seq = entry.seq;
             state.clock_floor = state.clock_floor.max(entry.created_at);
 
@@ -1259,6 +1416,27 @@ impl RunState {
                         return Err(corrupt(format!(
                             "entry {} is turn {} but the run is on turn {}",
                             entry.seq, payload.turn, state.turn
+                        )));
+                    }
+                    // A turn with no tool calls **is** the run's answer, so the
+                    // run ends there. Anything after it would reopen a finished
+                    // run — and could dispatch whatever it liked.
+                    if state.final_response.is_some() {
+                        return Err(corrupt(format!(
+                            "entry {} is a model turn after the turn that answered the run",
+                            entry.seq
+                        )));
+                    }
+                    // And a turn is never bought while a call of the previous
+                    // one is unfinished: the engine completes or retries every
+                    // call before asking for another, so a journal that skips
+                    // one is a journal that silently drops a step whose effect
+                    // may already exist.
+                    if let Some(unfinished) = state.first_unfinished_call() {
+                        return Err(corrupt(format!(
+                            "entry {} opens a model turn while call '{unfinished}' of the \
+                             previous turn is unfinished",
+                            entry.seq
                         )));
                     }
                     state.turn = payload.turn;
@@ -1291,10 +1469,27 @@ impl RunState {
                         &payload.args_hash,
                         payload.effect_id,
                     )?;
-                    if !state.seen_call_ids.contains(&payload.call_id) {
+                    state.check_opens_a_real_call(
+                        run_id,
+                        entry.seq,
+                        &payload.call_id,
+                        &payload.tool,
+                        &payload.args,
+                    )?;
+                    if payload.requested_at > entry.created_at {
                         return Err(corrupt(format!(
-                            "entry {} opens a step for call '{}', which no model turn produced",
-                            entry.seq, payload.call_id
+                            "entry {} says its step opened after the entry recording it was \
+                             created",
+                            entry.seq
+                        )));
+                    }
+                    if payload
+                        .expires_at
+                        .is_some_and(|at| at < payload.requested_at)
+                    {
+                        return Err(corrupt(format!(
+                            "entry {} expires its approval before it was requested",
+                            entry.seq
                         )));
                     }
                     if state.steps.contains_key(&payload.call_id) {
@@ -1323,6 +1518,7 @@ impl RunState {
                             gated: true,
                             opened_at: payload.requested_at,
                             tool_fingerprint: payload.tool_fingerprint.clone(),
+                            replay_policy: payload.replay_policy,
                         },
                     );
                     state.pending_approval = Some(payload);
@@ -1360,10 +1556,11 @@ impl RunState {
                         &payload.args_hash,
                         payload.effect_id,
                     )?;
-                    if !state.seen_call_ids.contains(&payload.call_id) {
+                    if payload.opened_at > entry.created_at {
                         return Err(corrupt(format!(
-                            "entry {} starts a step for call '{}', which no model turn produced",
-                            entry.seq, payload.call_id
+                            "entry {} says its step opened after the entry recording it was \
+                             created",
+                            entry.seq
                         )));
                     }
                     match state.steps.get(&payload.call_id).cloned() {
@@ -1411,7 +1608,18 @@ impl RunState {
                                 state.steps_executed += 1;
                             }
                         }
+                        // A step opening for the first time. This is where the
+                        // entry is bound to the model call it answers; a retry
+                        // is bound transitively, by having to agree with the
+                        // record this branch created.
                         None => {
+                            state.check_opens_a_real_call(
+                                run_id,
+                                entry.seq,
+                                &payload.call_id,
+                                &payload.tool,
+                                &payload.args,
+                            )?;
                             if payload.step_seq != entry.seq {
                                 return Err(corrupt(format!(
                                     "entry {} opens a step but claims step_seq {}",
@@ -1438,6 +1646,7 @@ impl RunState {
                                     gated: false,
                                     opened_at: payload.opened_at,
                                     tool_fingerprint: payload.tool_fingerprint.clone(),
+                                    replay_policy: payload.replay_policy,
                                 },
                             );
                             state.steps_executed += 1;
@@ -1561,6 +1770,71 @@ impl RunState {
             .get(&seq)
             .and_then(|call_id| self.steps.get(call_id))
     }
+
+    /// The first call of the current turn that has not completed — never opened,
+    /// opened and unfinished, or parked on a human. `None` when the turn is
+    /// fully settled and the run may legitimately buy another.
+    fn first_unfinished_call(&self) -> Option<&str> {
+        self.calls
+            .iter()
+            .find_map(|call| match self.steps.get(&call.id) {
+                Some(record) if record.done => None,
+                _ => Some(call.id.as_str()),
+            })
+    }
+
+    /// Bind an entry that opens a step to the model call it claims to answer.
+    ///
+    /// **This is the check the rest of the integrity work rests on.** Everything
+    /// else about an opening entry — its `effect_id`, its `args_hash` — is
+    /// derived from the entry's own payload and is therefore satisfied by any
+    /// self-consistent forgery. Only the tool name and the arguments can be
+    /// compared against something the engine wrote earlier, and if they are not,
+    /// a journal can keep a real model call's id while substituting a different
+    /// action, and replay will dispatch the substitution.
+    ///
+    /// The call must belong to the **current** turn, not merely to some turn:
+    /// the engine only ever opens steps for the calls of the turn it is working
+    /// through, so an id borrowed from an earlier one is as foreign as an
+    /// invented one.
+    fn check_opens_a_real_call(
+        &self,
+        run_id: RunId,
+        seq: Seq,
+        call_id: &str,
+        tool: &str,
+        args: &Value,
+    ) -> Result<()> {
+        let corrupt = |message: String| Error::CorruptJournal {
+            run: run_id,
+            message,
+        };
+        let Some(call) = self.calls.iter().find(|c| c.id == call_id) else {
+            return Err(if self.seen_call_ids.contains(call_id) {
+                corrupt(format!(
+                    "entry {seq} opens a step for call '{call_id}', which belongs to an \
+                     earlier turn"
+                ))
+            } else {
+                corrupt(format!(
+                    "entry {seq} opens a step for call '{call_id}', which no model turn produced"
+                ))
+            });
+        };
+        if call.name != tool {
+            return Err(corrupt(format!(
+                "entry {seq} opens call '{call_id}' as tool '{tool}', but the model asked for \
+                 '{}'",
+                call.name
+            )));
+        }
+        if &call.arguments != args {
+            return Err(corrupt(format!(
+                "entry {seq} opens call '{call_id}' with arguments the model did not ask for"
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl StepRecord {
@@ -1597,6 +1871,9 @@ impl StepRecord {
         }
         if self.tool_fingerprint != payload.tool_fingerprint {
             return Some("tool fingerprint differs".to_string());
+        }
+        if self.replay_policy != payload.replay_policy {
+            return Some("replay policy differs".to_string());
         }
         None
     }

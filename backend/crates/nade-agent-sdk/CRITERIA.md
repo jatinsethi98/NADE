@@ -24,13 +24,21 @@ What the crate does provide:
    input;
 4. replay *finishes what is recorded* — it never re-asks the model for an answer
    it already has, never re-decides a decision a human already made, and never
-   loses one.
+   loses one;
+5. what it dispatches is what the model asked for: a step's tool and arguments
+   are resolved back to the call in the current `model_response`, so a journal
+   cannot keep a real call's id while substituting a different action;
+6. decisions the engine makes at replay time are on the journal, not re-derived
+   by asking a tool again — a recorded `ReplayPolicy::Halt` cannot be undone by
+   a redeployment that answers `Retry`;
+7. **a run whose journal replays can always be driven to a terminal state**, by
+   `run`, `resume` or `cancel`.
 
 Exactly-once **effects** are therefore achievable, by the consumer: upsert on
 `effect_id`, and supply a journal whose `append` is really durable. Neither
 condition is checkable from inside this crate, and both are load-bearing.
 
-Two claims this crate specifically does **not** make:
+Three claims this crate specifically does **not** make:
 
 * **Approval is not idempotency.** `requires_approval` decides *whether*
   something may happen, once, before it happens. An approved step is fenced and
@@ -42,6 +50,26 @@ Two claims this crate specifically does **not** make:
   starts no transaction. `MemoryJournal` is a test double. An `append` that
   returns before the write is durable does not weaken the guarantee — it removes
   it.
+* **Point 7 is conditional on the journal replaying.** A journal refused as
+  `CorruptJournal` or `UnsupportedJournalFormat` cannot be cancelled either: the
+  engine does not know which sequence to append at. That is a storage problem
+  and the host owns it. The earlier draft of this file said "the run is never
+  stranded" without the condition, and — until `Engine::cancel` existed — without
+  it even being true: a tool fingerprint that changed *after* an approval
+  committed left `run` answering `ToolChanged` and `resume` answering
+  `AlreadyResolved`, forever.
+
+### What replay trusts
+
+Replay takes the journal's **facts** as given — what the model said, what a
+human decided, what a tool returned — because those *are* the run's history; a
+host that cannot trust its own journal's contents has a problem this crate
+cannot detect from the inside. It does not take its **claims** as given, and the
+line is whether a field can be compared against something the engine wrote
+earlier or is merely recomputed from the payload asserting it. A recomputed
+field is not a check at all: any self-consistent forgery satisfies it. That
+distinction is what E63–E66 are about, and it is the question to ask of any
+field added later.
 
 ---
 
@@ -79,7 +107,7 @@ email. No `nade-server` dependency, ever.
 | A7 | Dependency list is small and boring | manual: no HTTP, no DB, no provider SDK, no async runtime in `[dependencies]` |
 | A8 | Engine is `Send + Sync + 'static` and works behind `Arc` | `engine_is_send_sync_and_static` compile-time assertion test |
 | A9 | Public contract documented | crate-level rustdoc + `README.md`; README example compiles as a doctest |
-| A10 | The documented guarantee is exactly what the code delivers — no more | §0 of this file, the crate docs, and `README.md` all say "at-least-once, conditional"; every condition names the test that pins it |
+| A10 | The documented guarantee is exactly what the code delivers — no more | §0 of this file, the crate docs, and `README.md` all say "at-least-once, conditional"; every condition names the test that pins it. Two reviews have now found documentation claiming more than the code delivered (`requires_approval` re-checked on every dispatch; "the run is never stranded"), so treat overclaiming as its own defect class: each claim below either names a test or names its condition |
 
 ### State machine (must match `PLAN.md` §Agent runtime exactly)
 
@@ -89,10 +117,14 @@ running → pending_approval --approve--> queued → running
                            --skip----->  skipped
                            --expire--->  expired
 running → waiting(wake_at) --timer----> running
+any non-terminal state     --cancel---> failed { cancelled }
 ```
 
 `queued` is the host's state before it calls `Engine::run`; the SDK models the
-rest. Every transition has a test.
+rest. Every transition has a test. `cancel` is `Engine::cancel`, added by the
+second review (§0, point 7); it reaches the existing `failed` tag with
+`FailureReason::Cancelled` rather than adding a status the NADE schema's check
+constraint does not have.
 
 ### Journal-before-effect protocol (must match `PLAN.md` §Exactly-once)
 
@@ -111,25 +143,57 @@ Skip/Expire reaches `skipped`/`expired`; a committed `cap_breached` fails the
 run without journalling a second breach. An absent `run_ended` means "finish
 what is recorded", not "start again".
 
-Replay validates before it interprets. Sequences must start at 1 and increase by
-exactly one; the first entry must be the only `run_started`; nothing may follow
-`run_ended`; every `step_seq` must name a step really opened at that sequence;
-every `effect_id` must equal `effect_id(run, step_seq)` and every `args_hash`
-must equal `args_hash(args)`; a repeated `step_started` must agree with the
-original in every field but `attempt`; an approval is resolved at most once.
+Replay validates before it interprets:
+
+* the run's `JOURNAL_FORMAT` is one this build writes — checked first, before
+  any other payload is decoded, so an incompatible journal is
+  `UnsupportedJournalFormat` and not a serde failure at whichever field happens
+  to disagree;
+* sequences start at 1 and increase by exactly one; the first entry is the only
+  `run_started`; nothing follows `run_ended`;
+* **the tool and arguments of an opening entry are the ones the model actually
+  asked for**, resolved back to the call in the *current* `model_response` —
+  not merely to a call id seen at some point in the run;
+* the turn order holds: no `model_response` abandons a step that started and did
+  not finish, and nothing follows the turn that answered the run;
+* every `step_seq` names a step really opened at that sequence; every
+  `effect_id` equals `effect_id(run, step_seq)` and every `args_hash` equals
+  `args_hash(args)`; a repeated `step_started` agrees with the original in every
+  field but `attempt`; an approval is resolved at most once;
+* no entry claims a `created_at` further ahead of the local clock than
+  `max_journal_clock_drift`, no step claims to have opened after the entry
+  recording it, and no approval expires before it was requested.
+
 Anything else is `CorruptJournal`, refused before a step can reach dispatch
-under an arbitrary or colliding effect id.
+under an arbitrary or colliding effect id — or under a tool the model never
+named.
+
+Every dispatch, including a re-dispatch after a crash, additionally checks: the
+tool's fingerprint still matches the one the step was opened under; a step
+opened gated still holds a recorded `Approve`, and a step opened ungated is not
+one the current build would gate; and the step's recorded `ReplayPolicy` (which
+the current build may make stricter, never looser) permits the retry.
 
 ---
 
 ## 3. Edge-case checklist
 
-**Status: all 62 pass.** Every row is a test; there are no `// EDGE:`-only
-cases, though the code also carries `// EDGE:` comments at each handling site.
+**Status: all 76 pass** (103 tests in `cargo test`, of which the extra ones are
+controls and unit tests for the helpers). Every row is a test; there are no
+`// EDGE:`-only cases, though the code also carries `// EDGE:` comments at each
+handling site.
 
 E47–E62 came from an adversarial review of the first green build. Ten of them
 were real protocol defects, three critical; the review is why §0 of this file
 now says "at-least-once" where it used to say "exactly-once".
+
+E63–E76 came from a second review of the fixes. One was critical and new — a
+journal could keep a real model call's id while substituting the tool and the
+arguments, and everything else replay checked was recomputed from the forgery,
+so it passed. The rest are the same question asked of the remaining fields, plus
+three gaps the fixes themselves opened: a decision taken at replay time that was
+recorded nowhere, a permanent refusal with no way out, and a format change that
+made older journals unreadable by accident rather than by policy.
 
 | # | Edge case | Expected behaviour | Covered by |
 |---|---|---|---|
@@ -195,6 +259,20 @@ now says "at-least-once" where it used to say "exactly-once".
 | E60 | Clock moving backwards under an expiry check | `now` is floored by the newest journal entry, so a stale approval cannot be revived | `expiry_is_floored_by_the_newest_journal_entry` |
 | E61 | Malformed journal (14 shapes: gaps, wrong first entry, foreign/colliding `effect_id`, mismatched `args_hash`, `step_seq` ≠ opening seq, disagreeing retry, orphan/duplicate `step_done`, post-terminal entry, unpaired wake, turn skew, phantom call, unknown kind) | `CorruptJournal` before anything dispatches | `src/tests/integrity.rs`, 15 tests plus a healthy control |
 | E62 | Test double modelling non-idempotency as normal | `CountingTool` now returns byte-identical results across attempts; the anti-pattern lives in `DriftingTool`, which exists to be caught | `every_attempt_at_a_step_sees_identical_input` |
+| E63 | **A journal reusing a real call id under a different tool** | refused: an opening entry's tool must be the one the model asked for. `effect_id` and `args_hash` are recomputed from the payload, so they do not catch it | `a_forged_step_cannot_substitute_the_tool_the_model_asked_for` |
+| E64 | **The same, substituting only the arguments** | refused: the arguments must be the ones the model asked for | `a_forged_step_cannot_substitute_the_arguments_the_model_asked_for` |
+| E65 | The same on the approval path, so a human is shown an action no model turn requested | refused before the approval card can be built | `a_forged_approval_cannot_substitute_the_tool_the_model_asked_for` |
+| E66 | A `model_response` that abandons a step which started and never finished | refused — replay used to accept it and silently drop a step whose effect may exist | `a_model_turn_that_abandons_an_unfinished_step_is_refused` |
+| E67 | A `model_response` after the turn that answered the run | refused; the answer ends the run | `a_model_turn_after_the_run_answered_is_refused` |
+| E68 | An opening entry naming no model call at all | refused (pin: this already held) | `an_opening_entry_with_no_model_turn_at_all_is_refused`, control: `a_faithful_journal_still_replays_and_runs_the_step` |
+| E69 | `requires_approval` on a re-dispatch of a step that was **already** gated | consulted, not short-circuited; the docs claimed this and the code did not | `requires_approval_is_re_evaluated_before_every_dispatch` |
+| E70 | A recorded `ReplayPolicy::Halt`, under a build that now answers `Retry` | the halt holds: the policy is journaled when the step opens | `a_recorded_halt_survives_a_tool_that_later_permits_a_retry` |
+| E71 | A step opened under `Retry`, under a build that now answers `Halt` | still refused — the current policy may only make the decision stricter | `a_tool_that_now_forbids_a_blind_retry_is_not_retried` |
+| E72 | **Tool fingerprint changes after the approval committed** | `run` and every `resume` are dead ends by design, and `Engine::cancel` ends the run without executing anything | `a_run_whose_tool_changed_after_approval_can_still_be_ended` |
+| E73 | `cancel` as a general kill switch, and on a run that never started | ends a paused run without executing; idempotent; refuses an unknown run | `cancelling_a_paused_run_executes_nothing_and_sticks`, `cancelling_a_run_that_never_started_is_refused` |
+| E74 | One entry stamped far in the future | refused, rather than displacing the run's clock floor for good; ordinary skew still accepted | `an_entry_stamped_far_in_the_future_is_refused`, `an_entry_a_little_ahead_of_the_local_clock_is_accepted` |
+| E75 | A step claiming to have opened after the entry recording it, or an approval expiring before it was requested | refused | `a_step_opened_after_the_entry_that_records_it_is_refused`, `an_approval_that_expired_before_it_was_requested_is_refused` |
+| E76 | A journal in an older or newer `JOURNAL_FORMAT` | `Error::UnsupportedJournalFormat`, checked before any other payload is decoded — not a serde failure reported as a corrupt journal | `a_journal_from_an_older_format_is_refused_with_a_typed_error`, `a_journal_from_a_newer_format_is_refused_with_a_typed_error` |
 
 E43 and E44 were found by the self-review pass, not the first draft: E43 was a
 real panic (`DateTime + TimeDelta` panics on overflow, so a config value could
@@ -268,15 +346,22 @@ is the anti-pattern, kept deliberately so a test can show what it costs.
 8. `EntryKind` keeps an `Other(String)` variant so a journal written by a newer
    version can be *read*, but replay refuses to interpret one — better a loud
    `CorruptJournal` than a silent misreading of a step's state.
-9. **Reversed by the review.** A step's gate decision is journaled when the step
-   opens, but `Tool::requires_approval` **is** re-consulted before every
-   dispatch, including a re-execution. The original reasoning ("the fence has
-   committed, so pausing is theatre") only covers the case where the answer is
-   unchanged. It misses the one that matters: a redeployment where the tool now
-   requires approval, under which the old ungated step would execute a call the
-   current build says needs a human. The engine refuses that with
-   `Error::ToolChanged` rather than executing or silently re-gating, because it
-   cannot mint a new `effect_id` for a step whose fence has already committed.
+9. **Reversed by the first review, completed by the second.** A step's gate
+   decision is journaled when the step opens, but `Tool::requires_approval` **is**
+   re-consulted before every dispatch, including a re-execution. The original
+   reasoning ("the fence has committed, so pausing is theatre") only covers the
+   case where the answer is unchanged. It misses the one that matters: a
+   redeployment where the tool now requires approval, under which the old
+   ungated step would execute a call the current build says needs a human. The
+   engine refuses that with `Error::ToolChanged` rather than executing or
+   silently re-gating, because it cannot mint a new `effect_id` for a step whose
+   fence has already committed.
+   The first fix wrote the check as `if !record.gated && t.requires_approval(..)`,
+   which short-circuits for a step that was *already* gated — so the claim above
+   was true only by accident, and only in one direction. It is now unconditional
+   and both halves are stated: a step never executes ungated if the tool now
+   requires approval, **and** a step opened gated must still hold a recorded
+   `Approve`, which does not consult the tool at all.
 10. A resolution carries the `step_seq` it settles. `Resolution` is therefore a
    struct-variant enum rather than a plain tag. Without the binding, a delayed
    duplicate of an old decision and a fresh decision about a *new* pending step
@@ -291,4 +376,34 @@ is the anti-pattern, kept deliberately so a test can show what it costs.
    for readers. One committed entry cannot lose half of itself; two can.
 13. `ReplayPolicy::Halt` ends the run `Failed` rather than raising a bare `Err`.
    A failed run is terminal, carries the `effect_id` to the host, and cannot
-   strand the run — a repeated `Err` would.
+   strand the run — a repeated `Err` would. It is journaled as `cap_breached`
+   before `run_ended`, so a lost terminal append still leaves the refusal on
+   record.
+14. **The journal format is versioned and not migrated.** `run_started` carries
+   `journal_format`; a mismatch is `UnsupportedJournalFormat`. The alternative —
+   serde defaults for the fields older writers never recorded — means inventing
+   a step's open time and the replay policy a decision was taken under, which
+   are exactly the facts the protocol exists to pin down. A hard break that says
+   so is better than a soft one that guesses. The crate is unpublished, so this
+   costs nothing today; the point is that the policy is now deliberate.
+15. **`Engine::cancel` exists, and "re-approve under the new implementation"
+   does not.** Every refusal in this crate is permanent by design, which needs
+   an escape hatch; cancelling is the host saying "then it does not happen", and
+   recording that. Rebinding a step to a new implementation would run a
+   different action under an `effect_id` a human authorised for something else,
+   so the answer is: cancel, and start a run the human can approve on its own
+   terms.
+16. **A cancelled run is `Failed { Cancelled }`, not a new `RunStatus`.** The
+   status tags match the `agent_runs.status` check constraint in the NADE
+   schema; adding one would be a migration this lane does not own, and the
+   distinction a host actually needs is in `FailureReason`.
+17. **The clock floor is bounded in both directions.** It exists so a backwards
+   clock cannot revive an expired approval, and it is built out of journal
+   timestamps — so an entry from the future displaces the run's clock
+   permanently. `max_journal_clock_drift` bounds it from above. A faithful
+   engine cannot produce such an entry, but the crate cannot assume a faithful
+   journal implementation, which is the same reasoning as everywhere else here.
+18. **A step's replay policy is journaled, and re-asking the tool may only make
+   the decision stricter.** "This must not run twice" is a fact about an effect
+   that may already exist; a later build answering `Retry` has not learned
+   anything that unmakes it.

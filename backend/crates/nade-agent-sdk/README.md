@@ -57,6 +57,49 @@ effect landed before the process died, so the engine assumes the worst and runs
 the step again. The same file is therefore the recovery log *and* the run log a
 user reads in the UI — one append-only table, two jobs.
 
+## What replay checks, and what it takes on trust
+
+Replay takes the journal's **facts** as given — what the model said, what a
+human decided, what a tool returned — because those *are* the run's history. It
+does not take its **claims** as given, and the line between the two is whether a
+field can be compared against something the engine wrote earlier or is merely
+recomputed from the payload asserting it. A recomputed field is not a check:
+any self-consistent forgery satisfies it.
+
+So a step's tool and arguments are resolved back to the call in the current
+`model_response` — not merely to a call id seen somewhere in the run — and a
+step whose action is not the one the model asked for is refused before anything
+is dispatched. Alongside that: sequences are gapless and start at 1; every
+`effect_id` and `args_hash` matches what its step derives; a retry agrees with
+the entry that opened its step; no turn abandons a step that started and did not
+finish, and nothing follows the turn that answered the run; and no entry may
+claim a timestamp implausibly far ahead of the clock, because the floor that
+protects approval expiry from a clock jumping *backwards* is built out of those
+timestamps.
+
+A journal in a format this crate does not write is refused as such
+(`Error::UnsupportedJournalFormat`) rather than failing to deserialise. There is
+no migration: entry payloads gain required fields as the protocol tightens, and
+inventing values for the ones an older writer never recorded would mean guessing
+at exactly the facts the protocol exists to pin down.
+
+## No run is stranded
+
+Those refusals are permanent by design — a changed tool fingerprint does not
+heal, and a decision already on record cannot be retaken. That would leave a run
+with nothing able to move it, so there is one more entry point: `Engine::cancel`
+ends a run with `FailureReason::Cancelled`, executing nothing, idempotently.
+
+**A run whose journal replays can always be driven to a terminal state** — by
+`run`, `resume`, or `cancel`. A journal that does not replay is a storage
+problem, and it is yours.
+
+There is deliberately no "re-approve under the new implementation". A step's
+`effect_id` was minted for the action the human was shown; rebinding it would
+run something else under an identity somebody authorised for something else,
+which is the failure the rest of this crate exists to prevent. Cancel, and start
+a run the human can approve on its own terms.
+
 ## What that costs you
 
 Re-execution is only safe because every attempt at a step gets the same id:
@@ -103,6 +146,11 @@ with `FailureReason::AmbiguousEffect`, quoting the `effect_id` so a human can
 reconcile. Damage control, not a fix — it turns a silent double-send into a loud
 stop.
 
+The policy is recorded on the entry that opens the step, so the refusal is as
+durable as the step. A redeployment that answers `Retry` cannot undo a halt
+already on record; one that answers `Halt` where the step was opened `Retry`
+still stops it. Stricter, never looser.
+
 ## Approval
 
 When `requires_approval` returns `true`, the engine appends
@@ -121,12 +169,19 @@ step is `Error::StepMismatch`; one that names a step already decided is
 as success: an earlier delivery already won. If the run still needs driving,
 call `run`, which resumes from any recorded decision.
 
+A step opened behind the gate stays behind it for life: it never executes
+without a recorded approval, whatever a later build's policy says. And a step
+opened *without* a gate is never executed by a build that now requires one —
+`requires_approval` is re-evaluated before every dispatch, including a
+re-dispatch after a crash, and a disagreement is `Error::ToolChanged`.
+
 ```text
 queued → running → done | failed
 running → pending_approval --approve--> queued → running
                            --skip----->  skipped
                            --expire--->  expired
 running → waiting(wake_at) --timer---->  running
+any non-terminal state     --cancel--->  failed { cancelled }
 ```
 
 ## Caps

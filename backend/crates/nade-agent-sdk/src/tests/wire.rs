@@ -16,6 +16,7 @@ use crate::message::{
 use crate::run::{
     ApprovalRequest, Decision, FailureReason, Resolution, RunInput, RunOutcome, RunStats, RunStatus,
 };
+use crate::tool::ReplayPolicy;
 
 fn round_trip<T>(value: &T) -> T
 where
@@ -105,9 +106,9 @@ fn journal_payloads_round_trip() {
     let run = RunId::from_uuid(Uuid::nil());
     let now = Utc::now();
 
-    round_trip(&RunStarted {
-        input: RunInput::user("hi").with_system("be brief"),
-    });
+    round_trip(&RunStarted::new(
+        RunInput::user("hi").with_system("be brief"),
+    ));
     round_trip(&ModelResponse {
         turn: 1,
         text: None,
@@ -125,6 +126,7 @@ fn journal_payloads_round_trip() {
         attempt: 2,
         opened_at: now,
         tool_fingerprint: Some("sha256:aa".to_string()),
+        replay_policy: ReplayPolicy::Halt,
     });
     round_trip(&StepDone {
         step_seq: 3,
@@ -145,6 +147,7 @@ fn journal_payloads_round_trip() {
         requested_at: now,
         expires_at: Some(now + ChronoDuration::days(7)),
         tool_fingerprint: Some("sha256:aa".to_string()),
+        replay_policy: ReplayPolicy::Retry,
     });
     round_trip(&ApprovalResolved {
         step_seq: 3,

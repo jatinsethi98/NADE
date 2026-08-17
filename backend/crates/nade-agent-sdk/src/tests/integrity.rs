@@ -19,18 +19,23 @@ use crate::journal::{
 use crate::message::{ChatResponse, StopReason, ToolCall};
 use crate::run::{RunInput, RunStatus};
 use crate::testing::{CountingTool, MemoryJournal};
-use crate::tool::{tool_fingerprint, Tool};
+use crate::tool::{tool_fingerprint, ReplayPolicy, Tool};
 use crate::Error;
 
 fn note_tool() -> Arc<CountingTool> {
     Arc::new(CountingTool::new("note"))
 }
 
+/// A fixed instant so every entry in a hand-built journal is ordered and the
+/// clock plays no part in what these tests measure. It is in the *past*: an
+/// entry may not claim to have been created ahead of the local clock, and a step
+/// may not claim to have opened after the entry recording it.
+fn when() -> DateTime<Utc> {
+    DateTime::from_timestamp(1_700_000_000, 0).expect("a valid instant")
+}
+
 fn at<P: serde::Serialize>(seq: u32, kind: EntryKind, payload: &P) -> Entry {
-    // A fixed instant so every entry in a hand-built journal is ordered and the
-    // clock plays no part in what these tests measure.
-    let when: DateTime<Utc> = DateTime::from_timestamp(1_700_000_000, 0).expect("a valid instant");
-    Entry::at(seq, kind, payload, when).expect("entry builds")
+    Entry::at(seq, kind, payload, when()).expect("entry builds")
 }
 
 /// The journal of a run that called `note` once and then answered. Valid.
@@ -41,9 +46,7 @@ fn healthy(run: RunId) -> Vec<Entry> {
         at(
             1,
             EntryKind::RunStarted,
-            &RunStarted {
-                input: RunInput::user("take a note"),
-            },
+            &RunStarted::new(RunInput::user("take a note")),
         ),
         at(
             2,
@@ -67,8 +70,9 @@ fn healthy(run: RunId) -> Vec<Entry> {
                 args_hash: args_hash(&args),
                 effect_id: effect_id(run, 3),
                 attempt: 1,
-                opened_at: Utc::now(),
+                opened_at: when(),
                 tool_fingerprint: fingerprint,
+                replay_policy: ReplayPolicy::Retry,
             },
         ),
         at(
@@ -161,9 +165,7 @@ async fn a_journal_that_does_not_start_at_one_is_refused() {
     entries[0] = at(
         2,
         EntryKind::RunStarted,
-        &RunStarted {
-            input: RunInput::user("take a note"),
-        },
+        &RunStarted::new(RunInput::user("take a note")),
     );
     entries.truncate(1);
     rejects("no seq 1", run, entries, "expected 1").await;
@@ -194,9 +196,7 @@ async fn a_second_run_started_is_refused() {
     entries[1] = at(
         2,
         EntryKind::RunStarted,
-        &RunStarted {
-            input: RunInput::user("again"),
-        },
+        &RunStarted::new(RunInput::user("again")),
     );
     rejects("two starts", run, entries, "second 'run_started'").await;
 }
