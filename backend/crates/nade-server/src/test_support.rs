@@ -147,6 +147,7 @@ pub fn test_config(env: Env) -> Config {
             rate_limit: 100,
             rate_window: Duration::from_secs(60),
         },
+        gmail: crate::config::tests::sample_gmail(),
         jobs: QueueConfig::default(),
         workers: 0,
         embedded: embedded_config(),
@@ -180,6 +181,22 @@ impl TestApp {
         self.router = api::router(self.state.clone());
     }
 
+    /// A bearer token that reaches the protected routes. `NADE_TOKEN` is inert
+    /// outside dev, so this pairs a device the way a real client would.
+    pub async fn device_token(&self) -> String {
+        let code = self.state.pairing.mint().await.unwrap();
+        let response = post_json(
+            self,
+            "/v1/auth/pair",
+            &serde_json::json!({ "code": code.code, "device_name": "test-device" }),
+        )
+        .await;
+        response_json(response).await["token"]
+            .as_str()
+            .expect("pairing must return a token")
+            .to_owned()
+    }
+
     pub fn set_dev_token(&mut self, token: Option<String>) {
         self.config.dev_token = token;
         self.rebuild();
@@ -194,6 +211,31 @@ impl TestApp {
         self.config.pairing.rate_limit = max;
         self.config.pairing.rate_window = window;
         self.rebuild();
+    }
+
+    /// Point the whole Gmail stack - REST and OAuth - at a local mock.
+    pub fn set_gmail_base(&mut self, base: &str) {
+        self.config.gmail.endpoints = crate::gmail::client::Endpoints::at(base);
+        self.config.gmail.auth_url = Some(format!("{base}/auth"));
+        self.config.gmail.token_url = Some(format!("{base}/token"));
+        self.rebuild();
+    }
+
+    /// Give the state a usable OAuth client without a `secrets/` file.
+    pub fn set_gmail_client_file(&mut self, path: std::path::PathBuf) {
+        self.config.gmail.client_file = path;
+        self.rebuild();
+    }
+
+    /// The cipher the test config's fixed key produces, for seeding
+    /// `gmail_tokens` rows the real `TokenStore` can read back.
+    #[must_use]
+    pub fn gmail_cipher(&self) -> crate::gmail::crypto::Cipher {
+        crate::gmail::crypto::Cipher::resolve(
+            self.config.gmail.token_key.as_deref(),
+            &self.config.gmail.token_key_file,
+        )
+        .expect("the test config pins a fixed token key")
     }
 
     pub async fn raw_post(&self, path: &str, body: &str, content_type: &str) -> Response<Body> {
@@ -310,6 +352,11 @@ mod tests {
     /// PLAN.md P1 [backend] bullet 2: the shared fixtures must be present and
     /// parseable. Both lanes decode these files, so a stray comma here is a
     /// cross-lane outage.
+    ///
+    /// `docs/contract/` is generated and keeps gaining files, so this asserts
+    /// *structure* - every `.json` parses, every endpoint named in `API.md` §11
+    /// has a fixture, every `.sse` looks like an SSE stream - rather than a file
+    /// count that goes stale on the next regeneration.
     #[test]
     fn every_contract_fixture_is_present_and_valid() {
         let dir = contract_dir();
@@ -360,6 +407,49 @@ mod tests {
         ] {
             assert!(json.iter().any(|n| n == required), "{required} is missing");
         }
-        assert_eq!(sse.len(), 3, "expected the three /ask SSE fixtures");
+
+        // API.md §11 names four `/ask` streams: answer, results, agent_draft and
+        // error. Assert the shape of each rather than only the count, so a
+        // renamed or truncated stream is caught too.
+        let mut stream_names: Vec<String> = sse
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        stream_names.sort();
+        for required in [
+            "ask_agent_draft.sse",
+            "ask_answer.sse",
+            "ask_error.sse",
+            "ask_results.sse",
+        ] {
+            assert!(
+                stream_names.iter().any(|name| name == required),
+                "{required} is missing; found {stream_names:?}"
+            );
+        }
+
+        for path in &sse {
+            let text = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+            let name = path.file_name().unwrap().to_string_lossy();
+            assert!(
+                text.starts_with("event: route"),
+                "{name}: the first event is always `route` (API.md §4)"
+            );
+            for line in text.lines().filter(|line| line.starts_with("data: ")) {
+                let payload = line.trim_start_matches("data: ");
+                serde_json::from_str::<Value>(payload).unwrap_or_else(|error| {
+                    panic!("{name}: `{payload}` is not valid JSON: {error}")
+                });
+            }
+            let terminals = text
+                .lines()
+                .filter(|line| line.starts_with("event: done") || line.starts_with("event: error"));
+            assert_eq!(
+                terminals.count(),
+                1,
+                "{name}: exactly one terminal event, `done` OR `error`, never both"
+            );
+        }
     }
 }

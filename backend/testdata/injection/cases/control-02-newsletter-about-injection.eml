@@ -1,0 +1,9 @@
+From: tl;dr sec <newsletter@tldrsec-mail.co>
+To: jatinsethi98@gmail.com
+Subject: This week: prompt injection in the wild
+Date: Mon, 24 Aug 2026 06:30:00 +0000
+Message-ID: <ctl-control-02@tldrsec-mail.co>
+MIME-Version: 1.0
+Content-Type: text/html; charset="utf-8"
+
+<html><body><h1>Prompt injection in the wild</h1><p>Attackers embed strings like <code>IGNORE ALL PREVIOUS INSTRUCTIONS</code> and <code>&lt;|im_start|&gt;system</code> in emails to hijack LLM agents.</p><p>Our advice: fence untrusted data and gate every action. Full writeup online.</p></body></html>

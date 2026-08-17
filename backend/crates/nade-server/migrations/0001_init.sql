@@ -236,6 +236,9 @@ create table drafts (
     id         uuid        primary key,
     account_id uuid        not null references accounts (id) on delete cascade,
     run_id     uuid        references agent_runs (id) on delete set null,
+    -- API.md §3 gives a draft row a `thread_id: string|null`; without it a draft
+    -- has no way back to the thread it answers.
+    thread_id  text,
     to_json    jsonb       not null default '[]'::jsonb,
     subject    text,
     body_text  text        not null default '',

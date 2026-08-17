@@ -165,7 +165,10 @@ fn parse_status(line: &str) -> Option<u16> {
     fields.next()?.parse().ok()
 }
 
-fn split_headers(input: &[u8]) -> Option<(Vec<(String, String)>, &[u8])> {
+/// Lower-cased header names paired with their values.
+type Headers = Vec<(String, String)>;
+
+fn split_headers(input: &[u8]) -> Option<(Headers, &[u8])> {
     let end = find(input, b"\r\n\r\n")
         .map(|at| (at, at + 4))
         .or_else(|| find(input, b"\n\n").map(|at| (at, at + 2)))?;
@@ -187,7 +190,11 @@ fn header_value(headers: &[(String, String)], name: &str) -> Option<String> {
 
 fn split_line(input: &[u8]) -> Option<(&[u8], &[u8])> {
     let at = find(input, b"\n")?;
-    let line_end = if at > 0 && input[at - 1] == b'\r' { at - 1 } else { at };
+    let line_end = if at > 0 && input[at - 1] == b'\r' {
+        at - 1
+    } else {
+        at
+    };
     Some((&input[..line_end], &input[at + 1..]))
 }
 
@@ -312,7 +319,8 @@ mod tests {
         let shuffled = [3usize, 0, 4, 2, 1];
         let body = response_body(boundary, &shuffled, &[]);
 
-        let parsed = parse_response(&format!("multipart/mixed; boundary={boundary}"), &body).unwrap();
+        let parsed =
+            parse_response(&format!("multipart/mixed; boundary={boundary}"), &body).unwrap();
         assert_eq!(parsed.len(), 5);
 
         let indexed = index_by_content_id(parsed);
@@ -321,7 +329,8 @@ mod tests {
             assert_eq!(response.status, 200);
             let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
             assert_eq!(
-                value["id"], format!("msg{index}"),
+                value["id"],
+                format!("msg{index}"),
                 "item-{index} was matched to the wrong response"
             );
         }
@@ -382,9 +391,11 @@ mod tests {
             "--{boundary}\r\nContent-Type: application/http\r\nContent-ID: <response-item-0>\r\n\r\n\
              HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{payload}\r\n--{boundary}--\r\n"
         );
-        let parsed =
-            parse_response(&format!("multipart/mixed; boundary={boundary}"), body.as_bytes())
-                .unwrap();
+        let parsed = parse_response(
+            &format!("multipart/mixed; boundary={boundary}"),
+            body.as_bytes(),
+        )
+        .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&parsed[0].body).unwrap();
         assert_eq!(
             value["snippet"],
@@ -426,7 +437,8 @@ mod tests {
     fn duplicate_content_ids_collapse_to_one() {
         let boundary = "b4";
         let body = response_body(boundary, &[0, 0, 1], &[]);
-        let parsed = parse_response(&format!("multipart/mixed; boundary={boundary}"), &body).unwrap();
+        let parsed =
+            parse_response(&format!("multipart/mixed; boundary={boundary}"), &body).unwrap();
         assert_eq!(parsed.len(), 3);
         let indexed = index_by_content_id(parsed);
         assert_eq!(indexed.len(), 2);

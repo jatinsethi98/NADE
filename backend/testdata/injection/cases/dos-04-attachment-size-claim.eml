@@ -1,0 +1,20 @@
+From: File Transfer <no-reply@file-transfer-mail.co>
+To: jatinsethi98@gmail.com
+Subject: Large file attached
+Date: Sun, 23 Aug 2026 07:30:00 +0000
+Message-ID: <inj-dos-04@file-transfer-mail.co>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="BOUND-DOS04"
+
+--BOUND-DOS04
+Content-Type: text/plain; charset="utf-8"
+
+Please see the attached archive.
+
+--BOUND-DOS04
+Content-Type: application/zip; name="archive.zip"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="archive.zip"
+
+UEsDBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+--BOUND-DOS04--

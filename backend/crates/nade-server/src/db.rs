@@ -413,11 +413,13 @@ mod tests {
         let insert = |name: &'static str| {
             let pool = db.pool.clone();
             async move {
-                sqlx::query("insert into attachments (message_id, att_id, name) values ($1, 'A', $2)")
-                    .bind(message)
-                    .bind(name)
-                    .execute(&pool)
-                    .await
+                sqlx::query(
+                    "insert into attachments (message_id, att_id, name) values ($1, 'A', $2)",
+                )
+                .bind(message)
+                .bind(name)
+                .execute(&pool)
+                .await
             }
         };
         insert("first").await.unwrap();

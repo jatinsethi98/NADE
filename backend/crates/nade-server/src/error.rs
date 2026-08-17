@@ -21,7 +21,14 @@ pub enum ErrorCode {
     BadRequest,
     Unauthorized,
     NotFound,
+    /// The attachment proxy's 25 MB cap.
+    PayloadTooLarge,
     RateLimited,
+    /// Gmail credentials are dead; the user must re-consent (`API.md` §0).
+    NeedsReauth,
+    /// Gmail failed after retries. Never a 500: the fault is upstream, and the
+    /// client's correct response (retry later) is different.
+    UpstreamUnavailable,
     Internal,
 }
 
@@ -32,7 +39,10 @@ impl ErrorCode {
             Self::BadRequest => "bad_request",
             Self::Unauthorized => "unauthorized",
             Self::NotFound => "not_found",
+            Self::PayloadTooLarge => "payload_too_large",
             Self::RateLimited => "rate_limited",
+            Self::NeedsReauth => "needs_reauth",
+            Self::UpstreamUnavailable => "upstream_unavailable",
             Self::Internal => "internal",
         }
     }
@@ -43,7 +53,10 @@ impl ErrorCode {
             Self::BadRequest => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::NotFound => StatusCode::NOT_FOUND,
+            Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::NeedsReauth => StatusCode::CONFLICT,
+            Self::UpstreamUnavailable => StatusCode::BAD_GATEWAY,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -56,7 +69,15 @@ impl ErrorCode {
             // Verbatim from docs/contract/error_unauthorized.json.
             Self::Unauthorized => "Bearer token missing, unknown, or revoked.",
             Self::NotFound => "That does not exist.",
+            // Verbatim from docs/contract/error_payload_too_large.json.
+            Self::PayloadTooLarge => "That is too big to send. The limit is 25 MB.",
             Self::RateLimited => "Too many attempts. Wait a minute and try again.",
+            // Verbatim from docs/contract/error_needs_reauth.json.
+            Self::NeedsReauth => "Gmail needs to be reconnected. Sign in again in Settings.",
+            // Verbatim from docs/contract/error_upstream_unavailable.json.
+            Self::UpstreamUnavailable => {
+                "Gmail didn't respond. Nothing was lost — try again in a moment."
+            }
             Self::Internal => "Something went wrong on the server.",
         }
     }
@@ -101,6 +122,21 @@ impl ApiError {
     #[must_use]
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new(ErrorCode::BadRequest, message)
+    }
+
+    #[must_use]
+    pub fn upstream_unavailable() -> Self {
+        Self::of(ErrorCode::UpstreamUnavailable)
+    }
+
+    #[must_use]
+    pub fn needs_reauth() -> Self {
+        Self::of(ErrorCode::NeedsReauth)
+    }
+
+    #[must_use]
+    pub fn payload_too_large() -> Self {
+        Self::of(ErrorCode::PayloadTooLarge)
     }
 
     /// Internal failures are logged in full and reported as a fixed string:
@@ -190,6 +226,32 @@ mod tests {
     use super::*;
     use crate::test_support::{fixture, response_json};
 
+    /// Criterion P1 - every code we serve matches its `docs/contract/` fixture,
+    /// message and all. The wording is the *user's* only explanation of what
+    /// went wrong, so it is part of the contract rather than a detail.
+    #[tokio::test]
+    async fn every_served_code_matches_its_contract_fixture() {
+        for code in [
+            ErrorCode::BadRequest,
+            ErrorCode::Unauthorized,
+            ErrorCode::NotFound,
+            ErrorCode::PayloadTooLarge,
+            ErrorCode::RateLimited,
+            ErrorCode::NeedsReauth,
+            ErrorCode::UpstreamUnavailable,
+            ErrorCode::Internal,
+        ] {
+            let name = format!("error_{}.json", code.as_str());
+            let response = ApiError::of(code).into_response();
+            assert_eq!(response.status().as_u16(), code.status().as_u16(), "{name}");
+            assert_eq!(
+                response_json(response).await,
+                fixture(&name),
+                "{name} and ErrorCode::{code:?} disagree; the fixture is the contract"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn unauthorized_matches_the_contract_fixture() {
         let response = ApiError::unauthorized().into_response();
@@ -210,7 +272,10 @@ mod tests {
             (ErrorCode::BadRequest, 400, "bad_request"),
             (ErrorCode::Unauthorized, 401, "unauthorized"),
             (ErrorCode::NotFound, 404, "not_found"),
+            (ErrorCode::PayloadTooLarge, 413, "payload_too_large"),
             (ErrorCode::RateLimited, 429, "rate_limited"),
+            (ErrorCode::NeedsReauth, 409, "needs_reauth"),
+            (ErrorCode::UpstreamUnavailable, 502, "upstream_unavailable"),
             (ErrorCode::Internal, 500, "internal"),
         ] {
             assert_eq!(code.status().as_u16(), expected, "{wire}");
@@ -224,7 +289,10 @@ mod tests {
             ErrorCode::BadRequest,
             ErrorCode::Unauthorized,
             ErrorCode::NotFound,
+            ErrorCode::PayloadTooLarge,
             ErrorCode::RateLimited,
+            ErrorCode::NeedsReauth,
+            ErrorCode::UpstreamUnavailable,
             ErrorCode::Internal,
         ] {
             let body = response_json(ApiError::of(code).into_response()).await;

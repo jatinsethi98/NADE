@@ -14,8 +14,8 @@ use super::{
     oauth::{AccessTokens, TokenError},
     quota::{self, Bucket},
     types::{
-        ApiErrorEnvelope, Attachment, GmailMessage, Label, LabelsList, MessageRef, MessagesList,
-        Profile,
+        ApiErrorEnvelope, Attachment, GmailMessage, HistoryList, Label, LabelsList, MessageRef,
+        MessagesList, Profile,
     },
 };
 
@@ -192,6 +192,32 @@ impl GmailClient {
         Ok(out)
     }
 
+    /// `users.history.list` from a stored cursor.
+    ///
+    /// Gmail keeps roughly a week of history. Past that it answers `404`, which
+    /// is not an error but an instruction: **re-run the full 30-day sync**
+    /// (PLAN.md §Gmail sync 4). Returning [`GmailError::NotFound`] here is what
+    /// lets P3 tell "nothing changed" apart from "your cursor is too old".
+    ///
+    /// # Errors
+    /// [`GmailError::NotFound`] when `start_history_id` is beyond Gmail's
+    /// retention.
+    pub async fn list_history(
+        &self,
+        start_history_id: i64,
+        page_token: Option<&str>,
+    ) -> Result<HistoryList, GmailError> {
+        let mut path = format!(
+            "/gmail/v1/users/me/history?startHistoryId={start_history_id}\
+             &historyTypes=messageAdded&historyTypes=messageDeleted\
+             &historyTypes=labelAdded&historyTypes=labelRemoved"
+        );
+        if let Some(token) = page_token {
+            path.push_str(&format!("&pageToken={}", encode(token)));
+        }
+        self.get_json(&path, quota::cost::HISTORY_LIST).await
+    }
+
     /// `users.messages.get?format=raw` - the whole RFC-822 message.
     ///
     /// # Errors
@@ -291,10 +317,7 @@ impl GmailClient {
             .send(
                 reqwest::Method::POST,
                 &self.endpoints.batch_url.clone(),
-                Some((
-                    format!("multipart/mixed; boundary={boundary}"),
-                    body,
-                )),
+                Some((format!("multipart/mixed; boundary={boundary}"), body)),
                 cost,
             )
             .await?;
@@ -325,15 +348,13 @@ impl GmailClient {
 
     // --------------------------------------------------------- plumbing --
 
-    async fn get_json<T: DeserializeOwned>(
-        &self,
-        path: &str,
-        cost: u32,
-    ) -> Result<T, GmailError> {
+    async fn get_json<T: DeserializeOwned>(&self, path: &str, cost: u32) -> Result<T, GmailError> {
         let url = format!("{}{path}", self.endpoints.api_base);
         let (_, body) = self.send(reqwest::Method::GET, &url, None, cost).await?;
         serde_json::from_slice(&body).map_err(|error| {
-            GmailError::Upstream(format!("gmail returned unreadable JSON for {path}: {error}"))
+            GmailError::Upstream(format!(
+                "gmail returned unreadable JSON for {path}: {error}"
+            ))
         })
     }
 
@@ -411,16 +432,17 @@ impl GmailClient {
                     if !self.is_retryable(status, &payload) {
                         return Err(GmailError::Upstream(format!(
                             "{status}: {}",
-                            String::from_utf8_lossy(&payload).chars().take(300).collect::<String>()
+                            String::from_utf8_lossy(&payload)
+                                .chars()
+                                .take(300)
+                                .collect::<String>()
                         )));
                     }
                 }
                 Err(error) => {
                     // EDGE (timeout): a transport failure is retryable on the
-                    // same schedule as a 429.
-                    retry_after = None;
-                    status = reqwest::StatusCode::SERVICE_UNAVAILABLE;
-                    let _ = &status;
+                    // same schedule as a 429. This arm always diverges, so
+                    // `status`/`content_type`/`payload` are never read unset.
                     if attempt + 1 >= self.max_attempts {
                         return Err(GmailError::Upstream(error.to_string()));
                     }
@@ -568,9 +590,13 @@ mod tests {
     use crate::gmail::oauth::StaticTokens;
 
     /// A client pointed at a wiremock server, with retries that do not sleep.
+    ///
+    /// `crate::gmail::http_client()` rather than `reqwest::Client::new()`: the
+    /// crate takes `rustls-no-provider`, so a client built any other way panics
+    /// at construction. `no_bare_reqwest_clients` keeps that honest.
     fn client_for(server: &MockServer) -> GmailClient {
         GmailClient::new(
-            reqwest::Client::new(),
+            crate::gmail::http_client().expect("building the shared http client"),
             Endpoints::at(&server.uri()),
             Arc::new(Bucket::new()),
             Arc::new(StaticTokens("ya29.test-token".to_owned())),
@@ -609,12 +635,14 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/gmail/v1/users/me/labels"))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                br#"{"labels":[{"id":"INBOX","name":"INBOX","type":"system"},
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(
+                    br#"{"labels":[{"id":"INBOX","name":"INBOX","type":"system"},
                               {"id":"Label_12","name":"To Reply","type":"user"}]}"#
-                    .to_vec(),
-                "application/json",
-            ))
+                        .to_vec(),
+                    "application/json",
+                ),
+            )
             .mount(&server)
             .await;
 
@@ -639,7 +667,13 @@ mod tests {
                 move |_: &Request| {
                     let page = calls.fetch_add(1, Ordering::SeqCst);
                     let ids: Vec<String> = (0..500)
-                        .map(|index| format!(r#"{{"id":"m{}","threadId":"t{}"}}"#, page * 500 + index, page * 500 + index))
+                        .map(|index| {
+                            format!(
+                                r#"{{"id":"m{}","threadId":"t{}"}}"#,
+                                page * 500 + index,
+                                page * 500 + index
+                            )
+                        })
                         .collect();
                     ResponseTemplate::new(200).set_body_raw(
                         format!(
@@ -728,13 +762,110 @@ mod tests {
         assert!(meta.raw.is_none());
     }
 
+    /// `history.list`: the happy page, the pagination, and - the part that
+    /// matters - the `404` that means "your cursor is too old, re-sync".
+    #[tokio::test]
+    async fn history_pages_and_reports_a_stale_cursor() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/history"))
+            .and(query_param("startHistoryId", "9412771"))
+            .respond_with(|request: &Request| {
+                let types: Vec<String> = request
+                    .url
+                    .query_pairs()
+                    .filter(|(key, _)| key == "historyTypes")
+                    .map(|(_, value)| value.into_owned())
+                    .collect();
+                assert_eq!(
+                    types,
+                    vec![
+                        "messageAdded",
+                        "messageDeleted",
+                        "labelAdded",
+                        "labelRemoved"
+                    ],
+                    "all four history types, or an incremental sync loses events"
+                );
+                let page = request
+                    .url
+                    .query_pairs()
+                    .find(|(key, _)| key == "pageToken")
+                    .map(|(_, value)| value.into_owned());
+                let body = if page.is_none() {
+                    r#"{"history":[
+                         {"id":"9412772","messagesAdded":[{"message":{"id":"m1","threadId":"t1"}}]},
+                         {"id":"9412773","labelsRemoved":[
+                            {"message":{"id":"m2","threadId":"t2"},"labelIds":["UNREAD"]}]}],
+                       "nextPageToken":"page-2","historyId":"9412780"}"#
+                } else {
+                    r#"{"history":[
+                         {"id":"9412779","messagesDeleted":[{"message":{"id":"m3"}}]}],
+                       "historyId":"9412780"}"#
+                };
+                ResponseTemplate::new(200)
+                    .set_body_raw(body.as_bytes().to_vec(), "application/json")
+            })
+            .mount(&server)
+            .await;
+
+        let client = client_for(&server);
+        let first = client.list_history(9_412_771, None).await.unwrap();
+        assert_eq!(first.history.len(), 2);
+        assert_eq!(first.next_page_token.as_deref(), Some("page-2"));
+        assert_eq!(first.touched_message_ids(), vec!["m1", "m2"]);
+
+        let second = client
+            .list_history(9_412_771, Some("page-2"))
+            .await
+            .unwrap();
+        assert!(second.next_page_token.is_none());
+        assert_eq!(second.touched_message_ids(), vec!["m3"]);
+        assert_eq!(second.history_id.as_deref(), Some("9412780"));
+
+        // A cursor beyond Gmail's ~week of retention.
+        let stale = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/history"))
+            .respond_with(ResponseTemplate::new(404).set_body_raw(
+                br#"{"error":{"code":404,"message":"Requested entity was not found."}}"#.to_vec(),
+                "application/json",
+            ))
+            .mount(&stale)
+            .await;
+        let error = client_for(&stale).list_history(1, None).await.unwrap_err();
+        assert!(
+            matches!(error, GmailError::NotFound),
+            "a stale cursor must be distinguishable from an outage: {error}"
+        );
+
+        // EDGE (empty input): a quiet mailbox is an empty page, not an error.
+        let quiet = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/history"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(br#"{"historyId":"9412771"}"#.to_vec(), "application/json"),
+            )
+            .mount(&quiet)
+            .await;
+        let empty = client_for(&quiet)
+            .list_history(9_412_771, None)
+            .await
+            .unwrap();
+        assert!(empty.history.is_empty());
+        assert!(empty.touched_message_ids().is_empty());
+    }
+
     #[tokio::test]
     async fn attachments_are_fetched_and_decoded() {
         let server = MockServer::start().await;
         let bytes = b"%PDF-1.7 fake";
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         Mock::given(method("GET"))
-            .and(path_regex(r"^/gmail/v1/users/me/messages/.+/attachments/.+$"))
+            .and(path_regex(
+                r"^/gmail/v1/users/me/messages/.+/attachments/.+$",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_raw(
                 format!(r#"{{"size":{},"data":"{encoded}"}}"#, bytes.len()).into_bytes(),
                 "application/json",
@@ -769,9 +900,16 @@ mod tests {
             .mount(&server)
             .await;
 
-        let error = client_for(&server).get_message_raw("gone").await.unwrap_err();
+        let error = client_for(&server)
+            .get_message_raw("gone")
+            .await
+            .unwrap_err();
         assert!(matches!(error, GmailError::NotFound), "{error}");
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "a 404 must never be retried");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a 404 must never be retried"
+        );
     }
 
     /// Criterion L5 - 429 retries, on the backoff schedule.
@@ -995,8 +1133,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/batch/gmail/v1"))
             .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_raw(b"<html>nope</html>".to_vec(), "text/html"),
+                ResponseTemplate::new(200).set_body_raw(b"<html>nope</html>".to_vec(), "text/html"),
             )
             .mount(&server)
             .await;

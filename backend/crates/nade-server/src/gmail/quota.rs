@@ -177,11 +177,23 @@ mod tests {
         let wait = bucket.reserve_at(cost::MESSAGES_GET, t0);
         assert_eq!(wait, Duration::from_millis(20));
 
-        // A whole second later the bucket is full again.
+        // A second later the bucket has refilled - but the 51st get's debt is
+        // repaid out of that refill rather than forgiven, so 49 gets are free
+        // and the 50th waits again. A limiter that forgave the debt would let a
+        // burst run permanently over Gmail's ceiling.
         let t1 = t0 + Duration::from_secs(1);
-        for _ in 0..50 {
-            assert_eq!(bucket.reserve_at(cost::MESSAGES_GET, t1), Duration::ZERO);
+        for index in 0..49 {
+            assert_eq!(
+                bucket.reserve_at(cost::MESSAGES_GET, t1),
+                Duration::ZERO,
+                "get {index} in the second window should not have waited"
+            );
         }
+        assert_eq!(
+            bucket.reserve_at(cost::MESSAGES_GET, t1),
+            Duration::from_millis(20),
+            "the overdraft from the first window must carry forward"
+        );
     }
 
     /// The true cost is debited per method, not one "request" per call.
@@ -212,7 +224,10 @@ mod tests {
         // Drain it.
         assert_eq!(bucket.reserve_at(100, t0), Duration::ZERO);
         // Half a second later, half the capacity is back: 50 units.
-        assert_eq!(bucket.reserve_at(50, t0 + Duration::from_millis(500)), Duration::ZERO);
+        assert_eq!(
+            bucket.reserve_at(50, t0 + Duration::from_millis(500)),
+            Duration::ZERO
+        );
         // And it is empty again.
         assert!(bucket.reserve_at(1, t0 + Duration::from_millis(500)) > Duration::ZERO);
 

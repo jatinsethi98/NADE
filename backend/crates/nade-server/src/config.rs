@@ -217,6 +217,28 @@ impl Config {
                 rate_limit,
                 rate_window: Duration::from_secs(parse::<u64>("NADE_PAIR_RATE_WINDOW_SECS", 60)?),
             },
+            gmail: GmailConfig {
+                client_file: string("NADE_GMAIL_CLIENT_FILE").map_or_else(
+                    || root.join("secrets").join("web_client.json"),
+                    PathBuf::from,
+                ),
+                redirect_uri: string("NADE_GMAIL_REDIRECT_URI")
+                    .unwrap_or_else(|| "http://localhost:8080/v1/auth/gmail/callback".to_owned()),
+                auth_url: string("NADE_GMAIL_AUTH_URL"),
+                token_url: string("NADE_GMAIL_TOKEN_URL"),
+                endpoints: string("NADE_GMAIL_API_BASE")
+                    .map_or_else(crate::gmail::client::Endpoints::google, |base| {
+                        crate::gmail::client::Endpoints::at(&base)
+                    }),
+                token_key: string("NADE_TOKEN_KEY"),
+                token_key_file: string("NADE_TOKEN_KEY_FILE").map_or_else(
+                    || crate::gmail::crypto::default_key_file(&root),
+                    PathBuf::from,
+                ),
+                max_sync_messages,
+                sync_window_days,
+                batch_size,
+            },
             jobs: crate::jobs::QueueConfig {
                 lease,
                 heartbeat,
@@ -371,6 +393,32 @@ pub(crate) mod tests {
         assert_eq!(cfg.usable_dev_token(), None);
     }
 
+    /// A Gmail config that touches nothing real: no client file, a per-call
+    /// scratch key file, and endpoints nobody serves.
+    pub(crate) fn sample_gmail() -> GmailConfig {
+        GmailConfig {
+            client_file: PathBuf::from("/nonexistent/web_client.json"),
+            redirect_uri: "http://localhost:8080/v1/auth/gmail/callback".into(),
+            auth_url: None,
+            token_url: None,
+            endpoints: crate::gmail::client::Endpoints::at("http://127.0.0.1:1"),
+            // A fixed key, so tests never touch the real key file.
+            token_key: Some(hex::encode([0x2au8; 32])),
+            token_key_file: PathBuf::from("/nonexistent/token-key"),
+            max_sync_messages: 2_000,
+            sync_window_days: 30,
+            batch_size: 45,
+        }
+    }
+
+    #[test]
+    fn the_dev_caps_have_the_values_plan_md_fixes() {
+        let gmail = sample_gmail();
+        assert_eq!(gmail.max_sync_messages, 2_000, "MAX_SYNC_MESSAGES");
+        assert_eq!(gmail.sync_window_days, 30, "the 30-day window");
+        assert_eq!(gmail.batch_size, 45, "45 messages per batch");
+    }
+
     pub(crate) fn sample() -> Config {
         Config {
             env: Env::Prod,
@@ -387,6 +435,7 @@ pub(crate) mod tests {
                 rate_limit: 10,
                 rate_window: Duration::from_secs(60),
             },
+            gmail: sample_gmail(),
             jobs: crate::jobs::QueueConfig::default(),
             workers: 1,
             embedded: EmbeddedConfig {

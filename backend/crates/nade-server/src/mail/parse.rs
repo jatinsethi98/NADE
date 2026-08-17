@@ -504,7 +504,8 @@ mod tests {
                 }
             };
 
-            let mut wrong = |what: String| failures.push(format!("{file}: {what}\n    note: {note}"));
+            let mut wrong =
+                |what: String| failures.push(format!("{file}: {what}\n    note: {note}"));
 
             if got.subject != want["subject"].as_str().unwrap_or_default() {
                 wrong(format!(
@@ -565,7 +566,10 @@ mod tests {
                 }
             }
             if want["body_text_is_empty"].as_bool() == Some(true) && !got.body_text.is_empty() {
-                wrong(format!("body_text should be empty, got {:?}", got.body_text));
+                wrong(format!(
+                    "body_text should be empty, got {:?}",
+                    got.body_text
+                ));
             }
             if let Some(min) = want["body_text_min_length"].as_u64() {
                 let actual = got.body_text.chars().count() as u64;
@@ -656,7 +660,11 @@ mod tests {
             failures.join("\n\n")
         );
         assert_eq!(cases.len(), 26, "the corpus should hold 26 cases");
-        println!("parser conformance: {}/{} cases pass", cases.len(), cases.len());
+        println!(
+            "parser conformance: {}/{} cases pass",
+            cases.len(),
+            cases.len()
+        );
     }
 
     fn truncate(text: &str) -> String {
@@ -680,7 +688,10 @@ mod tests {
         files.sort();
 
         if files.is_empty() {
-            println!("live mail smoke: skipped, no .eml files in {}", dir.display());
+            println!(
+                "live mail smoke: skipped, no .eml files in {}",
+                dir.display()
+            );
             return;
         }
 
@@ -805,7 +816,8 @@ mod tests {
     /// Criterion J5 - TRAP 3, directly.
     #[test]
     fn the_first_subject_header_wins() {
-        let raw = b"From: a@b.com\r\nSubject: First subject\r\nSubject: Second subject\r\n\r\nx\r\n";
+        let raw =
+            b"From: a@b.com\r\nSubject: First subject\r\nSubject: Second subject\r\n\r\nx\r\n";
         let parsed = parse(raw, "g").unwrap();
         assert_eq!(parsed.subject, "First subject");
     }
@@ -838,7 +850,10 @@ mod tests {
         let astral = "🚀".repeat(400);
         let cut = snippet(&astral);
         assert_eq!(cut.chars().count(), SNIPPET_CHARS);
-        assert!(cut.ends_with('🚀'), "an astral codepoint was sliced in half");
+        assert!(
+            cut.ends_with('🚀'),
+            "an astral codepoint was sliced in half"
+        );
 
         assert_eq!(snippet("  a\n\n b \t c  "), "a b c");
         assert_eq!(snippet(""), "");

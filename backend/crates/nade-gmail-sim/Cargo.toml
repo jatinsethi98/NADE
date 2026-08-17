@@ -1,0 +1,41 @@
+[package]
+name = "nade-gmail-sim"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A stateful, deterministic, in-process simulator of the Gmail REST API v1."
+
+# Dependencies are deliberately tiny. This crate models *Gmail*, so it must not
+# depend on `nade-server` or `nade-agent-sdk`, and it must not pull in a mail
+# parser: if the simulator and the code under test shared one, a bug in that
+# parser would be invisible to both.
+[dependencies]
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# `default-features = false` removes the `clock` feature, so `Utc::now` does not
+# exist in this crate's dependency surface at all. That is the compile-time half
+# of the no-wall-clock rule; `tests::hygiene` is the other half.
+chrono = { version = "0.4", default-features = false, features = ["alloc", "std"] }
+
+# The HTTP transport. Optional so the in-process simulator stays free of an
+# async runtime for callers that do not want one.
+axum = { version = "0.8", optional = true, default-features = false, features = [
+  "http1",
+  "tokio",
+] }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+
+[features]
+default = ["http"]
+http = ["dep:axum", "dep:tokio"]
+
+[package.metadata.docs.rs]
+all-features = true

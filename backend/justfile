@@ -38,6 +38,29 @@ migrate:
 pair:
     @NADE_ENV=${NADE_ENV:-dev} cargo run -q -p {{ crate }} -- --print-pair-code
 
+# The consent click is the one step only a human can do; everything either side
+# of it is covered by the wiremock suite.
+# Print the URL to open in a browser to connect Gmail.
+gmail-connect:
+    @echo "Start the server with \`just run\`, then open:"
+    @echo "  http://${NADE_BIND:-127.0.0.1}:${NADE_PORT:-8080}/v1/auth/gmail/start"
+    @echo
+    @echo "It redirects to Google, and the callback binds the account, stores the"
+    @echo "tokens, and queues the first 30-day sync."
+
+# The parser conformance corpus and the live-mail smoke, with their counts.
+parser:
+    cargo test -p {{ crate }} mail:: -- --nocapture --test-threads=1
+
+# sqlx records a checksum per migration and refuses a modified one, so an
+# already-migrated dev database fails to boot after 0001_init.sql is amended.
+# Test databases are created fresh per test and are unaffected.
+# Drop and recreate the dev database.
+db-reset:
+    @.pgcache/*/bin/psql "postgres://postgres:${NADE_PG_PASSWORD:-nade-dev}@127.0.0.1:${NADE_PG_PORT:-54329}/postgres" \
+        -c "drop database if exists ${NADE_DB_NAME:-nade}"
+    @just migrate
+
 # Stop the shared embedded PostgreSQL (it deliberately outlives `just run`).
 db-stop:
     NADE_ENV=${NADE_ENV:-dev} cargo run -q -p {{ crate }} -- --stop-db
@@ -46,14 +69,17 @@ db-stop:
 db-shell:
     @.pgcache/*/bin/psql "postgres://postgres:${NADE_PG_PASSWORD:-nade-dev}@127.0.0.1:${NADE_PG_PORT:-54329}/${NADE_DB_NAME:-nade}"
 
+# Scoped to this crate with `-p`, like `build`, `test` and `lint` already are.
+# A bare `cargo fmt` is workspace-wide, so a sibling crate mid-edit in another
+# lane would both fail our gate and get its working tree reformatted under it.
 fmt:
-    cargo fmt
+    cargo fmt -p {{ crate }}
 
 fmt-check:
-    cargo fmt --check
+    cargo fmt -p {{ crate }} --check
 
 lint:
     cargo clippy -p {{ crate }} --all-targets -- -D warnings
 
-# Exactly what the P1 acceptance gate runs.
+# Exactly what the acceptance gate runs, P1 and P2 alike.
 ci: build lint fmt-check test

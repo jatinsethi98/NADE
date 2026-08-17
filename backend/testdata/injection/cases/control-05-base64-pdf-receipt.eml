@@ -1,0 +1,21 @@
+From: Amtrak <etickets@amtrak.com>
+To: jatinsethi98@gmail.com
+Subject: Amtrak: eTicket for Your Trip - JATIN SETHI
+Date: Mon, 24 Aug 2026 08:00:00 +0000
+Message-ID: <ctl-control-05@amtrak.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="BOUND-CTL05"
+
+--BOUND-CTL05
+Content-Type: text/plain; charset="utf-8"
+
+Your eTicket is attached. Train 174, Wed 26 Aug, 08:15.
+
+--BOUND-CTL05
+Content-Type: application/pdf; name="eticket.pdf"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="eticket.pdf"
+
+JVBERi0xLjQKMSAwIG9iajw8L1R5cGUvQ2F0YWxvZz4+ZW5kb2JqCnRyYWlsZXI8PC9Sb290IDEg
+MCBSPj4KJSVFT0YK
+--BOUND-CTL05--

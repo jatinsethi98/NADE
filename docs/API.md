@@ -18,9 +18,14 @@ Edit the generator, never the JSON.
 
 ## 0. Conventions
 
-**Base** `/v1`. **Auth** `Authorization: Bearer <token>` on every route except
-`GET /v1/healthz`, `POST /v1/auth/pair`, and `POST /v1/webhooks/gmail` (which
-authenticates by OIDC instead).
+**Base** `/v1`. **Auth** `Authorization: Bearer <token>` on every route except:
+
+| Route | Why it cannot carry a bearer, and what guards it instead |
+|---|---|
+| `GET /healthz` | Liveness must answer before anything else works. Returns nothing sensitive. |
+| `POST /auth/pair` | It is how a token is obtained. Guarded by a single-use 6-digit code with a 10-minute TTL and a 10/minute rate limit. |
+| `GET /auth/gmail/start`, `GET /auth/gmail/callback` | **Browser-facing** — a redirect and a Google callback, neither of which can set a header. Guarded by a single-use `state` with PKCE, a bounded in-flight set, and a refusal to bind a second Google account. |
+| `POST /webhooks/gmail` | Pub/Sub cannot present a bearer. Guarded by full OIDC verification — JWKS signature, `iss`, `aud`, `email == PUSH_SA_EMAIL`, `email_verified`. |
 
 **Time** ISO-8601 UTC, second precision, always `Z`-suffixed:
 `2026-08-16T09:12:04Z`. Never a local offset, never milliseconds. The iOS side
@@ -125,6 +130,13 @@ exists exactly once, in this response.
 
 `status` ∈ `ok` | `needs_reauth`. When `needs_reauth`, Gmail sync is paused and
 the client shows the re-sign-in row in Settings.
+
+**Before any Gmail account is connected** this returns
+`{"email": "", "status": "needs_reauth"}` — a 200, not a 404. A freshly paired
+device asking "who am I?" is not an error, and the state it needs to render is
+exactly the state it renders after a token dies: the same re-sign-in row. A 404
+would force the client to carry a third case that behaves identically to the
+second.
 
 ### `GET /auth/gmail/start`
 

@@ -164,6 +164,79 @@ pub struct Body {
     pub data: Option<String>,
 }
 
+/// `users.history.list`. P2 only reads the `historyId` cursor; P3's incremental
+/// sync walks these pages. It lives here now so the cursor P2 records has a
+/// consumer that is already tested against a real response shape.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryList {
+    #[serde(default)]
+    pub history: Vec<HistoryRecord>,
+    #[serde(default)]
+    pub next_page_token: Option<String>,
+    /// The cursor to store once the whole walk succeeds.
+    #[serde(default)]
+    pub history_id: Option<String>,
+}
+
+impl HistoryList {
+    /// Every message id this page touches, in any of the four history types.
+    #[must_use]
+    pub fn touched_message_ids(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for record in &self.history {
+            let groups = [
+                &record.messages_added,
+                &record.messages_deleted,
+                &record.labels_added,
+                &record.labels_removed,
+            ];
+            for group in groups {
+                for entry in group.iter() {
+                    let id = entry.message.id.clone();
+                    if !id.is_empty() && !out.contains(&id) {
+                        out.push(id);
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryRecord {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub messages_added: Vec<HistoryMessage>,
+    #[serde(default)]
+    pub messages_deleted: Vec<HistoryMessage>,
+    #[serde(default)]
+    pub labels_added: Vec<HistoryMessage>,
+    #[serde(default)]
+    pub labels_removed: Vec<HistoryMessage>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryMessage {
+    #[serde(default)]
+    pub message: MessageStub,
+    #[serde(default)]
+    pub label_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageStub {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+}
+
 /// `users.messages.attachments.get`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]

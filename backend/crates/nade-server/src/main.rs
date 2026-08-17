@@ -69,7 +69,10 @@ async fn main() -> Result<()> {
 
 async fn serve(config: Config) -> Result<()> {
     let database = db::connect(&config).await?;
-    let state = AppState::new(database.pool.clone(), config.clone());
+    // `try_new`, not `new`: a malformed NADE_TOKEN_KEY is a misconfiguration the
+    // process must refuse with an explanation rather than panic on.
+    let state = AppState::try_new(database.pool.clone(), config.clone())
+        .context("building the application state")?;
 
     // A fresh code on every boot, as PLAN.md §Auth bootstrap requires.
     let code = state
@@ -81,7 +84,7 @@ async fn serve(config: Config) -> Result<()> {
 
     let queue = Queue::new(database.pool.clone(), config.jobs.clone());
     let mut registry = Registry::new();
-    register_handlers(&mut registry);
+    nade_server::register_handlers(&mut registry, &state);
     let registry = Arc::new(registry);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -118,10 +121,6 @@ async fn serve(config: Config) -> Result<()> {
     tracing::info!("stopped");
     Ok(())
 }
-
-/// The seam later phases plug into: P3 registers `renew_watch`, P4 `run_agent`,
-/// P5 `triage_message`, P5 `expire_approvals`.
-fn register_handlers(_registry: &mut Registry) {}
 
 async fn migrate(config: &Config) -> Result<()> {
     let database = db::connect(config).await?;

@@ -1505,6 +1505,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nade-gmail-sim"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "nade-server"
 version = "0.1.0"
 dependencies = [
@@ -1518,6 +1532,7 @@ dependencies = [
  "encoding_rs",
  "futures",
  "hex",
+ "http",
  "http-body-util",
  "lol_html",
  "mail-parser",

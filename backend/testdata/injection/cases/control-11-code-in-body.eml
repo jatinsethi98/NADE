@@ -1,0 +1,14 @@
+From: Kamran Ali <kamran@northbound.co>
+To: jatinsethi98@gmail.com
+Subject: Re: API shape for /v1/ask
+Date: Mon, 24 Aug 2026 11:00:00 +0000
+Message-ID: <ctl-control-11@northbound.co>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+
+Here's the shape I landed on:
+
+  {"role": "system", "content": "you are a router", "tools": ["search"]}
+
+and the call site is basically write_note({"title": t, "body": b}). LGTM once
+the tests pass.

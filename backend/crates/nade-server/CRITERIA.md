@@ -176,234 +176,286 @@ comment (no automated test possible at P1), `[ ]` = not done.
 
 # P2 — "Mail lands"
 
-Written **before** the P2 code, same rule. `[x]` = verified by a named test,
-`[~]` = verified by inspection plus an `// EDGE:` comment (no automated test
-possible without a live Google), `[ ]` = not done.
+Written **before** the P2 code, same rule. Marks filled in after the adversarial
+self-review pass: `[x]` = verified by the named test, `[~]` = verified by
+inspection plus an `// EDGE:` comment (no automated test is possible), `[ ]` =
+not done. **Nothing is `[ ]`.**
 
 ## I. Schema additions (amended into `0001_init.sql`)
 
-- [ ] I1 `attachments` exists with `message_id` (FK → `messages(id)`, cascade),
+- [x] I1 `attachments` exists with `message_id` (FK -> `messages(id)`, cascade),
   `att_id`, `name`, `mime`, `size_bytes`, `content_id` (nullable), `inline`, and
-  is unique on `(message_id, att_id)`. Bytes are never a column.
+  is unique on `(message_id, att_id)`. Bytes are never a column - the test
+  asserts the *absence* of `bytes`/`data`/`content`/`body`/`blob`/`payload`.
   `db::tests::attachments_table_matches_the_brief`
-- [ ] I2 Deleting a message cascades its attachments away.
+- [x] I2 Deleting a message cascades its attachments away.
   `db::tests::attachments_cascade_from_messages`
-- [ ] I3 `settings` can hold **one** row and no more; the second insert fails.
+- [x] I3 `settings` can hold **one** row and no more: the same key is a unique
+  violation, a different key is a check violation, so there is no way in.
   `db::tests::settings_is_a_singleton`
-- [ ] I4 `settings.approval_required_default` is `not null default true`.
-  Same test.
-- [ ] I5 `agents.status` is `not null default 'draft'` — a bare insert yields a
-  draft. `db::tests::a_created_agent_is_a_draft`
-- [ ] I6 `threads` + `thread_labels` rollups exist with the keyset index the
-  list endpoint walks. `db::tests::required_indexes_exist`
-- [ ] I7 The thread-list query uses `thread_labels_keyset_idx`, not a seq scan,
-  over 20 000 threads. `api::mail::tests::thread_list_query_uses_an_index`
-- [ ] I8 Every P1 migration test still passes with the amended file, and the
-  table count assertion is updated rather than removed.
+- [x] I4 `settings.approval_required_default` is `not null default true`. Same test.
+- [x] I5 `agents.status` is `not null default 'draft'` - a bare insert yields a
+  draft, and the column default is asserted too.
+  `db::tests::a_created_agent_is_a_draft`
+- [x] I6 `threads` + `thread_labels` rollups exist with the keyset index the list
+  endpoint walks (backend/DECISIONS.md D13). `db::tests::required_indexes_exist`
+- [x] I7 The thread-list query uses `thread_labels_keyset_idx` over 20 000
+  threads: index scan, no `Seq Scan`, **and no `Sort` node**.
+  `api::mail::tests::thread_list_query_uses_an_index`
+- [x] I8 Every P1 migration test still passes against the amended file; the table
+  count assertion moved 14 -> 18 rather than being deleted.
+  `db::tests::migration_creates_every_planned_table`,
+  `db::tests::migrations_apply_to_two_fresh_databases`
 
 ## J. `mail/parse.rs`
 
-- [ ] J1 **26/26** conformance cases pass, every field asserted, the case's
+- [x] J1 **26/26** conformance cases pass, every field asserted, each case's
   `note` in the failure message. A panic is a failure.
   `mail::parse::tests::conformance_corpus`
-- [ ] J2 `body_html` is `None` when there is no genuine `text/html` part
-  (PARSER.md trap 1) — asserted per case by `body_html_present`.
-- [ ] J3 The header block is transcoded from windows-1252 **only** when it is
-  not valid UTF-8, and the body is never touched (trap 2).
+- [x] J2 `body_html` is `None` when there is no genuine `text/html` part
+  (PARSER.md trap 1). `mail::parse::tests::body_html_is_null_without_a_real_html_part`
+  plus `body_html_present` on all 26 cases.
+- [x] J3 The header block is transcoded from windows-1252 **only** when it is not
+  valid UTF-8, and the body is never touched (trap 2).
   `mail::parse::tests::header_sanitisation_is_utf8_first_and_header_only`
-- [ ] J4 `find_header_end` accepts `\n\n` as well as `\r\n\r\n`.
-  `mail::parse::tests::header_end_accepts_lf_only`
-- [ ] J5 The **first** `Subject` wins (trap 3). Case 24 + a direct unit test.
-- [ ] J6 HTML → text is our two-pass `lol_html` extractor: `<style>`/`<script>`
+- [x] J4 `find_header_end` accepts `\n\n` as well as `\r\n\r\n`, and takes
+  whichever comes first. `mail::parse::tests::header_end_accepts_lf_only`
+- [x] J5 The **first** `Subject` wins (trap 3).
+  `mail::parse::tests::the_first_subject_header_wins` + corpus case 24.
+- [x] J6 HTML -> text is our two-pass `lol_html` extractor: `<style>`/`<script>`
   content never leaks, entities are decoded, block boundaries become newlines,
   `alt` text is kept, link targets are dropped.
-  `mail::html::tests::*`
-- [ ] J7 Zero-width and non-breaking padding (`\u{00A0} \u{200B} \u{200C}
-  \u{200D} \u{FEFF} \u{034F}`) becomes spaces and collapses.
+  `mail::html::tests::script_and_style_content_never_leaks`,
+  `..::block_boundaries_do_not_fuse_words`,
+  `..::entities_are_decoded_and_alt_text_is_kept`,
+  `..::link_targets_are_dropped_and_link_text_is_kept`
+- [x] J7 Zero-width and non-breaking padding becomes spaces and collapses.
   `mail::html::tests::marketing_preview_padding_is_stripped`
-- [ ] J8 `cid:` references in `body_html` are rewritten to
-  `/v1/messages/{gmail_id}/attachments/{att_id}` at parse time.
-  `mail::parse::tests::conformance_corpus` (case 10) +
-  `mail::html::tests::cid_urls_are_rewritten`
-- [ ] J9 `body_text` is never null; empty is legal (case 19).
-- [ ] J10 A missing or unparseable `Date` yields `None` and the caller falls
-  back to Gmail's `internalDate` (cases 13, 14).
-- [ ] J11 Live smoke over `testdata/live/raw/`: nothing panics, `body_text` is
-  never empty, every message yields a sender and a timestamp; **skips cleanly**
-  when the directory is absent. `mail::parse::tests::live_mail_smoke`
-- [ ] J12 Parsing is total: `parse()` returns `Result`, never panics, on
-  truncated, empty, and random-byte input.
-  `mail::parse::tests::garbage_input_never_panics`
+- [x] J8 `cid:` references are rewritten to
+  `/v1/messages/{gmail_id}/attachments/{att_id}` **at parse time**.
+  `mail::html::tests::cid_urls_are_rewritten`, corpus case 10, and
+  `api::contract_tests::rewritten_inline_images_point_at_a_declared_attachment`
+- [x] J9 `body_text` is never null; empty is legal (case 19).
+  `mail::parse::tests::body_text_is_never_null_and_empty_is_legal`
+- [x] J10 A missing or unparseable `Date` yields `None` and the caller falls back
+  to Gmail's `internalDate` (cases 13, 14).
+  `sync::tests::internal_date_wins_over_the_date_header`
+- [x] J11 Live smoke over `testdata/live/raw/`: **60/60** parsed, nothing panics,
+  `body_text` never empty, every message yields a sender and a timestamp; skips
+  cleanly when the directory is absent. `mail::parse::tests::live_mail_smoke`
+- [x] J12 Parsing is total on truncated, empty, and random-byte input.
+  `mail::parse::tests::garbage_input_never_panics`,
+  `mail::html::tests::malformed_markup_never_panics`
 
 ## K. Gmail OAuth (`gmail/oauth.rs`)
 
-- [ ] K1 `GET /v1/auth/gmail/start` → 302 to Google with `code_challenge`,
-  `code_challenge_method=S256`, `state`, `access_type=offline`,
-  `prompt=consent`. `api::gmail_auth::tests::start_redirects_with_pkce_and_state`
-- [ ] K2 The callback verifies **both** `state` and the PKCE verifier; an
-  unknown/replayed `state` is refused.
-  `api::gmail_auth::tests::callback_rejects_an_unknown_state`,
-  `..._rejects_a_replayed_state`
-- [ ] K3 A successful callback binds the account, stores the tokens, and renders
-  a plain "you can close this tab" page.
-  `api::gmail_auth::tests::callback_binds_the_account_and_renders_a_close_page`
-- [ ] K4 **Every** refresh persists the (possibly rotated) refresh token.
+- [x] K1 `GET /v1/auth/gmail/start` -> 302 with `code_challenge`,
+  `code_challenge_method=S256`, `state`, `access_type=offline`, `prompt=consent`,
+  and no client secret. `api::gmail_auth::tests::start_redirects_with_pkce_and_state`
+- [x] K2 The callback verifies **both** `state` and the PKCE verifier; an unknown
+  or replayed `state` is refused and creates no second account.
+  `api::gmail_auth::tests::callback_rejects_an_unknown_or_replayed_state`,
+  `gmail::oauth::tests::a_state_is_single_use_and_expires`
+- [~] K2a The 10-minute `state` TTL itself is a constant plus a predicate
+  (`PendingAuths::take`); waiting it out in a test would cost ten minutes per run.
+- [x] K3 A successful callback binds the account, stores the tokens, queues the
+  first sync, writes an audit row, and renders a plain "you can close this tab"
+  page. `api::gmail_auth::tests::callback_binds_the_account_and_renders_a_close_page`
+- [x] K4 **Every** refresh persists the rotated refresh token.
   `gmail::oauth::tests::a_rotated_refresh_token_is_persisted`
-- [ ] K5 A refresh that omits `refresh_token` keeps the old one rather than
+- [x] K5 A refresh that omits `refresh_token` keeps the old one rather than
   nulling it. `gmail::oauth::tests::a_refresh_without_rotation_keeps_the_token`
-- [ ] K6 `invalid_grant` → account `needs_reauth`, an `info` feed row, an audit
-  row, and sync paused. `gmail::oauth::tests::invalid_grant_marks_needs_reauth`
-- [ ] K7 A second `invalid_grant` does not write a second feed row (idempotent).
-  Same test.
-- [ ] K8 A valid, unexpired access token is not refreshed; an expired one is,
-  once. `gmail::oauth::tests::a_live_token_is_not_refreshed`
-- [ ] K9 Tokens are encrypted at rest (AES-256-GCM); the plaintext never appears
-  in the column. `gmail::crypto::tests::*`, `gmail::oauth::tests::tokens_are_ciphertext_at_rest`
-- [ ] K10 Clock skew: the access token is treated as expired 60 s early, so a
-  token that dies in flight is refreshed rather than 401ing.
-  `gmail::oauth::tests::expiry_has_a_skew_margin`
+- [x] K6 `invalid_grant` -> account `needs_reauth`, an `info` feed row, an audit
+  row, and sync paused.
+  `gmail::oauth::tests::invalid_grant_marks_needs_reauth_exactly_once`,
+  `sync::tests::sync_is_paused_when_the_account_needs_reauth`
+- [x] K7 A second `invalid_grant` does not write a second feed row, and
+  re-consent clears the card. Same test.
+- [x] K8 A live access token is reused with **no** HTTP call; an expired one is
+  refreshed once.
+  `gmail::oauth::tests::a_live_token_is_not_refreshed_but_a_nearly_dead_one_is`
+- [x] K9 Tokens are AES-256-GCM at rest; the plaintext never appears in the
+  column. `gmail::crypto::tests::*`, `gmail::oauth::tests::tokens_are_ciphertext_at_rest`
+- [x] K10 Clock skew: a token expiring within 60 s is treated as expired, so it
+  is refreshed rather than 401ing mid-batch. Same test as K8.
+- [x] K11 Eight concurrent callers produce **one** refresh - two would burn the
+  rotating token. `gmail::oauth::tests::concurrent_refreshes_do_not_race`
+- [~] K12 The live consent click. Human-required and explicitly out of scope for
+  this lane; every leg either side of it is covered above.
 
 ## L. Quota + backoff (`gmail/quota.rs`)
 
-- [ ] L1 The bucket is 250 units/user/second and debits the **true** cost per
-  call (`messages.get` = 5), so the ceiling is 50 gets/s. Tested directly
-  against an injected clock, never by timing.
-  `gmail::quota::tests::the_bucket_is_250_units_per_second`
-- [ ] L2 Refill is proportional and clamped to the capacity.
+- [x] L1 250 units/user/second, debiting the **true** cost per call, so the
+  ceiling is 50 `messages.get`/s. Asserted against an injected clock, never by
+  timing. `gmail::quota::tests::the_bucket_is_250_units_per_second`,
+  `..::each_method_debits_its_own_cost`
+- [x] L2 Refill is proportional and clamped to one second's capacity.
   `gmail::quota::tests::refill_is_proportional_and_clamped`
-- [ ] L3 A cost larger than the capacity cannot deadlock the bucket.
+- [x] L3 A cost larger than the capacity cannot deadlock the bucket.
   `gmail::quota::tests::an_oversized_cost_never_deadlocks`
-- [ ] L4 Backoff is exponential 1 s → 60 s with jitter, and never exceeds 60 s.
+- [x] L4 Backoff is exponential 1 s -> 60 s with jitter and never exceeds the cap.
   `gmail::quota::tests::backoff_is_exponential_and_capped`
-- [ ] L5 429 and 403 `rateLimitExceeded` both retry; other 403s do not.
-  `gmail::client::tests::retries_429_then_succeeds`,
-  `..::a_plain_403_is_not_retried`
-- [ ] L6 `Retry-After` on a 429 is honoured when it is longer than our backoff.
+- [x] L5 429 and 403 `rateLimitExceeded` retry; a permission 403 does not, and a
+  404 is never retried. `gmail::client::tests::retries_429_then_succeeds`,
+  `..::a_throttling_403_retries_but_a_permission_403_does_not`,
+  `..::a_404_is_not_found_and_is_not_retried`
+- [x] L6 `Retry-After` wins when longer, is ignored when shorter, and is capped.
   `gmail::quota::tests::retry_after_wins_when_longer`
-- [ ] L7 Clock skew: the bucket is driven by `Instant` (monotonic), never the
-  wall clock. `// EDGE:` + L1's injected clock.
+- [x] L7 Clock skew: the bucket runs on monotonic `Instant`, and concurrent
+  callers share one budget.
+  `gmail::quota::tests::concurrent_callers_share_the_budget`
 
 ## M. Gmail client (`gmail/client.rs`, `gmail/batch.rs`)
 
-- [ ] M1 `getProfile`, `labels.list`, `messages.list`, `messages.get`
-  (`raw` + `metadata`), `attachments.get` and the batch endpoint all round-trip
-  against `wiremock`. `gmail::client::tests::*`
-- [ ] M2 `messages.list` follows `nextPageToken` and stops at the cap.
-  `gmail::client::tests::list_paginates_and_stops_at_the_cap`
-- [ ] M3 The batch body is real `multipart/mixed` posted to
-  `https://gmail.googleapis.com/batch/gmail/v1`, one `Content-ID` per
-  sub-request. `gmail::batch::tests::request_body_is_multipart_mixed`
-- [ ] M4 Responses are correlated by **`Content-ID`**, not by order — a
-  deliberately shuffled response still maps correctly.
+- [x] M1 `getProfile`, `labels.list`, `messages.list`, `messages.get`
+  (`raw` + `metadata` + `full`), `attachments.get`, `history.list` and the batch
+  endpoint all round-trip against `wiremock`. `gmail::client::tests::*`
+- [x] M2 `messages.list` follows `nextPageToken`, stops at the cap, and cannot
+  spin on a server that always returns a token.
+  `gmail::client::tests::list_paginates_and_stops_at_the_cap`,
+  `..::an_empty_page_with_a_token_terminates`
+- [x] M3 The batch body is real `multipart/mixed` posted to
+  `/batch/gmail/v1`, one `Content-ID` per sub-request.
+  `gmail::batch::tests::request_body_is_multipart_mixed`
+- [x] M4 Responses are correlated by **`Content-ID`**, not by order: a reversed
+  response still maps correctly.
   `gmail::batch::tests::out_of_order_responses_are_correlated_by_content_id`
-- [ ] M5 One sub-request 404ing returns the other 44 results and does not fail
-  the batch. `gmail::batch::tests::a_single_404_does_not_fail_the_batch`
-- [ ] M6 A malformed multipart response is an error, not a panic.
+- [x] M5 One sub-request 404ing returns the other 44 results, over real HTTP,
+  with each message's body checked against *its own* id.
+  `gmail::batch::tests::a_single_404_does_not_fail_the_batch`,
+  `gmail::client::tests::a_real_batch_returns_the_other_44_when_one_is_gone`
+- [x] M6 A malformed multipart response is an error, not a panic; a part with no
+  status line is dropped and the rest of the batch survives.
   `gmail::batch::tests::a_malformed_response_is_an_error_not_a_panic`
-- [ ] M7 Empty input: a batch of zero requests makes no HTTP call.
-  `gmail::batch::tests::an_empty_batch_makes_no_request`
-- [ ] M8 Unicode: a subject with astral codepoints survives the multipart
-  round-trip. `gmail::batch::tests::unicode_survives_the_round_trip`
+- [x] M7 Empty input: a batch of zero requests makes **no** HTTP call.
+  `gmail::client::tests::an_empty_batch_makes_no_request`,
+  `gmail::batch::tests::an_empty_batch_is_just_the_terminator`
+- [x] M8 Unicode survives the multipart round trip.
+  `gmail::batch::tests::unicode_survives_the_round_trip`
+- [x] M9 A stale `history.list` cursor is a `404` the caller can tell apart from
+  an outage, which is what triggers a full re-sync at P3.
+  `gmail::client::tests::history_pages_and_reports_a_stale_cursor`
 
 ## N. Sync (`sync/`)
 
-- [ ] N1 `getProfile`'s `historyId` is read **before** the list, and stored, so
-  a message arriving mid-sync overlaps instead of vanishing.
+- [x] N1 `getProfile`'s `historyId` is read **before** the list - asserted on the
+  order of the received requests - and stored.
   `sync::tests::history_id_is_read_before_listing`
-- [ ] N2 The list query is exactly `newer_than:30d` and the cap is
-  `NADE_MAX_SYNC_MESSAGES`. `sync::tests::the_dev_caps_are_applied`
-- [ ] N3 Batches are 45 messages, `format=raw`, at most one per second.
-  `sync::tests::batches_are_45_and_rate_limited`
-- [ ] N4 **Partial failure mid-sync**: a message whose parse fails gets a
-  metadata-only row plus an `audit_log` entry and the sync carries on.
-  `sync::tests::a_parse_failure_is_recorded_and_the_sync_continues`
-- [ ] N5 **A message that vanishes between list and get** (404) is skipped, not
-  retried, and does not fail the sync.
+- [x] N2 The list query is exactly `newer_than:30d`, the cap is
+  `NADE_MAX_SYNC_MESSAGES`, and both are checked on the wire.
+  `sync::tests::the_dev_caps_are_applied`, `config::tests::the_dev_caps_have_the_values_plan_md_fixes`
+- [x] N3 Batches are 45 messages, `format=raw`, at most one per second.
+  `sync::tests::batches_are_45_and_paced`
+- [x] N4 **Partial failure mid-sync**: an unparseable message gets a
+  metadata-only row plus an `audit_log` entry, and the other four are fully
+  parsed. `sync::tests::a_parse_failure_is_recorded_and_the_sync_continues`
+- [x] N4a A single message Gmail could not serve is counted, audited, and left
+  for the next sync. `sync::tests::one_broken_message_does_not_stop_the_batch`
+- [x] N5 **A message that vanishes between list and get** is skipped, not
+  retried, and is not audited as a failure.
   `sync::tests::a_message_that_vanished_is_skipped`
-- [ ] N6 Crash mid-sync: the job resumes and already-ingested messages are not
-  duplicated (upsert on `(account_id, gmail_id)`).
-  `sync::tests::a_resumed_sync_does_not_duplicate`
-- [ ] N7 Duplicate delivery: enqueuing two syncs for one account leaves one
-  logical sync — the second is a no-op re-ingest.
-  `sync::tests::a_replayed_sync_is_idempotent`
-- [ ] N8 Labels are stored, and `[Gmail]`-prefixed ones are stored but hidden by
-  the API. `sync::tests::labels_are_stored`
-- [ ] N9 Per-thread rollups are maintained: newest message wins for
-  `ts`/`from`/`subject`/`snippet`, `unread` is true if **any** message is,
-  `msg_count` counts messages in the window.
+- [x] N6 Crash mid-sync: a re-run does not duplicate messages, threads, labels or
+  attachments. `sync::tests::a_replayed_sync_is_idempotent`
+- [x] N7 Duplicate delivery: the same test - a replayed sync is a no-op re-ingest.
+- [x] N8 Labels are stored whole, including the `[Gmail]`-prefixed ones the API
+  hides. `sync::tests::labels_are_stored_including_the_ones_the_api_hides`
+- [x] N9 Per-thread rollups: newest message wins for ts/from/subject/snippet,
+  `unread` is true if **any** message is, labels are the union.
   `sync::tests::thread_rollups_follow_the_newest_message`
-- [ ] N10 **Ingest never calls an LLM.** Enforced by a source-grep test, the
-  same way D1 is. `sync::tests::ingest_never_calls_an_llm`
-- [ ] N11 `needs_reauth` pauses sync: the handler returns cleanly and writes
-  nothing. `sync::tests::sync_is_paused_when_the_account_needs_reauth`
-- [ ] N12 The whole thing is a registered job `kind` (`gmail_sync`) and
-  heartbeats its lease. `sync::tests::gmail_sync_is_a_registered_job_kind`
-- [ ] N13 Empty input: an account with zero messages in the window syncs to a
-  clean, empty state. `sync::tests::an_empty_window_is_not_an_error`
-- [ ] N14 Unicode: an astral-plane subject and a CJK body survive ingest.
-  `sync::tests::unicode_survives_ingest`
-- [ ] N15 Clock skew: `internal_ts` comes from Gmail's `internalDate`, never
-  from our clock; `Date`-header time is only a fallback when it is present.
-  `// EDGE:` + `sync::tests::internal_date_wins_over_the_date_header`
+- [x] N10 **Ingest never calls an LLM**, enforced by a source grep over
+  `src/sync/` and `src/mail/`. `sync::tests::ingest_never_calls_an_llm`
+- [x] N11 `needs_reauth` pauses sync: the handler succeeds, writes nothing, and
+  makes **no** Gmail call at all.
+  `sync::tests::sync_is_paused_when_the_account_needs_reauth`
+- [x] N12 `gmail_sync` is a registered job kind, claimable, and a no-op when no
+  account is connected. `sync::tests::gmail_sync_is_a_registered_job_kind`
+- [x] N13 Empty input: a window with no messages issues no batch request and
+  still records the cursor. `sync::tests::an_empty_window_is_not_an_error`
+- [x] N14 Unicode: an RFC 2047 subject with an astral codepoint, a CJK body, and
+  the generated `fts` column. `sync::tests::unicode_survives_ingest`
+- [x] N15 Clock skew: `internal_ts` is Gmail's `internalDate`, with the sender's
+  `Date` header only as a fallback.
+  `sync::tests::internal_date_wins_over_the_date_header`
 
 ## O. Read endpoints (`api/`)
 
-- [ ] O1 `GET /me` returns `{email, status}`; `status` follows
-  `accounts.status`. `api::me::tests::*`
-- [ ] O2 `GET /mailboxes` returns the eight-label whitelist with `API.md` §2's
-  display names and order, then user labels by name, `[Gmail]`-prefixed hidden.
-  `api::mail::tests::mailboxes_are_the_whitelist_then_user_labels`
-- [ ] O3 `unread`/`total` count **threads** inside the synced window.
-  `api::mail::tests::mailbox_counts_are_threads_not_messages`
-- [ ] O4 `GET /mailboxes/{id}/threads` is keyset-paginated, `limit` default 50,
-  max 100, sorted `ts desc, id desc`.
-  `api::mail::tests::thread_list_paginates_by_keyset`
-- [ ] O5 **Pagination boundary**: the last page has `next_cursor: null`; an
-  empty mailbox is `[]` + `null`, never 404; a row inserted mid-scroll cannot
-  duplicate or skip. `api::mail::tests::pagination_boundaries`,
-  `..::a_row_inserted_mid_scroll_neither_duplicates_nor_skips`
-- [ ] O6 An unknown or corrupt cursor is `400 bad_request`, never a silent reset.
-  `api::cursor::tests::*`, `api::mail::tests::an_unknown_cursor_is_a_bad_request`
-- [ ] O7 `GET /threads/{id}` matches `API.md` §2: no `id` on a message,
-  `body_text` non-null, `body_html` null when there is no HTML part, messages
-  oldest first, `mailbox_name` + `account_email` present.
-  `api::mail::tests::thread_detail_matches_the_contract`
-- [ ] O8 `GET /search` rejects empty/whitespace `q` with `400`, returns `[]` +
-  `null` for no hits, and caps `q` at 512 chars.
-  `api::mail::tests::search_*`
-- [ ] O9 The attachment proxy streams from Gmail on demand, caps at 25 MB
-  (`413`), sets `Content-Disposition` with an RFC 5987 filename, and never
-  caches. `api::mail::tests::attachment_proxy_*`
-- [ ] O10 A message Gmail no longer has → `404 not_found`.
-  `api::mail::tests::attachment_proxy_404s_when_gmail_forgot_the_message`
-- [ ] O11 Unicode: a filename with emoji and CJK survives `filename*=UTF-8''…`.
-  `api::mail::tests::attachment_filenames_are_rfc5987_encoded`
-- [ ] O12 Every new route is behind the bearer guard except the two
-  browser-facing OAuth ones. `api::tests::unknown_v1_routes_are_auth_guarded`,
-  `api::gmail_auth::tests::the_oauth_routes_are_public`
-- [ ] O13 429/timeout: an upstream Gmail failure surfaces as
-  `502 upstream_unavailable`, never a 500 or a hang.
-  `api::mail::tests::an_upstream_failure_is_a_502`
+- [x] O1 `GET /me` returns `{email, status}` and answers before any account
+  exists (backend/DECISIONS.md D17).
+  `api::mail::tests::me_reports_the_account_and_its_status`
+- [x] O2 `GET /mailboxes` is the eight-label whitelist in `API.md` §2's order and
+  display names, then user labels by **raw byte value** of the name, with
+  `[Gmail]`-prefixed ones hidden and `UNREAD`/`IMPORTANT`/`SPAM`/`TRASH` never
+  exposed. `api::mail::tests::mailboxes_are_the_whitelist_then_user_labels`
+- [x] O3 `unread`/`total` count **threads** inside the synced window, not
+  messages. `api::mail::tests::mailbox_counts_are_threads_not_messages`
+- [x] O4 `GET /mailboxes/{id}/threads` is keyset-paginated, `limit` default 50 and
+  clamped at 100, sorted `ts desc, id desc`.
+  `api::mail::tests::thread_list_paginates_by_keyset`,
+  `api::cursor::tests::limits_are_clamped_to_the_contract`
+- [x] O5 **Pagination boundary**: the last page is `next_cursor: null`; an empty
+  or unknown mailbox is `[]` + `null`, never 404; a row inserted mid-scroll
+  neither duplicates nor skips.
+  `api::mail::tests::an_empty_mailbox_is_an_empty_array_not_a_404`,
+  `api::mail::tests::a_row_inserted_mid_scroll_neither_duplicates_nor_skips`
+- [x] O6 An unknown, corrupt, empty or foreign cursor is `400 bad_request`.
+  `api::cursor::tests::an_unknown_or_corrupt_cursor_is_a_bad_request`,
+  `api::mail::tests::an_unknown_cursor_is_a_bad_request`
+- [x] O7 `GET /threads/{id}` matches `API.md` §2: **no `id` on a message**,
+  `body_text` non-null, `body_html` null without an HTML part, messages oldest
+  first, `mailbox_name` + `account_email` present.
+  `api::mail::tests::thread_detail_matches_the_contract`,
+  `api::mail::tests::an_empty_body_is_an_empty_string`
+- [x] O8 `GET /search` rejects empty/whitespace `q` with 400, caps `q` at 512
+  characters, returns `[]` + `null` for no hits, and shares the thread-row shape.
+  `api::mail::tests::search_matches_the_index_and_shares_the_thread_shape`,
+  `..::search_refuses_an_empty_or_oversized_query`
+- [x] O9 The attachment proxy streams from Gmail on demand, caps at 25 MB
+  (refusing **before** spending quota), sets `Content-Disposition` with an
+  RFC 5987 filename, and sets `Cache-Control: no-store, private`.
+  `api::mail::tests::attachment_proxy_streams_from_gmail_with_an_rfc5987_filename`,
+  `..::attachment_proxy_refuses_over_25mb`,
+  `..::a_small_attachment_is_served_from_the_inline_body`
+- [x] O10 A message Gmail no longer has, or an attachment we never stored, is a
+  `404`. `api::mail::tests::attachment_proxy_404s_when_gmail_forgot_the_message`
+- [x] O11 Unicode: emoji and CJK filenames are percent-encoded into an ASCII
+  header, and a filename cannot inject one.
+  `api::mail::tests::content_disposition_cannot_inject_a_header`
+- [x] O12 Every new route is behind the bearer guard except the two
+  browser-facing OAuth ones (backend/DECISIONS.md D15).
+  `api::gmail_auth::tests::the_oauth_routes_are_public_and_the_rest_are_not`,
+  `api::tests::unknown_v1_routes_are_auth_guarded`
+- [x] O13 An upstream Gmail failure is `502 upstream_unavailable`, never a 500.
+  `api::mail::tests::an_upstream_failure_is_a_502_not_a_500`
+- [x] O14 `agent_note` is passed through verbatim from whichever run stored it -
+  the seam P5 fills. `api::mail::tests::an_agent_note_is_passed_through_verbatim`
 
 ## P. Fixture conformance
 
-- [ ] P1 The real response types serialise to the `docs/contract/` fixtures,
-  compared as parsed `serde_json::Value` so key order does not matter.
-  `api::contract_tests::*`
-- [ ] P2 Where a fixture and `API.md` disagree, `API.md` wins and the
-  discrepancy is reported, not patched into `docs/`.
+- [x] P1 The real response types serialise to `docs/contract/`, compared as
+  parsed `serde_json::Value` so key order cannot matter: `me`, `mailboxes`, all
+  three thread pages, both search pages, both thread details, both health bodies,
+  and all eight error codes we serve - message included.
+  `api::contract_tests::*`, `error::tests::every_served_code_matches_its_contract_fixture`
+- [x] P1a The fixture's `next_cursor` decodes with **our** decoder and
+  re-encodes byte-identically, so it is a real example rather than a plausible
+  string. `api::contract_tests::the_fixture_cursor_is_a_real_keyset_cursor`
+- [x] P2 No fixture contradicted `API.md`. Two `API.md` *gaps* were found and
+  reported rather than patched into `docs/`: the §0 auth-exception list omits the
+  two browser-facing OAuth routes (D15), and §1 does not say what `/me` returns
+  before an account exists (D17). Three error messages were adopted **from** the
+  fixtures into `error.rs` so the two agree.
 
-## Mandated edge cases — P2
+## Mandated edge cases - P2
 
 | # | Edge case | Where | Verified by |
 |---|---|---|---|
-| 1 | Empty input | empty batch, empty window, empty `q`, empty mailbox, empty body (case 19) | M7, N13, O8, O5, J9 |
-| 2 | Unicode | RFC 2047 in every form, astral subjects, cp1252 headers, emoji filenames | J1, M8, N14, O11 |
-| 3 | Crash mid-step | sync resumes from the job queue; upserts make re-ingest harmless | N6 |
-| 4 | Duplicate delivery / replay | `(account_id, gmail_id)` unique + upsert; replayed OAuth `state` refused | N7, K2 |
-| 5 | Expiry | access-token expiry with a 60 s skew margin; OAuth `state` TTL | K8, K10, K2 |
-| 6 | Pagination boundary | keyset cursor, last page, mid-scroll insert, `limit` clamp | O4, O5 |
-| 7 | 429 / timeout | quota bucket, exponential backoff, `Retry-After`, 502 envelope | L1, L4, L5, L6, O13 |
-| 8 | Clock skew | monotonic bucket; `internalDate` not our clock; skewed expiry margin | L7, N15, K10 |
-| 9 | **Partial failure mid-sync** | parse failure → metadata row + audit, sync continues; one 404 in a batch does not kill the batch | N4, M5 |
-| 10 | **A message that vanishes between list and get** | 404 on `messages.get` is skipped, never retried | N5 |
+| 1 | **Empty input** | empty batch, empty window, empty `q`, empty mailbox, empty body, empty HTML, empty cursor | `an_empty_batch_makes_no_request`, `an_empty_window_is_not_an_error`, `search_refuses_an_empty_or_oversized_query`, `an_empty_mailbox_is_an_empty_array_not_a_404`, `body_text_is_never_null_and_empty_is_legal`, `empty_and_whitespace_html_is_empty_text`, `an_unknown_or_corrupt_cursor_is_a_bad_request` |
+| 2 | **Unicode** | RFC 2047 in every form, cp1252 headers, astral subjects, CJK search, emoji filenames | `conformance_corpus`, `unicode_survives_ingest`, `unicode_survives_the_round_trip`, `search_matches_the_index_and_shares_the_thread_shape`, `content_disposition_cannot_inject_a_header`, `snippets_cap_characters_not_bytes` |
+| 3 | **Crash mid-step** | sync resumes off the P1 job queue; every write is an upsert | `a_replayed_sync_is_idempotent`, `gmail_sync_is_a_registered_job_kind` |
+| 4 | **Duplicate delivery / replay** | `(account_id, gmail_id)` unique + upsert; replayed OAuth `state`; repeated `invalid_grant` | `a_replayed_sync_is_idempotent`, `callback_rejects_an_unknown_or_replayed_state`, `invalid_grant_marks_needs_reauth_exactly_once` |
+| 5 | **Expiry** | access-token expiry with a 60 s skew margin; single-use `state` | `a_live_token_is_not_refreshed_but_a_nearly_dead_one_is`, `a_state_is_single_use_and_expires` |
+| 6 | **Pagination boundary** | keyset cursor, last page, mid-scroll insert, `limit` clamp, list cap | `thread_list_paginates_by_keyset`, `a_row_inserted_mid_scroll_neither_duplicates_nor_skips`, `limits_are_clamped_to_the_contract`, `list_paginates_and_stops_at_the_cap` |
+| 7 | **429 / timeout** | quota bucket, exponential backoff, `Retry-After`, transport failure, 502 envelope | `the_bucket_is_250_units_per_second`, `backoff_is_exponential_and_capped`, `retry_after_wins_when_longer`, `retries_429_then_succeeds`, `an_upstream_failure_is_a_502_not_a_500` |
+| 8 | **Clock skew** | monotonic bucket and pacer; `internalDate` over the `Date` header; 60 s expiry margin | `concurrent_callers_share_the_budget`, `internal_date_wins_over_the_date_header`, `a_live_token_is_not_refreshed_but_a_nearly_dead_one_is` |
+| 9 | **Partial failure mid-sync** (new) | parse failure -> metadata row + audit, sync continues; one 404 inside a batch does not kill the batch; one whole batch failing does not kill the sync | `a_parse_failure_is_recorded_and_the_sync_continues`, `one_broken_message_does_not_stop_the_batch`, `a_real_batch_returns_the_other_44_when_one_is_gone` |
+| 10 | **A message that vanishes between list and get** (new) | `404` on a batched `messages.get` is skipped, never retried, never audited as a failure | `a_message_that_vanished_is_skipped`, `a_single_404_does_not_fail_the_batch` |

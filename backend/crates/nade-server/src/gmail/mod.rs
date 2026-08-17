@@ -92,6 +92,18 @@ impl GmailRuntime {
         })
     }
 
+    /// A client holding one fixed access token, for the single call the OAuth
+    /// callback makes before an account row exists: "who just consented?".
+    #[must_use]
+    pub fn probe_client(&self, access_token: &str) -> client::GmailClient {
+        client::GmailClient::new(
+            self.http.clone(),
+            self.endpoints.clone(),
+            Arc::clone(&self.quota),
+            Arc::new(oauth::StaticTokens(access_token.to_owned())),
+        )
+    }
+
     /// A client bound to one account.
     #[must_use]
     pub fn client_for(&self, account_id: uuid::Uuid) -> client::GmailClient {
@@ -143,5 +155,51 @@ mod tests {
         let first = http_client().expect("reqwest must build with the ring provider");
         let second = http_client().expect("building a second client must be safe");
         drop((first, second));
+    }
+
+    /// `reqwest::Client::new()` / `::builder()` **panic** in this crate: we take
+    /// `rustls-no-provider`, so a client must come from [`http_client`], which
+    /// installs `ring` first. Enforced by a grep, exactly like the ban on
+    /// compile-time sqlx macros (backend/DECISIONS.md D1) - a comment would not
+    /// have stopped it, and the failure mode is a panic in production.
+    #[test]
+    fn no_bare_reqwest_clients() {
+        let root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        let banned = [
+            concat!("reqwest::Client::", "new()"),
+            concat!("reqwest::Client::", "builder()"),
+        ];
+        let mut offenders = Vec::new();
+        let mut stack = vec![root];
+
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|extension| extension != "rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                for (number, line) in text.lines().enumerate() {
+                    let trimmed = line.trim_start();
+                    // The one legitimate call site lives in this module.
+                    if trimmed.starts_with("//") || path.ends_with("gmail/mod.rs") {
+                        continue;
+                    }
+                    if banned.iter().any(|needle| line.contains(needle)) {
+                        offenders.push(format!("{}:{}: {}", path.display(), number + 1, trimmed));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "build reqwest clients with gmail::http_client(), not directly:\n{}",
+            offenders.join("\n")
+        );
     }
 }

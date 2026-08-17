@@ -115,9 +115,9 @@ impl OAuthConfig {
             redirect_uri
                 .or_else(|| file.web.redirect_uris.first().map(String::as_str))
                 .unwrap_or("http://localhost:8080/v1/auth/gmail/callback"),
-            auth_override.or(file.web.auth_uri.as_deref()).unwrap_or(
-                "https://accounts.google.com/o/oauth2/auth",
-            ),
+            auth_override
+                .or(file.web.auth_uri.as_deref())
+                .unwrap_or("https://accounts.google.com/o/oauth2/auth"),
             token_override
                 .or(file.web.token_uri.as_deref())
                 .unwrap_or("https://oauth2.googleapis.com/token"),
@@ -166,11 +166,7 @@ impl OAuthConfig {
             .add_extra_param("include_granted_scopes", "true")
             .set_pkce_challenge(challenge)
             .url();
-        (
-            url.to_string(),
-            state.into_secret(),
-            verifier.into_secret(),
-        )
+        (url.to_string(), state.into_secret(), verifier.into_secret())
     }
 }
 
@@ -337,9 +333,13 @@ impl TokenStore {
     ///
     /// # Errors
     /// Returns an error if OAuth is unconfigured or Google refuses the code.
-    pub async fn exchange_code(&self, code: &str, verifier: &str) -> Result<FreshTokens, TokenError> {
+    pub async fn exchange_code(
+        &self,
+        code: &str,
+        verifier: &str,
+    ) -> Result<FreshTokens, TokenError> {
         let oauth = self.oauth.as_ref().ok_or(TokenError::NotConnected)?;
-        let bridge = |request: oauth2::HttpRequest| send(&self.http, request);
+        let bridge = bridge(self.http.clone());
         let response = oauth
             .client
             .exchange_code(AuthorizationCode::new(code.to_owned()))
@@ -354,7 +354,11 @@ impl TokenStore {
     ///
     /// # Errors
     /// Returns an error if the write fails.
-    pub async fn save_consent(&self, email: &str, tokens: &FreshTokens) -> Result<Uuid, TokenError> {
+    pub async fn save_consent(
+        &self,
+        email: &str,
+        tokens: &FreshTokens,
+    ) -> Result<Uuid, TokenError> {
         let mut tx = self.pool.begin().await?;
 
         let account_id: Uuid = sqlx::query_scalar(
@@ -469,7 +473,7 @@ impl TokenStore {
             .decrypt(&sealed)
             .map_err(|_| TokenError::NeedsReauth)?;
 
-        let bridge = |request: oauth2::HttpRequest| send(&self.http, request);
+        let bridge = bridge(self.http.clone());
         let response = oauth
             .client
             .exchange_refresh_token(&RefreshToken::new(refresh_token.clone()))
@@ -538,7 +542,11 @@ impl TokenStore {
     ///
     /// # Errors
     /// Returns an error if the transaction fails.
-    pub async fn mark_needs_reauth(&self, account_id: Uuid, reason: &str) -> Result<(), TokenError> {
+    pub async fn mark_needs_reauth(
+        &self,
+        account_id: Uuid,
+        reason: &str,
+    ) -> Result<(), TokenError> {
         let mut tx = self.pool.begin().await?;
 
         let changed = sqlx::query(
@@ -648,8 +656,26 @@ fn classify<E: std::error::Error + 'static>(
 /// Doing it by hand is why `oauth2` is `default-features = false`: its own
 /// `reqwest` feature would pull a second copy of reqwest and a second TLS stack
 /// into the tree.
+///
+/// The client is **cloned into** each call rather than borrowed. `reqwest::Client`
+/// is an `Arc` inside, so a clone is free - and it makes the returned future
+/// `'static`, which is what `oauth2`'s `AsyncHttpClient` blanket impl needs to
+/// see a single concrete future type.
+fn bridge(
+    http: reqwest::Client,
+) -> impl Fn(oauth2::HttpRequest) -> BridgeFuture + Send + Sync + 'static {
+    move |request| {
+        let http = http.clone();
+        Box::pin(async move { send(http, request).await })
+    }
+}
+
+type BridgeFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<oauth2::HttpResponse, BridgeError>> + Send>,
+>;
+
 async fn send(
-    http: &reqwest::Client,
+    http: reqwest::Client,
     request: oauth2::HttpRequest,
 ) -> Result<oauth2::HttpResponse, BridgeError> {
     let (parts, body) = request.into_parts();
@@ -757,7 +783,10 @@ mod tests {
         .unwrap();
 
         let (url, state, verifier) = config.authorize_url();
-        assert!(url.starts_with("https://accounts.google.com/o/oauth2/auth?"), "{url}");
+        assert!(
+            url.starts_with("https://accounts.google.com/o/oauth2/auth?"),
+            "{url}"
+        );
         for fragment in [
             "code_challenge=",
             "code_challenge_method=S256",
@@ -773,7 +802,10 @@ mod tests {
             url.contains("gmail.readonly"),
             "the scope must be readonly: {url}"
         );
-        assert!(!url.contains("client-secret"), "the secret must never be in a URL");
+        assert!(
+            !url.contains("client-secret"),
+            "the secret must never be in a URL"
+        );
         assert!(state.len() >= 16, "state must be unguessable: {state:?}");
         assert!(verifier.len() >= 43, "PKCE verifier must be 43+ chars");
 
@@ -819,7 +851,9 @@ mod tests {
             ("a/b".to_owned(), "c d".to_owned())
         );
         // The user pressed Cancel.
-        let error = callback_params("error=access_denied&state=s").unwrap_err().to_string();
+        let error = callback_params("error=access_denied&state=s")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("access_denied"), "{error}");
         // EDGE (empty input).
         assert!(callback_params("").is_err());
@@ -868,6 +902,351 @@ mod tests {
         std::fs::write(&path, "{\"installed\":{}}").unwrap();
         assert!(OAuthConfig::load(&path, None, None, None).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+
+    // ------------------------------------------------ the token lifecycle --
+
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    struct Harness {
+        _db: crate::test_support::TestDb,
+        pool: PgPool,
+        store: TokenStore,
+        account: Uuid,
+    }
+
+    /// A real database, a real `TokenStore`, and a token endpoint we control.
+    async fn harness(server: &MockServer) -> Harness {
+        let db = crate::test_support::test_db().await;
+        let config = OAuthConfig::from_parts(
+            "client-id",
+            "client-secret",
+            "http://localhost:8080/v1/auth/gmail/callback",
+            &format!("{}/auth", server.uri()),
+            &format!("{}/token", server.uri()),
+        )
+        .unwrap();
+
+        let store = TokenStore::new(
+            db.pool.clone(),
+            Cipher::from_key([5u8; 32]),
+            Some(std::sync::Arc::new(config)),
+            crate::gmail::http_client().unwrap(),
+        );
+
+        let account = store
+            .save_consent(
+                "jatinsethi98@gmail.com",
+                &FreshTokens {
+                    access_token: "access-original".to_owned(),
+                    refresh_token: Some("refresh-original".to_owned()),
+                    expires_at: Some(Utc::now() + chrono::TimeDelta::seconds(3600)),
+                    scopes: vec![SCOPE.to_owned()],
+                },
+            )
+            .await
+            .unwrap();
+
+        Harness {
+            pool: db.pool.clone(),
+            _db: db,
+            store,
+            account,
+        }
+    }
+
+    fn token_response(refresh: Option<&str>) -> String {
+        let rotation = refresh.map_or_else(String::new, |token| {
+            format!(r#","refresh_token":"{token}""#)
+        });
+        format!(
+            r#"{{"access_token":"access-refreshed","token_type":"Bearer","expires_in":3599,
+                 "scope":"{SCOPE}"{rotation}}}"#
+        )
+    }
+
+    async fn expire_the_access_token(pool: &PgPool, account: Uuid) {
+        sqlx::query("update gmail_tokens set access_expiry = now() - interval '5 minutes' where account_id = $1")
+            .bind(account)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn stored_refresh(harness: &Harness) -> String {
+        let sealed: String =
+            sqlx::query_scalar("select refresh_token from gmail_tokens where account_id = $1")
+                .bind(harness.account)
+                .fetch_one(&harness.pool)
+                .await
+                .unwrap();
+        harness.store.cipher.decrypt(&sealed).unwrap()
+    }
+
+    /// Criterion K4 - the failure that killed this project's prior art. Google
+    /// rotates the refresh token; keep the old one and you get `invalid_grant`
+    /// forever.
+    #[tokio::test]
+    async fn a_rotated_refresh_token_is_persisted() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                token_response(Some("refresh-ROTATED")).into_bytes(),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+
+        let harness = harness(&server).await;
+        assert_eq!(stored_refresh(&harness).await, "refresh-original");
+
+        expire_the_access_token(&harness.pool, harness.account).await;
+        let token = harness.store.access_token(harness.account).await.unwrap();
+
+        assert_eq!(token, "access-refreshed");
+        assert_eq!(
+            stored_refresh(&harness).await,
+            "refresh-ROTATED",
+            "the rotated refresh token must be written back on the spot"
+        );
+    }
+
+    /// Criterion K5 - the mirror image: no rotation must not mean "null it".
+    #[tokio::test]
+    async fn a_refresh_without_rotation_keeps_the_token() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(token_response(None).into_bytes(), "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let harness = harness(&server).await;
+        expire_the_access_token(&harness.pool, harness.account).await;
+        assert_eq!(
+            harness.store.access_token(harness.account).await.unwrap(),
+            "access-refreshed"
+        );
+        assert_eq!(
+            stored_refresh(&harness).await,
+            "refresh-original",
+            "a refresh that did not rotate must leave the token alone"
+        );
+    }
+
+    /// Criterion K8 + K10 - a live token is reused; one inside the skew margin
+    /// is not.
+    #[tokio::test]
+    async fn a_live_token_is_not_refreshed_but_a_nearly_dead_one_is() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(token_response(None).into_bytes(), "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        let harness = harness(&server).await;
+
+        // An hour of life left: reused, and no HTTP call at all.
+        assert_eq!(
+            harness.store.access_token(harness.account).await.unwrap(),
+            "access-original"
+        );
+        assert!(
+            server.received_requests().await.unwrap().is_empty(),
+            "a live token must not cost a refresh"
+        );
+
+        // EDGE (clock skew): 30 seconds of life is inside the 60-second margin,
+        // so it is refreshed *before* it can 401 in the middle of a batch.
+        sqlx::query(
+            "update gmail_tokens set access_expiry = now() + interval '30 seconds' \
+              where account_id = $1",
+        )
+        .bind(harness.account)
+        .execute(&harness.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            harness.store.access_token(harness.account).await.unwrap(),
+            "access-refreshed",
+            "a token expiring within the skew margin must be refreshed early"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+
+    /// Criteria K6 + K7 - the whole `invalid_grant` lifecycle, and its
+    /// idempotence.
+    #[tokio::test]
+    async fn invalid_grant_marks_needs_reauth_exactly_once() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(400).set_body_raw(
+                br#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#
+                    .to_vec(),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+
+        let harness = harness(&server).await;
+        expire_the_access_token(&harness.pool, harness.account).await;
+
+        let error = harness
+            .store
+            .access_token(harness.account)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, TokenError::NeedsReauth), "{error}");
+
+        let status: String = sqlx::query_scalar("select status from accounts where id = $1")
+            .bind(harness.account)
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "needs_reauth", "sync pauses off this flag");
+
+        let feed: i64 = sqlx::query_scalar(
+            "select count(*) from feed_items \
+              where account_id = $1 and kind = 'info' and data->>'reason' = 'needs_reauth'",
+        )
+        .bind(harness.account)
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+        assert_eq!(feed, 1, "the user is told once");
+
+        let audit: i64 = sqlx::query_scalar(
+            "select count(*) from audit_log where action = 'gmail_needs_reauth'",
+        )
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+        assert_eq!(audit, 1);
+
+        // EDGE (duplicate delivery): a second failure must not stack a second
+        // card on the feed.
+        let error = harness
+            .store
+            .access_token(harness.account)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, TokenError::NeedsReauth), "{error}");
+
+        let feed: i64 = sqlx::query_scalar(
+            "select count(*) from feed_items \
+              where account_id = $1 and kind = 'info' and data->>'reason' = 'needs_reauth'",
+        )
+        .bind(harness.account)
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+        assert_eq!(feed, 1, "repeated failures must not spam the feed");
+
+        // Recovery is another trip through /auth/gmail/start, which re-consents.
+        harness
+            .store
+            .save_consent(
+                "jatinsethi98@gmail.com",
+                &FreshTokens {
+                    access_token: "access-after-reconsent".to_owned(),
+                    refresh_token: Some("refresh-after-reconsent".to_owned()),
+                    expires_at: Some(Utc::now() + chrono::TimeDelta::seconds(3600)),
+                    scopes: vec![SCOPE.to_owned()],
+                },
+            )
+            .await
+            .unwrap();
+
+        let status: String = sqlx::query_scalar("select status from accounts where id = $1")
+            .bind(harness.account)
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "ok");
+        let unresolved: i64 = sqlx::query_scalar(
+            "select count(*) from feed_items where status = 'new' and data->>'reason' = 'needs_reauth'",
+        )
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+        assert_eq!(unresolved, 0, "re-consent clears the card");
+        assert_eq!(
+            harness.store.access_token(harness.account).await.unwrap(),
+            "access-after-reconsent"
+        );
+    }
+
+    /// Criterion K9 - a `pg_dump` must not hand over the account.
+    #[tokio::test]
+    async fn tokens_are_ciphertext_at_rest() {
+        let server = MockServer::start().await;
+        let harness = harness(&server).await;
+
+        let (access, refresh): (String, String) = sqlx::query_as(
+            "select access_token, refresh_token from gmail_tokens where account_id = $1",
+        )
+        .bind(harness.account)
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+
+        for column in [&access, &refresh] {
+            assert!(!column.contains("access-original"), "{column}");
+            assert!(!column.contains("refresh-original"), "{column}");
+        }
+        assert_eq!(
+            harness.store.cipher.decrypt(&access).unwrap(),
+            "access-original"
+        );
+        assert_eq!(stored_refresh(&harness).await, "refresh-original");
+    }
+
+    /// A concurrent burst must spend the rotating refresh token exactly once.
+    #[tokio::test]
+    async fn concurrent_refreshes_do_not_race() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                token_response(Some("refresh-rotated-once")).into_bytes(),
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+
+        let harness = harness(&server).await;
+        expire_the_access_token(&harness.pool, harness.account).await;
+
+        let store = std::sync::Arc::new(harness.store);
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let store = std::sync::Arc::clone(&store);
+                let account = harness.account;
+                tokio::spawn(async move { store.access_token(account).await })
+            })
+            .collect();
+        for task in tasks {
+            assert_eq!(task.await.unwrap().unwrap(), "access-refreshed");
+        }
+
+        assert_eq!(
+            server.received_requests().await.unwrap().len(),
+            1,
+            "eight callers, one refresh - two would burn the rotating token"
+        );
     }
 
     /// The real client file must stay loadable - if it drifts, the live run

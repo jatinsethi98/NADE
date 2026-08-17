@@ -6,7 +6,14 @@
 //! forgetting to guard it is not a thing that can happen.
 
 pub mod auth;
+pub mod cursor;
+pub mod gmail_auth;
 pub mod health;
+pub mod mail;
+
+/// Our real response types, serialised and compared against `docs/contract/`.
+#[cfg(test)]
+mod contract_tests;
 
 use std::any::Any;
 
@@ -25,7 +32,16 @@ pub fn router(state: AppState) -> Router {
     // Unmatched `/v1/...` paths land here, behind the guard: an unauthenticated
     // caller gets 401 and learns nothing about which routes exist.
     let protected = Router::new()
-        // P2+ mounts /me, /mailboxes, /threads, /search, /agents, /feed, … here.
+        .route("/me", get(mail::me))
+        .route("/mailboxes", get(mail::mailboxes))
+        .route("/mailboxes/{id}/threads", get(mail::threads))
+        .route("/threads/{id}", get(mail::thread))
+        .route("/search", get(mail::search))
+        .route(
+            "/messages/{gmail_id}/attachments/{att_id}",
+            get(mail::attachment),
+        )
+        // P4+ mounts /agents, /feed, /notes, /drafts, /runs, /settings here.
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -36,6 +52,9 @@ pub fn router(state: AppState) -> Router {
     let v1 = Router::new()
         .route("/healthz", get(health::healthz))
         .route("/auth/pair", post(auth::pair))
+        // Browser-facing, so unauthenticated - backend/DECISIONS.md D15.
+        .route("/auth/gmail/start", get(gmail_auth::start))
+        .route("/auth/gmail/callback", get(gmail_auth::callback))
         // P3 adds /webhooks/gmail here - public, but OIDC-verified.
         .with_state(state)
         .fallback_service(protected);
@@ -128,12 +147,15 @@ mod tests {
         .await;
         let token = paired["token"].as_str().unwrap().to_owned();
 
+        // A route P2 serves: the guard lets it through.
         let response = authed_get(&app, "/v1/me", Some(&token)).await;
-        assert_eq!(
-            response.status(),
-            StatusCode::NOT_FOUND,
-            "P1 has no /me yet, but the request must get past the guard"
-        );
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // And a route no phase serves yet reaches the *router's* 404 rather
+        // than the guard's 401, which is what proves the middleware passes
+        // through rather than short-circuiting.
+        let response = authed_get(&app, "/v1/agents", Some(&token)).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(response_json(response).await["error"]["code"], "not_found");
     }
 

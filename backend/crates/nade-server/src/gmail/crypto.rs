@@ -15,19 +15,23 @@
 use std::path::{Path, PathBuf};
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, OsRng},
-    AeadCore, Aes256Gcm, Key, Nonce,
+    aead::{Aead, KeyInit},
+    AeadCore, Aes256Gcm,
 };
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
+use rand::TryRngCore as _;
 
 const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 
+type GcmKey = aes_gcm::Key<Aes256Gcm>;
+type GcmNonce = aes_gcm::Nonce<<Aes256Gcm as AeadCore>::NonceSize>;
+
 /// AES-256-GCM over short secrets.
 #[derive(Clone)]
 pub struct Cipher {
-    key: Key<Aes256Gcm>,
+    key: [u8; KEY_LEN],
 }
 
 /// Never derive `Debug` on something holding a key.
@@ -39,10 +43,12 @@ impl std::fmt::Debug for Cipher {
 
 impl Cipher {
     #[must_use]
-    pub fn from_key(key: [u8; KEY_LEN]) -> Self {
-        Self {
-            key: *Key::<Aes256Gcm>::from_slice(&key),
-        }
+    pub const fn from_key(key: [u8; KEY_LEN]) -> Self {
+        Self { key }
+    }
+
+    fn aead(&self) -> Aes256Gcm {
+        Aes256Gcm::new(&GcmKey::from(self.key))
     }
 
     /// Resolve the key: `NADE_TOKEN_KEY` (64 hex characters) if set, otherwise
@@ -82,9 +88,10 @@ impl Cipher {
             return Ok(Self::from_key(key));
         }
 
-        let key = Aes256Gcm::generate_key(OsRng);
         let mut bytes = [0u8; KEY_LEN];
-        bytes.copy_from_slice(key.as_slice());
+        rand::rngs::OsRng
+            .try_fill_bytes(&mut bytes)
+            .context("drawing a fresh token encryption key from the OS RNG")?;
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -103,14 +110,19 @@ impl Cipher {
     /// Returns an error only if the AEAD itself fails, which in practice means
     /// an allocation failure.
     pub fn encrypt(&self, plaintext: &str) -> Result<String> {
-        let cipher = Aes256Gcm::new(&self.key);
-        let nonce = Aes256Gcm::generate_nonce(OsRng);
-        let mut sealed = cipher
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        rand::rngs::OsRng
+            .try_fill_bytes(&mut nonce_bytes)
+            .context("drawing a nonce from the OS RNG")?;
+        let nonce = GcmNonce::from(nonce_bytes);
+
+        let mut sealed = self
+            .aead()
             .encrypt(&nonce, plaintext.as_bytes())
             .map_err(|error| anyhow::anyhow!("encrypting a gmail token: {error}"))?;
 
         let mut out = Vec::with_capacity(NONCE_LEN + sealed.len());
-        out.extend_from_slice(nonce.as_slice());
+        out.extend_from_slice(&nonce_bytes);
         out.append(&mut sealed);
         Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(out))
     }
@@ -126,15 +138,13 @@ impl Cipher {
             bail!("a stored gmail token is truncated");
         }
         let (nonce, body) = raw.split_at(NONCE_LEN);
-        let cipher = Aes256Gcm::new(&self.key);
-        let plaintext = cipher
-            .decrypt(Nonce::from_slice(nonce), body)
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "a stored gmail token could not be decrypted - the key changed, so the \
+        let nonce = GcmNonce::try_from(nonce).context("a stored gmail token has a short nonce")?;
+        let plaintext = self.aead().decrypt(&nonce, body).map_err(|_| {
+            anyhow::anyhow!(
+                "a stored gmail token could not be decrypted - the key changed, so the \
                      account must re-consent"
-                )
-            })?;
+            )
+        })?;
         String::from_utf8(plaintext).context("a decrypted gmail token is not UTF-8")
     }
 }
@@ -241,9 +251,14 @@ mod tests {
         let path = scratch("unused-key");
         let hex_key = hex::encode([9u8; KEY_LEN]);
         let cipher = Cipher::resolve(Some(&hex_key), &path).unwrap();
-        assert!(!path.exists(), "the file must not be created when the env var is set");
+        assert!(
+            !path.exists(),
+            "the file must not be created when the env var is set"
+        );
         assert_eq!(
-            cipher.decrypt(&Cipher::from_key([9u8; KEY_LEN]).encrypt("x").unwrap()).unwrap(),
+            cipher
+                .decrypt(&Cipher::from_key([9u8; KEY_LEN]).encrypt("x").unwrap())
+                .unwrap(),
             "x"
         );
 

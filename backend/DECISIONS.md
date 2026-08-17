@@ -153,3 +153,165 @@ Each job handler runs in its own task, so a panic surfaces as
 `catch_unwind` would have worked too, but it lies about unwind safety;
 spawn-and-join gives real isolation and, as a bonus, an `AbortHandle` the
 heartbeat task uses to stop a handler the instant its lease is stolen.
+
+---
+
+# P2 — "Mail lands"
+
+## D13 — Thread rollups are two tables, not an aggregate query.
+
+PLAN.md §Postgres schema does not list `threads` or `thread_labels`; the P2
+brief does say "maintain the per-thread rollups the list endpoint needs", and
+this is what that means.
+
+`GET /mailboxes/{id}/threads` is *filtered by label* and *ordered by time*, with
+a keyset cursor. Computed on the fly from `messages`, that is a `distinct on
+(thread_id) … order by internal_ts desc` over the whole mailbox followed by a
+sort — never an index scan, and never a total keyset order. So the rollup is
+maintained at ingest:
+
+| Table | Holds |
+|---|---|
+| `threads` | one row per thread: `last_ts`, newest message's subject/snippet/sender, `unread` (true if **any** message is), `msg_count`. |
+| `thread_labels` | the union of the thread's messages' labels, with `last_ts`/`unread` denormalised. |
+
+`thread_labels_keyset_idx (account_id, label_id, last_ts desc, thread_id desc)`
+is then exactly the walk the endpoint performs, which
+`api::mail::tests::thread_list_query_uses_an_index` proves with `EXPLAIN` over
+20 000 threads — index scan, no `Seq Scan`, and no `Sort` node.
+
+Cost: two more tables and a recompute per touched thread per sync.
+`sync::store::refresh_thread` is the single place "newest message wins" and "any
+unread message makes the thread unread" are decided.
+
+## D14 — `attachments.att_id` is ours, not Gmail's.
+
+The brief calls the column "Gmail's opaque id". It cannot be, and the reason is
+structural: **`messages.get?format=raw` does not carry `attachmentId` anywhere.**
+`format=raw` is one base64 blob of the whole RFC-822 message, and PLAN.md fixes
+`format=raw` as what the sync fetches, because it is the only format our MIME
+parser can see.
+
+So the parser assigns `att_id = base64url(sha256("<gmail_id>\0<index>\0<name>")[..16])`
+— 22 characters, opaque, URL-safe, and a pure function of bytes that never
+change, so a re-sync upserts the same row. `API.md`'s stated properties
+(opaque, long, may contain `-` and `_`) all hold.
+
+The proxy resolves it on demand: one `messages.get?format=full`, match the part
+by `(filename, body.size)` or by `Content-ID`, then either serve `body.data`
+directly (small parts) or call `attachments.get` (large ones). Two round trips
+on a download, none on a sync — and downloads are rare while syncs are not.
+
+Rejected alternative: a second `format=full` fetch per message-with-attachments
+*during* the sync, to capture Gmail's real ids. It costs 5 quota units per such
+message on every sync forever, and it would still need correlation logic,
+because the `full` part tree and our parsed part list are produced by different
+parsers.
+
+## D15 — Both `/auth/gmail/*` routes are unauthenticated.
+
+`API.md` §0 exempts only `/healthz`, `/auth/pair` and `/webhooks/gmail` from the
+bearer guard. Both Gmail OAuth routes have to join that list, because neither
+can carry a bearer token: `start` is a URL a human types into Safari, and
+`callback` is where Google's redirect lands.
+
+Reported to the contract lane as an `API.md` §0 omission rather than fixed in
+`docs/`.
+
+What stops this being a hole:
+
+* `callback` binds nothing without a `state` **we** minted, single-use, with a
+  10-minute TTL, plus the PKCE verifier stored beside it;
+* the pending-consent map is capped at 64 entries, so an unauthenticated route
+  cannot grow memory;
+* a completed consent for a **different** mailbox is refused with a 409 page
+  (`a_second_google_account_is_refused`) — v1 is single-account, and binding a
+  second one would silently repoint every stored message;
+* `start` leaks nothing: it 302s to Google's own consent screen.
+
+## D16 — Gmail tokens are AES-256-GCM at rest.
+
+`0001_init.sql` already said `access_token` holds "AES-GCM ciphertext … (P2)".
+This is that, plus the same treatment for `refresh_token`, which is the one that
+matters — it mints access tokens until the user revokes it.
+
+The key is `NADE_TOKEN_KEY` (64 hex characters) or, unset, a 0600 file at
+`backend/secrets/token-key` minted on first use — the same pattern as the
+pairing-code mirror (D4), in the same already-gitignored directory. Losing the
+key means the account re-consents; it does not mean data loss.
+
+## D17 — `GET /me` answers before an account exists.
+
+`API.md` §1 does not say what `/me` returns before the first Gmail connection.
+The options were `404`, a `409 needs_reauth`, or an answer. We answer:
+`{"email": "", "status": "needs_reauth"}`.
+
+`needs_reauth` already means "Gmail sync is paused and the client shows the
+re-sign-in row in Settings", which is exactly the right screen for "not
+connected yet". Keeping `/me` total also means the iOS lane never special-cases
+a missing body. Reported as an `API.md` gap.
+
+## D18 — `thread.mailbox_name` prefers a user label.
+
+`API.md` §2 says it is "the label the thread is filed under, for the footer" and
+leaves the choice open when a thread carries several — which is always: every
+inbox thread is in `INBOX` **and** a `CATEGORY_*`. Showing those would make the
+footer read "Inbox" for every thread in the app.
+
+So: the first **user** label in mailbox order wins; failing that, the first
+whitelisted system label; failing that, `""`. `docs/contract/thread.json` says
+`"To Reply"` for a thread that is also in `INBOX` and `CATEGORY_PERSONAL`, which
+is the same rule.
+
+## D19 — `reqwest` takes `rustls-no-provider`, and we install `ring`.
+
+`reqwest 0.13`'s default rustls build is `aws-lc-rs`, which needs `cmake` — not
+present on this machine — and `sqlx` already links `ring`. Two crypto providers
+in one process is a trap: whichever calls `CryptoProvider::get_default()` first
+wins, and the failure is a runtime panic rather than a build error.
+
+So the crate takes `rustls-no-provider` and `gmail::http_client()` installs
+`ring` exactly once, behind a `Once`. Building a client any other way panics at
+construction, which is why `gmail::tests::no_bare_reqwest_clients` greps for
+`reqwest::Client::new()` and fails the build — the same enforcement style as D1.
+
+## D20 — The dev caps are `NADE_`-prefixed.
+
+PLAN.md writes the cap as `MAX_SYNC_MESSAGES`. Every other variable this crate
+reads is `NADE_`-prefixed, and `config::tests::env_example_documents_every_var`
+keeps the list and `backend/.env.example` in lockstep either way. The variable
+is `NADE_MAX_SYNC_MESSAGES`; the cap's *value* is PLAN.md's 2 000, clamped in
+`Config::from_env` rather than trusted, and asserted by
+`sync::tests::the_dev_caps_are_applied` alongside `newer_than:30d`, 45 per batch
+and one batch per second.
+
+## D21 — A placeholder `nade-gmail-sim/src/lib.rs`.
+
+Another lane added `crates/nade-gmail-sim` to `backend/Cargo.toml`'s `members`
+before writing its sources. Cargo refuses to load a workspace whose member has
+no targets, so **every** command in the workspace failed, including
+`cargo test -p nade-server`. A two-line placeholder `src/lib.rs` restores the
+workspace for both lanes and is expected to be overwritten by the real crate.
+Removing the member instead would have broken theirs.
+
+## D22 — Two error codes added to `error.rs` beyond P1's five.
+
+`upstream_unavailable` (502) and `payload_too_large` (413), plus `needs_reauth`
+(409), all of which `API.md` §0's table already defines and
+`docs/contract/error_*.json` already ships. A Gmail failure after retries is a
+**502**, never a 500: the fault is upstream and the client's correct response
+(retry later) is different. `error::tests::every_served_code_matches_its_contract_fixture`
+byte-checks all eight codes we serve against their fixtures, message included —
+the message is the user's only explanation, so it is contract, not detail.
+
+## D23 — Amending `0001_init.sql` invalidates an existing dev database.
+
+The P2 brief says to amend the migration in place, because nothing has shipped.
+`sqlx`'s migrator records a checksum per version and refuses a modified one, so
+an already-migrated **dev** database fails to boot with
+`migration 1 was previously applied but has been modified`.
+
+Test databases are created fresh per test and never see this. The dev one is
+fixed by `just db-reset`, added for the purpose. Recorded here because the
+symptom is a startup failure with no obvious cause, and it will recur every time
+P3 touches the migration before the first real deployment.
