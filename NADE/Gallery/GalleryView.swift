@@ -18,6 +18,7 @@ struct GalleryView: View {
     let initialSection: String?
 
     @State private var segmented: NoteMode = .read
+    @State private var status = "Published"
     @State private var invocation: Invocation = .onMail
     @State private var ends: Ends = .never
     @State private var approvalOn = true
@@ -28,6 +29,7 @@ struct GalleryView: View {
     @State private var filledField = "Priya Raghavan"
     @State private var longField = "supercalifragilisticexpialidocious-token-0123456789"
     @State private var tab: NTab = .ask
+    @State private var hitChip = false
 
     enum NoteMode: String, CaseIterable { case read = "Read", write = "Write" }
     enum Invocation: String, CaseIterable { case onMail, onSchedule, manual }
@@ -35,6 +37,31 @@ struct GalleryView: View {
 
     /// A 200-character unbroken token — the worst string this UI can be handed.
     private static let pathological = String(repeating: "Xq7", count: 67)
+
+    /// 1a's draft sentence: `When {when_span}, {do_span}.` The agent object
+    /// carries `when_span` / `do_span`, so the sentence is **composed**, never
+    /// parsed — DESIGN.md §3 1a.
+    ///
+    /// Known deviation, recorded in IOS_DECISIONS.md: the mockup's spans carry
+    /// `border-bottom: 1px solid accent`, a **rule** rather than a typographic
+    /// underline, and SwiftUI's `Text` will not give an underline a colour of
+    /// its own — `Text.underline(_:color:)`, SwiftUI's `underlineStyle` and the
+    /// UIKit scope's `underlineColor` all lose to the run's foreground, so the
+    /// rule renders in ink. The faithful accent rule needs per-span layout,
+    /// which P3 has to build anyway because the spans are separately tappable.
+    private static var draftSentence: AttributedString {
+        func run(_ text: String, underlined: Bool = false) -> AttributedString {
+            var s = AttributedString(text)
+            s.foregroundColor = Theme.Color.ink
+            if underlined { s.underlineStyle = .single }
+            return s
+        }
+        return run("When ")
+            + run("a recruiter emails", underlined: true)
+            + run(", ")
+            + run("write a note with the next steps", underlined: true)
+            + run(".")
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -51,6 +78,9 @@ struct GalleryView: View {
                     controlSection
                     tabBarSection
                     edgeSection
+                    accessibilitySizeSection
+                    accessibilitySizeSectionContinued
+                    motionSection
                 }
                 .padding(.bottom, Theme.Space.s8)
             }
@@ -265,8 +295,10 @@ struct GalleryView: View {
                 NButton("Approve", variant: .primary) {}
                 NButton("Edit", variant: .secondary) {}
                 NButton("Skip", variant: .ghost) {}
-                NButton(systemImage: "arrow.up", label: "Send") {}
-                NButton(systemImage: "sparkles", label: "Ask", corner: .pill) {}
+                // v1 takes no outbound action: this button submits the query
+                // (`POST /ask`), it does not send anything. DESIGN.md §4.
+                NButton(systemImage: "arrow.up", label: "Ask", glyph: 17) {}
+                NButton(systemImage: "sparkles", label: "Ask", glyph: 16, corner: .pill, box: 38) {}
             }
 
             GalleryLabel("Pressed (`:active` wash)")
@@ -281,17 +313,25 @@ struct GalleryView: View {
                 NButton("Approve", variant: .primary) {}.disabled(true)
                 NButton("Edit", variant: .secondary) {}.disabled(true)
                 NButton("Skip", variant: .ghost) {}.disabled(true)
-                NButton(systemImage: "arrow.up", label: "Send") {}.disabled(true)
+                NButton(systemImage: "arrow.up", label: "Ask", glyph: 17) {}.disabled(true)
             }
 
-            GalleryLabel("With a glyph · block width · empty label")
-            VStack(alignment: .leading, spacing: Theme.Space.s2) {
-                HStack(spacing: Theme.Space.s2) {
-                    NButton("Add a schedule", systemImage: "plus", variant: .ghost) {}
-                    NButton("", variant: .secondary) {}
-                }
-                NButton("Run once now", variant: .primary) {}
-                    .frame(maxWidth: .infinity)
+            GalleryLabel("With a glyph · empty label (VoiceOver still hears “Button”)")
+            HStack(spacing: Theme.Space.s2) {
+                NButton("Add a schedule", systemImage: "plus", variant: .ghost) {}
+                NButton("", variant: .secondary) {}
+            }
+
+            GalleryLabel("`flex: 1` — 1c’s “Run once now” beside an intrinsic “Delete”")
+            HStack(spacing: 10) {
+                NButton("Run once now", variant: .primary, width: .flexible) {}
+                NButton("Delete", variant: .secondary) {}
+            }
+
+            GalleryLabel("`flex: 1` on both — 1d’s sheet footer")
+            HStack(spacing: 10) {
+                NButton("Cancel", variant: .secondary, width: .flexible) {}
+                NButton("Every 2 weeks", variant: .primary, width: .flexible) {}
             }
         }
     }
@@ -300,25 +340,42 @@ struct GalleryView: View {
 
     private var inputSection: some View {
         GallerySection("Inputs", id: "inputs") {
-            GalleryLabel("Rounded — empty, filled, focused")
+            GalleryLabel("DS `.input` — empty, filled, focused (14 pt · 6/10 · 36)")
             VStack(spacing: Theme.Space.s2) {
                 NTextField("Search notes", text: $emptyField)
                 NTextField("Search notes", text: $filledField)
                 NTextField("Search notes", text: $emptyField, showsFocusRing: true)
             }
 
-            GalleryLabel("Pill — the ask field, 40 pt, with its send button")
+            // Every ask field in the design, at its own screen's numbers.
+            // DESIGN.md §2 — none of the four share a row of that table.
+            GalleryLabel("2a feed — 13.5 pt · 8/15 · 38 · `sparkles` 16")
             HStack(spacing: 10) {
-                NTextField("Ask, search, or describe an agent", text: $emptyField, style: .pill, minHeight: 40)
-                NButton(systemImage: "arrow.up", label: "Send", corner: .pill, box: 40) {}
+                NTextField("Ask, search, or describe an agent", text: $emptyField, metrics: .askPinned)
+                NButton(systemImage: "sparkles", label: "Ask", glyph: 16, corner: .pill, box: 38) {}
             }
 
-            GalleryLabel("Pill — focused, 44 pt (2b), sparkles send")
+            GalleryLabel("1a docked — 14 pt · 9/15 · 40 · `arrow.up` 17")
+            HStack(spacing: 10) {
+                NTextField("Ask, search, or describe an agent", text: $emptyField, metrics: .askDocked)
+                NButton(systemImage: "arrow.up", label: "Ask", glyph: 17, corner: .pill, box: 40) {}
+            }
+
+            GalleryLabel("2a focus / 2b — 14 pt · 10/16 · 44 · accent border · `arrow.up` 18")
             HStack(spacing: 10) {
                 NTextField("Ask, search, or describe an agent", text: $emptyField,
-                           style: .pill, minHeight: 44, showsFocusRing: true)
-                NButton(systemImage: "sparkles", label: "Ask", corner: .pill, box: 44) {}
+                           metrics: .askCentred, showsFocusRing: true)
+                NButton(systemImage: "arrow.up", label: "Ask", glyph: 18, corner: .pill, box: 44) {}
             }
+
+            GalleryLabel("1f thread — 13.5 pt · 10/15 · `sparkles` 16")
+            HStack(spacing: 10) {
+                NTextField("Reply, or ask for a draft…", text: $emptyField, metrics: .askThread)
+                NButton(systemImage: "sparkles", label: "Ask for a draft", glyph: 16, corner: .pill, box: 38) {}
+            }
+
+            GalleryLabel("1h search pill — 13.5 pt · 8/14 · no button")
+            NTextField("Search notes", text: $emptyField, metrics: .searchPill)
 
             GalleryLabel("Very long unbroken value")
             NTextField("Token", text: $longField)
@@ -338,23 +395,60 @@ struct GalleryView: View {
                 meta: "9 minutes ago · 4 sources"
             )
 
-            GalleryLabel("Accent border — the draft-agent card (1a)")
-            NCard(border: .accent) {
-                NCardKicker("Draft agent")
-                NCardTitle("Job Search Tracker", size: 19)
-                Text("When a recruiter emails, write a note with the next steps.")
-                    .font(Theme.Font.body(15))
-                    .nadeLineHeight(1.85, size: 15)
-                    .foregroundStyle(Theme.Color.ink)
-                HStack(spacing: 6) {
-                    NTag("write_note", style: .outline)
-                    NTag("Approval required", style: .neutral)
-                    NTag("Draft", style: .neutral)
+            // 1a's draft card, to the mockup's own numbers: padding 15/15/13,
+            // internal gaps 10 / 12 / 14 — and the card **closes before the
+            // buttons**. The buttons are a sibling with margin-top 16, gap 8.
+            GalleryLabel("Accent border — the draft-agent card (1a), buttons outside")
+            VStack(alignment: .leading, spacing: 0) {
+                NCard(border: .accent, padding: NCardPadding.draftAgent, spacing: 0) {
+                    NCardKicker("Draft agent")
+                    NCardTitle("Job Search Tracker", size: 19)
+                        .padding(.top, 10)
+                    // `When {when_span}, {do_span}.` — the two spans are
+                    // underlined 1 pt accent and are separately tappable on the
+                    // real screen. DESIGN.md §3 1a; the agent object carries
+                    // `when_span` / `do_span`, so the sentence is composed,
+                    // never parsed.
+                    Text(Self.draftSentence)
+                        .font(Theme.Font.body(15))
+                        .nadeLineHeight(1.85, size: 15)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 12)
+                    HStack(spacing: 6) {
+                        NTag("write_note", style: .outline)
+                        NTag("Approval required", style: .neutral)
+                        NTag("Draft", style: .neutral)
+                    }
+                    .padding(.top, 14)
                 }
                 HStack(spacing: 8) {
                     NButton("Save as draft", variant: .primary) {}
                     NButton("Start over", variant: .secondary) {}
                 }
+                .padding(.top, 16)
+            }
+
+            GalleryLabel("1f agent card — padding 14/15, kicker row, buttons inside")
+            NCard(border: .accent, padding: NCardPadding.agentCard, spacing: 0) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    SectionEyebrow("Job Search Tracker", color: Theme.Color.accent)
+                    Spacer(minLength: Theme.Space.s2)
+                    Text("waiting on you")
+                        .font(Theme.Font.body(11))
+                        .foregroundStyle(Theme.Color.ink62)
+                }
+                Text("Two next steps found. Ready to add them to Notion → Jobs.")
+                    .font(Theme.Font.body(14))
+                    .nadeLineHeight(1.7, size: 14)
+                    .foregroundStyle(Theme.Color.ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 9)
+                HStack(spacing: 8) {
+                    NButton("Save note", variant: .primary) {}
+                    NButton("Edit", variant: .secondary) {}
+                    NButton("Skip", variant: .ghost) {}
+                }
+                .padding(.top, 12)
             }
 
             GalleryLabel("Long unbroken string")
@@ -403,40 +497,43 @@ struct GalleryView: View {
 
     private var controlSection: some View {
         GallerySection("Controls", id: "controls") {
-            GalleryLabel("Segmented — 1i Read / Write, and 1c Status")
-            HStack(spacing: Theme.Space.s3) {
-                NSegmented(options: NoteMode.allCases, selection: $segmented,
-                           fontSize: 12, paddingV: 5, paddingH: 12) { $0.rawValue }
-                NSegmented(options: ["Draft", "Published"], selection: .constant("Published")) { $0 }
+            GalleryLabel("Segmented — DS `7/12` @13 · 1c `6/14` @13 · 1i `5/12` @12")
+            VStack(alignment: .leading, spacing: Theme.Space.s2) {
+                NSegmented(options: ["Draft", "Published"], selection: $status, metrics: .ds) { $0 }
+                NSegmented(options: ["Draft", "Published"], selection: $status, metrics: .status) { $0 }
+                NSegmented(options: NoteMode.allCases, selection: $segmented, metrics: .noteMode) { $0.rawValue }
             }
 
-            GalleryLabel("Radio rows — 1c Invocation")
+            GalleryLabel("Segmented — long labels on a 320 pt row (they compress, never overflow)")
+            NSegmented(
+                options: ["Everything that ever arrived", "Only the unread ones"],
+                selection: .constant("Only the unread ones")
+            ) { $0 }
+                .frame(width: 320, alignment: .leading)
+
+            GalleryLabel("Radio rows — 1c Invocation (label 15 · gap 11 · padding 11 · top divider)")
             VStack(spacing: 0) {
                 Hairline()
-                NRadioRow("On mail", hint: "Runs when a matching message arrives",
-                          isSelected: invocation == .onMail) { invocation = .onMail }
+                NRadioRow("When mail arrives", hint: "Runs on its own, on matching mail",
+                          isSelected: invocation == .onMail, metrics: .invocation) { invocation = .onMail }
                 Hairline()
-                NRadioRow("On a schedule", hint: "Every weekday at 8:00",
-                          isSelected: invocation == .onSchedule) { invocation = .onSchedule }
+                NRadioRow("Only when I ask", hint: "You tap Run on the agent",
+                          isSelected: invocation == .manual, metrics: .invocation) { invocation = .manual }
                 Hairline()
-                NRadioRow("Manual", hint: "Only when you tap Run",
-                          isSelected: invocation == .manual) { invocation = .manual }
+                NRadioRow("On a schedule", hint: "Daily, weekly, or a custom repeat",
+                          isSelected: invocation == .onSchedule, metrics: .invocation) { invocation = .onSchedule }
             }
 
-            GalleryLabel("Radio rows with values — 1d Ends")
+            GalleryLabel("Radio rows — 1d Ends (label 14 · gap 11 · padding 9 · no dividers · value spoken)")
             VStack(spacing: 0) {
-                Hairline()
-                NRadioRow("Never", isSelected: ends == .never, action: { ends = .never }) {
-                    NRadioValue("—", isActive: ends == .never)
-                }
-                Hairline()
-                NRadioRow("On date", isSelected: ends == .onDate, action: { ends = .onDate }) {
-                    NRadioValue("16 Sep 2026", isActive: ends == .onDate)
-                }
-                Hairline()
-                NRadioRow("After", isSelected: ends == .after, action: { ends = .after }) {
-                    NRadioValue("12 runs", isActive: ends == .after)
-                }
+                NRadioRow("Never", isSelected: ends == .never, metrics: .ends) { ends = .never }
+                    .accessibilityIdentifier("ends.never")
+                NRadioRow("On", value: "6 Jan 2027",
+                          isSelected: ends == .onDate, metrics: .ends) { ends = .onDate }
+                    .accessibilityIdentifier("ends.onDate")
+                NRadioRow("After", value: "13 runs",
+                          isSelected: ends == .after, metrics: .ends) { ends = .after }
+                    .accessibilityIdentifier("ends.after")
             }
 
             GalleryLabel("Toggle — 46 × 26, 20 pt knob, 0.18 s ease")
@@ -462,8 +559,10 @@ struct GalleryView: View {
             }
             .foregroundStyle(Theme.Color.ink)
 
-            GalleryLabel("Stepper — 1d “Repeat every”")
-            HStack(spacing: Theme.Space.s3) {
+            // 1d's row is `align-items: center; gap: 12` end to end — the same
+            // 12 between the label, the boxes and the count.
+            GalleryLabel("Stepper — 1d “Repeat every” (row gap 12, chip inner gap 8)")
+            HStack(spacing: NStepper.gap) {
                 Text("Repeat every").font(Theme.Font.body(14)).foregroundStyle(Theme.Color.ink)
                 NStepper("Repeat every", value: $every, in: 1...30)
                 Spacer(minLength: 0)
@@ -510,28 +609,93 @@ struct GalleryView: View {
             GalleryLabel("Right-to-left layout")
             VStack(alignment: .leading, spacing: Theme.Space.s2) {
                 NToggle("Ask before it acts", isOn: $approvalOn)
-                NStepper("Repeat every", value: $every, in: 1...30)
-                NSegmented(options: NoteMode.allCases, selection: $segmented) { $0.rawValue }
+                HStack(spacing: NStepper.gap) {
+                    NStepper("Repeat every", value: $every, in: 1...30)
+                    Spacer(minLength: 0)
+                    UnitChip("week")
+                }
+                NSegmented(options: NoteMode.allCases, selection: $segmented, metrics: .noteMode) { $0.rawValue }
                 NTabBar(selection: .constant(.mail)).accessibilityHidden(true)
             }
             .environment(\.layoutDirection, .rightToLeft)
 
-            GalleryLabel("Largest accessibility size (AX5)")
-            VStack(alignment: .leading, spacing: Theme.Space.s2) {
+            // EDGE (E17). Driven by `HitTargetUITests`, which reads each
+            // element's frame: the drawn box is the design's, the target is 44.
+            GalleryLabel("Hit targets — every control below draws at its design "
+                         + "size and answers taps over 44 × 44")
+            HStack(spacing: Theme.Space.s6) {
+                NChip("Receipts", isSelected: hitChip) { hitChip.toggle() }
+                    .accessibilityIdentifier("hit.chip")
+                NToggle("Ask before it acts", isOn: $approvalOff)
+                    .accessibilityIdentifier("hit.toggle")
+                NButton(systemImage: "arrow.up", label: "Ask", glyph: 17, corner: .pill, box: 38) {}
+                    .accessibilityIdentifier("hit.icon")
+            }
+            HStack(spacing: Theme.Space.s6) {
+                NStepper("Repeat every", value: $every, in: 1...30)
+                    .accessibilityIdentifier("hit.stepper")
+                NSegmented(options: ["Draft", "Published"], selection: $status, metrics: .status) { $0 }
+                    .accessibilityIdentifier("hit.segmented")
+            }
+        }
+    }
+
+    // MARK: 11 · Largest accessibility size
+
+    /// Its own section, and its own screenshot. The previous delivery folded
+    /// this into "Edge cases", the screenshot cut off mid-card, and the AX5
+    /// buttons, icon buttons and tab bar were never actually looked at.
+    private var accessibilitySizeSection: some View {
+        GallerySection("Largest accessibility size (AX5)", id: "ax5") {
+            VStack(alignment: .leading, spacing: Theme.Space.s3) {
                 NCard(kicker: "Launch Digest", title: "4 announcements", body: "Body text at AX5.", meta: "9m")
                 HStack(spacing: Theme.Space.s2) {
                     NButton("Approve", variant: .primary) {}
                     NButton("Skip", variant: .ghost) {}
                 }
+                // Icon buttons were missing from the AX5 block, which is
+                // exactly where a fixed box and a scaling glyph collide.
+                HStack(spacing: Theme.Space.s2) {
+                    NButton(systemImage: "sparkles", label: "Ask", glyph: 16, corner: .pill, box: 38) {}
+                    NButton(systemImage: "arrow.up", label: "Ask", glyph: 17, corner: .pill, box: 40) {}
+                    NButton(systemImage: "arrow.up", label: "Ask", glyph: 18, corner: .pill, box: 44) {}
+                    NButton(systemImage: "plus", label: "New") {}
+                }
+                NTextField("Ask, search, or describe an agent", text: $emptyField, metrics: .askDocked)
+                HStack(spacing: Theme.Space.s2) {
+                    NTag("Draft", style: .neutral)
+                    NChip("Recruiters", isSelected: true) {}
+                }
+            }
+            .dynamicTypeSize(.accessibility5)
+        }
+    }
+
+    /// The rest of AX5. Two sections, not one, because a single one is taller
+    /// than the screen and its screenshot would be cut off — which is exactly
+    /// how the first delivery came to ship an AX5 claim nobody had looked at.
+    private var accessibilitySizeSectionContinued: some View {
+        GallerySection("AX5, continued", id: "ax5b") {
+            VStack(alignment: .leading, spacing: Theme.Space.s3) {
+                NStepper("Repeat every", value: $every, in: 1...30)
+                NSegmented(options: ["Draft", "Published"], selection: $status, metrics: .status) { $0 }
+                NRadioRow("On a schedule", hint: "Daily, weekly, or a custom repeat",
+                          isSelected: true, metrics: .invocation) {}
                 NTabBar(selection: .constant(.calendar)).accessibilityHidden(true)
             }
             .dynamicTypeSize(.accessibility5)
+        }
+    }
 
+    // MARK: 12 · Reduce Motion
+
+    private var motionSection: some View {
+        GallerySection("Reduce Motion", id: "motion") {
             // `\.accessibilityReduceMotion` is a read-only environment value,
             // so it cannot be forced here. `NToggle` reads it and asks
             // `Theme.Motion.toggle(reduceMotion:)`, which returns nil — asserted
             // in ThemeTests.testToggleAnimationRespectsReduceMotion.
-            GalleryLabel("Reduce Motion — the knob jumps instead of sliding "
+            GalleryLabel("The knob jumps instead of sliding "
                          + "(Theme.Motion.toggle returns no animation)")
             NToggle("Ask before it acts", isOn: $approvalOff)
         }
@@ -739,13 +903,14 @@ private struct ShadowChip: View {
     }
 }
 
-/// 1d's unit chip: 1 pt border, radius 4, padding 6 × 12, 14 pt, 10 pt accent ▼.
+/// 1d's unit chip: 1 pt border, radius 4, padding 6 × 12, 14 pt, **inner gap 8**,
+/// 10 pt accent ▼ (DESIGN.md §3 1d; the mockup's own `gap:8px`).
 private struct UnitChip: View {
     let unit: String
     init(_ unit: String) { self.unit = unit }
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Text(unit).font(Theme.Font.body(14)).foregroundStyle(Theme.Color.ink)
             NIcon("chevron.down", size: 10, weight: .light, relativeTo: .caption2)
                 .foregroundStyle(Theme.Color.accent)

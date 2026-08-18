@@ -19,7 +19,7 @@ use crate::{
     fault::{cost, Fault, FaultRule, FaultTable, Quota},
     history::{HistoryRecord, HistoryType},
     ids::parse_attachment_id,
-    label::LabelType,
+    label::{self, LabelType},
     mailbox::Mailbox,
     message::MessageSpec,
     query::Query,
@@ -558,12 +558,22 @@ impl Simulator {
 
     fn handle_messages_list(&self, request: &SimRequest, now: i64) -> SimResponse {
         let raw_query = request.query_one("q").unwrap_or_default().to_owned();
-        let include_spam_trash = request.query_one("includeSpamTrash") == Some("true");
         let label_filter: Vec<String> = request
             .query_all("labelIds")
             .into_iter()
             .map(ToOwned::to_owned)
             .collect();
+        // MEASURED: `includeSpamTrash=false` is not a guarantee about anything.
+        // It gates neither `q` nor `labelIds` — `in:anywhere` takes a baseline of
+        // 84 to 93, `labelIds=SPAM` returns 122 and `labelIds=TRASH` returns 1,
+        // all with the parameter at its default. It is a floor, never a ceiling,
+        // and a client that keeps Trash out of a sync by relying on it alone is
+        // wrong.
+        let include_spam_trash = request.query_one("includeSpamTrash") == Some("true")
+            || Query::parse(&raw_query).reaches_spam_trash()
+            || label_filter
+                .iter()
+                .any(|id| label::HIDDEN_WITHOUT_SPAM_TRASH.contains(&id.as_str()));
         let max_results = clamp_max_results(
             request.query_one("maxResults"),
             LIST_DEFAULT_MAX,
@@ -683,12 +693,22 @@ impl Simulator {
 
     fn handle_threads_list(&self, request: &SimRequest, now: i64) -> SimResponse {
         let raw_query = request.query_one("q").unwrap_or_default().to_owned();
-        let include_spam_trash = request.query_one("includeSpamTrash") == Some("true");
         let label_filter: Vec<String> = request
             .query_all("labelIds")
             .into_iter()
             .map(ToOwned::to_owned)
             .collect();
+        // MEASURED: `includeSpamTrash=false` is not a guarantee about anything.
+        // It gates neither `q` nor `labelIds` — `in:anywhere` takes a baseline of
+        // 84 to 93, `labelIds=SPAM` returns 122 and `labelIds=TRASH` returns 1,
+        // all with the parameter at its default. It is a floor, never a ceiling,
+        // and a client that keeps Trash out of a sync by relying on it alone is
+        // wrong.
+        let include_spam_trash = request.query_one("includeSpamTrash") == Some("true")
+            || Query::parse(&raw_query).reaches_spam_trash()
+            || label_filter
+                .iter()
+                .any(|id| label::HIDDEN_WITHOUT_SPAM_TRASH.contains(&id.as_str()));
         let max_results = clamp_max_results(
             request.query_one("maxResults"),
             LIST_DEFAULT_MAX,

@@ -7,7 +7,7 @@ are marked ✎ and explained in §7.
 Every edge case below is either a named test or an `// EDGE:` comment beside the
 code. Tests are preferred; the table records which.
 
-**Status: 266 tests, all passing.** 179 unit, 62 `tests/edges.rs`, 7
+**Status: 272 tests, all passing.** 180 unit, 67 `tests/edges.rs`, 7
 `tests/determinism.rs`, 7 `tests/hygiene.rs`, 6 `tests/sync_story.rs`, 5 doc.
 
 ---
@@ -76,7 +76,7 @@ is the second.
 | A1 | Crate and all targets build clean | `cargo build -p nade-gmail-sim --all-targets` | ✅ |
 | A2 | No clippy warnings anywhere, including tests | `cargo clippy -p nade-gmail-sim --all-targets -- -D warnings` | ✅ |
 | A3 | Formatted | `cargo fmt --check` | ✅ |
-| A4 | All unit, integration and doc tests green | `cargo test -p nade-gmail-sim` | ✅ 266 |
+| A4 | All unit, integration and doc tests green | `cargo test -p nade-gmail-sim` | ✅ 272 |
 | A5 | Rustdoc builds with no warnings | `cargo doc -p nade-gmail-sim --no-deps` | ✅ |
 | A6 | The above pass **twice consecutively** | run the block twice | ✅ |
 | A7 | One implementation, two transports | `determinism::http_and_in_process_agree_byte_for_byte` | ✅ |
@@ -138,17 +138,40 @@ the client to avoid perfectly good queries, which is its own kind of wrong.
 | `from:` with a genuinely empty argument is a no-op — `newer_than:3d from:` → 85 | **measured**: the full baseline |
 | An unknown operator matches nothing, never a `400` — `zzz:qqq` → 0 | **measured** |
 | `q=label:` is case-insensitive | **measured** |
-| A bare date is **midnight Pacific**, not UTC | documented only |
+| `newer_than:Nd` is a **rolling instant** — `1d` → 35 ≡ `after:<now − 24h>` → 35, exact; again at 30 days (86 ≡ 86) | ✎ **measured** |
+| `newer_than:Nm` is a **calendar month floored to midnight UTC** — `1m` → 88 ≡ `after:<2026-07-17 00:00 UTC>` → 88, while `after:<now − 31d>` → 86 | ✎ **measured** |
+| A bare date is **midnight UTC** — `after:2026/08/10` → 260 ≡ `<Aug 10 00:00 UTC>` → 260; Pacific gives 257 | ✎ **measured**; the docs say Pacific and are wrong |
+| `in:anywhere` overrides `includeSpamTrash=false` — 84 → 93 with the parameter untouched | ✎ **measured** |
+| `in:trash` / `in:spam` widen scope the same way — 1 and 122, parameter untouched | ✎ **measured** |
+| `labelIds` reaches Spam and Trash too — `labelIds=TRASH` → 1, `labelIds=SPAM` → 122, parameter unset | ✎ **measured** |
+| `q=label:` takes the **name**, never the id — `label:Subscriptions` → 500 capped, `label:Label_8725…` → **0** | ✎ **measured** |
+| A bare space inside a label name is tolerated — quoted / hyphenated / lowercased / bare-space all → 18 | ✎ **measured** |
 | Ranges are half-open `[after, before)` | documented only, via Google's worked example |
-| `m` = 30 days, `y` = 365 days | **unmeasured** — a stated approximation |
+| `newer_than:1y` | **unmeasured** — every scope stayed above the 500-id page cap. Modelled as 12 calendar months by analogy with `m` |
 
-Two rules coexist and are easy to conflate: operator **names** are
-case-insensitive, while the boolean **keyword** `or` is case-sensitive. Both are
-measured, and the simulator implements both.
+**Nothing in the query layer is inferred any more.** Every behaviour is measured
+or explicitly marked otherwise.
+
+`includeSpamTrash=false` is **not a guarantee about anything**: it gates neither
+`q` nor `labelIds`. It is a floor, never a ceiling.
+
+Two pairs coexist and are easy to conflate.
+
+* Operator **names** are case-insensitive; the boolean **keyword** `or` is
+  case-sensitive.
+* `newer_than:Nd` and `newer_than:Nm` differ **in kind**, not just magnitude:
+  the day form is a rolling instant to the millisecond, the month form is a
+  calendar step floored to midnight UTC. Nothing in the documentation hints at
+  this, and no amount of reading would have found it — `1m` is not "30d with a
+  nicer name", and on some days it reaches further back than `31d` does.
+
+Both pairs are measured, and the simulator implements all four behaviours.
 
 Only `MM/DD/YYYY` is refused despite being documented: `03/04/2004` is genuinely
 ambiguous against `YYYY/MM/DD` and Google publishes no disambiguation rule, so
-zero results is safer than three confidently wrong months.
+zero results is safer than three confidently wrong months. Note that with dates
+now measured as UTC there is no Pacific offset anywhere in this crate, and so no
+DST ambiguity window either.
 
 **A malformed query is indistinguishable from an empty inbox.** `messages.list`
 answers `200` with no `messages` key; there is no `400` path for `q` at all. A
@@ -273,6 +296,12 @@ out of the adversarial self-review.
 | E82 ✎ | Malformed `q` | always `200` with no `messages` key — indistinguishable from an empty inbox | `a_malformed_query_is_indistinguishable_from_an_empty_inbox` | ✅ |
 | E83 ✎ | `resultSizeEstimate` saturates | three queries with counts 40/3/37 all report the same estimate; only a zero-result query reports 0 | `result_size_estimate_saturates_and_cannot_compare_two_queries` | ✅ |
 | E84 ✎ | A page caps at 500 ids | `maxResults=1000` yields 500 + a token; two different mailbox sizes both hit the ceiling | `a_single_page_caps_at_five_hundred_ids` | ✅ |
+| E85 ✎ | `Nd` vs `Nm` differ in kind | the day form rolls to the millisecond; the month form lands on midnight UTC of the calendar date, and catches mail a 30-day window misses | `day_spans_roll_and_month_spans_land_on_a_calendar_date`, `query::tests::a_day_span_is_a_rolling_instant_and_a_month_span_is_a_calendar_date` | ✅ |
+| E86 ✎ | A bare date's timezone | midnight **UTC**, not Pacific — the documented behaviour is simply wrong | `query::tests::a_bare_date_means_midnight_utc_whatever_the_docs_say` | ✅ |
+| E87 ✎ | `in:anywhere` vs `includeSpamTrash` | `q` **and** `labelIds` both override the parameter — it gates neither | `in_anywhere_reaches_spam_and_trash_without_the_parameter` | ✅ |
+| E88 ✎ | A label id passed to `q=label:` | matches nothing, `200`, no error — and the id is exactly what a program has to hand | `a_label_id_passed_to_q_matches_nothing_and_says_nothing` | ✅ |
+| E89 ✎ | Label names with spaces | quoted, hyphenated, lowercased and bare-space spellings all agree; a leftover word stays a search term and a following operator is not swallowed | `every_spelling_of_a_spaced_label_name_agrees` | ✅ |
+| E90 ✎ | A zero is never evidence | five different mistakes produce the identical empty `200` | `four_different_mistakes_all_produce_the_same_empty_result` | ✅ |
 
 ---
 
@@ -340,31 +369,74 @@ The first draft said unpadded. Google's own client samples call
 `data`, which raises on missing padding — so Gmail pads. The simulator pads, and
 its decoder accepts both.
 
-### 7.6 ✎ The `q` parser was wrong in both directions, and a live probe fixed it
+### 7.6 ✎ Documented is not the same as true
 
-Two rounds of correction, and the second reversed part of the first.
+Three rounds, and the through-line is the finding.
 
-**Round one, from the published docs.** Six things where the first draft was
-*more permissive* than Gmail — accepting `newer_than:1w`, reading a bare date as
-UTC, treating `from: x` as an unfiltered match-everything. That last one was the
-worst: an operator with an empty argument `contains("")`, so a stray space
-became a silently unfiltered sync.
+**Round one, from the published docs.** Six places where the first draft was
+*more permissive* than Gmail. The worst was `from: x` with a space: an operator
+with an empty argument `contains("")`, so a stray space became a silently
+unfiltered sync.
 
-**Round two, from a live read-only probe**, which overturned four of those
-corrections because they had over-shot into being *stricter* than Gmail:
+**Round two, a live read-only probe**, which overturned four of those
+corrections for over-shooting into being *stricter* than Gmail:
 
-| Corrected to | Measured reality |
+| Corrected to | Measured |
 |---|---|
 | `h` refused as undocumented | `24h` → 35 = `1d` → 35. It works |
 | `\|` refused as undocumented | `(a \| b)` → 6 = `(a OR b)` → 6. It is an OR |
 | `from: x` made free text | `from: chase.com` → 1 = `from:chase.com` → 1. Still filters |
 | all keywords case-sensitive | `IS:UNREAD` → 59 = `is:unread` → 59. Only the boolean `or` is case-sensitive |
 
-The lesson is worth recording: *undocumented is not the same as absent*. For a
-fidelity simulator the observed behaviour wins over the documentation, in both
-directions — a simulator that rejects what Gmail accepts teaches the client to
-avoid queries that work fine, which is as damaging as accepting what Gmail
-rejects.
+**Round three, four more probes**, which settled the date semantics and
+overturned one more documented behaviour:
+
+| Was | Measured |
+|---|---|
+| `newer_than:Nd` boundary unknown | a **rolling instant**: `1d` → 35 ≡ `after:<now − 24h>` → 35, exact |
+| `m` = 30 days | a **calendar month floored to midnight UTC**: `1m` → 88 ≡ `after:<2026-07-17 00:00 UTC>` → 88, while `after:<now − 31d>` → 86 |
+| bare dates = midnight Pacific (documented) | **midnight UTC**: `after:2026/08/10` → 260 ≡ `<Aug 10 00:00 UTC>`; Pacific gives 257 |
+| `in:anywhere` unmodelled | it **overrides** `includeSpamTrash=false`: 85 → 94 |
+
+So: **five corrections were made from the documentation, and measurement
+reversed every one of them.** The space-after-colon, the pipe, the `h` unit, the
+case folding, and the timezone. Five for five.
+
+Two rules follow, and both are written into the module docs:
+
+1. *Undocumented is not the same as absent.* `h` and `|` work and appear
+   nowhere in Google's tables.
+2. *Documented is not the same as true.* The filtering guide states plainly that
+   dates are interpreted as midnight Pacific. They are not.
+
+**Round four** closed the remaining items. `in:trash`/`in:spam` were confirmed
+to widen scope exactly as inferred, `labelIds` was found to reach Spam and Trash
+as well, and `q=label:` was found to take the name and never the id — silently,
+which earned it a client-bug case of its own.
+
+For anything on the sync path the API is the authority and the documentation is
+a hypothesis. Every §4 row now carries its status — **measured**, documented
+only, or unmeasured — so a later reader can see exactly how much weight each
+behaviour bears. **No inferences remain in the query layer.**
+
+### 7.6.1 A zero is never evidence
+
+A third rule, learned from the probe rather than from the API. On this API an
+unknown operator, a real label with no mail, a label addressed by id instead of
+name, an unsupported unit and a malformed query all return the **identical**
+empty result, and no `400` is ever raised for any of them.
+
+The probe was caught by exactly this: its first pass at the label-spelling
+measurement returned 0 for every spelling and looked like all four failing. The
+label simply had no mail. It was only caught by checking the label had messages
+before drawing a conclusion.
+
+So any simulator behaviour justified by "the live API returned nothing" needs a
+**positive control** before it can be believed — a query known to match, run
+against the same data, in the same session.
+`tests/edges.rs::four_different_mistakes_all_produce_the_same_empty_result` pins
+all five paths side by side with a working control, so the ambiguity is
+documented as a property of the API rather than rediscovered by the next person.
 
 ### 7.7 ✎ `format=raw` carries no `attachmentId`
 

@@ -1976,3 +1976,297 @@ fn a_single_page_caps_at_five_hundred_ids() {
     let other = get(&smaller, "/gmail/v1/users/me/messages?maxResults=500").json_body();
     assert_eq!(other["messages"].as_array().unwrap().len(), 500);
 }
+
+/// `in:anywhere` in `q` overrides `includeSpamTrash=false`.
+///
+/// MEASURED: `newer_than:3d` → 85, `newer_than:3d in:anywhere` → 94, with the
+/// parameter left at its default. So the parameter is a floor, not a ceiling,
+/// and a client that keeps Trash out of a sync by relying on it alone is wrong.
+#[test]
+fn in_anywhere_reaches_spam_and_trash_without_the_parameter() {
+    let sim = sim();
+    let ids = seed(&sim, 6);
+    sim.trash_message(&ids[0]).unwrap();
+    sim.add_label(&ids[1], "SPAM").unwrap();
+
+    let count = |target: &str| -> usize {
+        get(&sim, target).json_body()["messages"]
+            .as_array()
+            .map_or(0, Vec::len)
+    };
+
+    // The baseline hides both.
+    assert_eq!(count("/gmail/v1/users/me/messages"), 4);
+    // The parameter reveals them…
+    assert_eq!(
+        count("/gmail/v1/users/me/messages?includeSpamTrash=true"),
+        6
+    );
+    // …and so does the query, on its own.
+    assert_eq!(count("/gmail/v1/users/me/messages?q=in%3Aanywhere"), 6);
+    // It composes with a real filter rather than replacing it.
+    assert_eq!(
+        count("/gmail/v1/users/me/messages?q=in%3Aanywhere%20newer_than%3A30d"),
+        6
+    );
+
+    // MEASURED too: `in:trash` and `in:spam` widen the scope and *also* filter
+    // to that label. Against a baseline of 84 with the parameter at its
+    // default, `in:anywhere` -> 93, `in:trash` -> 1, `in:spam` -> 122.
+    assert_eq!(count("/gmail/v1/users/me/messages?q=in%3Atrash"), 1);
+    assert_eq!(count("/gmail/v1/users/me/messages?q=in%3Aspam"), 1);
+
+    // A negated scope must not widen anything.
+    assert_eq!(count("/gmail/v1/users/me/messages?q=-in%3Aanywhere"), 0);
+
+    // MEASURED: `labelIds` reaches Spam and Trash on the default parameter too
+    // -- `labelIds=TRASH` -> 1 and `labelIds=SPAM` -> 122 with it unset. So the
+    // parameter gates neither `q` nor `labelIds`: `includeSpamTrash=false` is
+    // not a guarantee about anything, and a sync that leans on it to keep Trash
+    // out is relying on something the API does not promise.
+    assert_eq!(count("/gmail/v1/users/me/messages?labelIds=TRASH"), 1);
+    assert_eq!(count("/gmail/v1/users/me/messages?labelIds=SPAM"), 1);
+    assert_eq!(
+        count("/gmail/v1/users/me/messages?labelIds=TRASH&includeSpamTrash=false"),
+        1,
+        "asking for false explicitly changes nothing either"
+    );
+    // …and it composes: TRASH plus a label the trashed message does not carry
+    // still yields nothing, so the widening is not a bypass of the filter.
+    assert_eq!(
+        count("/gmail/v1/users/me/messages?labelIds=TRASH&labelIds=STARRED"),
+        0
+    );
+}
+
+/// `q=label:` takes the label **name**, never its id.
+///
+/// MEASURED on a label holding 19,468 messages: `label:Subscriptions` capped the
+/// page at 500, `label:subscriptions` likewise, and
+/// `label:Label_8725352880648854357` returned **0**.
+///
+/// This is a client-bug case of its own because the id is exactly what a program
+/// has to hand — a label listing returns ids — so feeding one straight into `q`
+/// is the natural mistake, and it fails silently. It matters most for the P4
+/// `search_mail` tool: an LLM handed this API will reach for the id.
+#[test]
+fn a_label_id_passed_to_q_matches_nothing_and_says_nothing() {
+    let sim = sim();
+    let label = sim
+        .mailbox_mut(|mailbox| mailbox.create_label("Subscriptions"))
+        .unwrap();
+    assert_eq!(label, "Label_1");
+    let ids = seed(&sim, 4);
+    for id in ids.iter().take(3) {
+        sim.add_label(id, &label).unwrap();
+    }
+
+    let count = |q: &str| -> usize {
+        let target = format!(
+            "/gmail/v1/users/me/messages?q={}",
+            nade_gmail_sim::api::encode_component(q)
+        );
+        get(&sim, &target).json_body()["messages"]
+            .as_array()
+            .map_or(0, Vec::len)
+    };
+
+    // By name, in any case: found.
+    assert_eq!(count("label:Subscriptions"), 3);
+    assert_eq!(count("label:subscriptions"), 3);
+    // By id: silently nothing, and a 200 with no error to explain it.
+    let by_id = get(
+        &sim,
+        &format!(
+            "/gmail/v1/users/me/messages?q={}",
+            nade_gmail_sim::api::encode_component(&format!("label:{label}"))
+        ),
+    );
+    assert_eq!(by_id.status, 200, "no error is ever raised");
+    assert!(by_id.json_body().get("messages").is_none());
+
+    // The id is the right key for `labelIds`, which is the parameter that
+    // actually takes one — and which 400s when it does not recognise it.
+    let by_parameter = get(
+        &sim,
+        &format!("/gmail/v1/users/me/messages?labelIds={label}"),
+    );
+    assert_eq!(
+        by_parameter.json_body()["messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    // System labels are unaffected only because their name *is* their id.
+    assert_eq!(count("label:INBOX"), 4);
+}
+
+/// Every sane spelling of a label name with a space in it agrees.
+///
+/// MEASURED against ground truth of 18 messages: quoted → 18, hyphenated → 18,
+/// lowercased hyphenated → 18, and a **bare literal space** → 18. Only the
+/// curly-brace form is not a spelling at all.
+#[test]
+fn every_spelling_of_a_spaced_label_name_agrees() {
+    let sim = sim();
+    let label = sim
+        .mailbox_mut(|mailbox| mailbox.create_label("Awaiting Reply"))
+        .unwrap();
+    let ids = seed(&sim, 5);
+    for id in ids.iter().take(3) {
+        sim.add_label(id, &label).unwrap();
+    }
+
+    let count = |q: &str| -> usize {
+        let target = format!(
+            "/gmail/v1/users/me/messages?q={}",
+            nade_gmail_sim::api::encode_component(q)
+        );
+        get(&sim, &target).json_body()["messages"]
+            .as_array()
+            .map_or(0, Vec::len)
+    };
+
+    assert_eq!(count("label:\"Awaiting Reply\""), 3, "quoted");
+    assert_eq!(count("label:Awaiting-Reply"), 3, "hyphenated");
+    assert_eq!(count("label:awaiting-reply"), 3, "hyphenated, lowercased");
+    assert_eq!(count("label:Awaiting Reply"), 3, "a bare literal space");
+    assert_eq!(count("label:{Awaiting Reply}"), 0, "not a spelling");
+
+    // Absorbing the following word must not eat a real operator, or a search
+    // term the label name did not use.
+    assert_eq!(
+        count("label:Awaiting Reply is:unread"),
+        3,
+        "`is:unread` stays its own filter"
+    );
+    assert_eq!(
+        count("label:awaiting-reply nonexistentword"),
+        0,
+        "a leftover word is still a search term"
+    );
+}
+
+/// On this API a zero is never evidence on its own.
+///
+/// Four different failures produce the identical empty result, and no `400` is
+/// ever raised for any of them. This bit the live probe itself: a first pass at
+/// the label-spelling measurement returned 0 for every form and looked like all
+/// of them failing, when the label simply had no mail. Any claim of the form
+/// "the API returned nothing, therefore X is unsupported" needs a positive
+/// control before it can be believed.
+#[test]
+fn four_different_mistakes_all_produce_the_same_empty_result() {
+    let sim = sim();
+    let empty_label = sim
+        .mailbox_mut(|mailbox| mailbox.create_label("Never Used"))
+        .unwrap();
+    let named_label = sim
+        .mailbox_mut(|mailbox| mailbox.create_label("Has Mail"))
+        .unwrap();
+    let ids = seed(&sim, 3);
+    sim.add_label(&ids[0], &named_label).unwrap();
+
+    let probe = |q: &str| -> (u16, usize) {
+        let target = format!(
+            "/gmail/v1/users/me/messages?q={}",
+            nade_gmail_sim::api::encode_component(q)
+        );
+        let response = get(&sim, &target);
+        let count = response.json_body()["messages"]
+            .as_array()
+            .map_or(0, Vec::len);
+        (response.status, count)
+    };
+
+    // The positive control: this spelling works, so the mailbox and the query
+    // form are both fine.
+    assert_eq!(probe("label:\"Has Mail\""), (200, 1));
+
+    // …and these four are indistinguishable from each other and from it.
+    assert_eq!(probe("wibble:wobble"), (200, 0), "unknown operator");
+    assert_eq!(
+        probe(&format!("label:\"{}\"", "Never Used")),
+        (200, 0),
+        "a real label with no mail"
+    );
+    assert_eq!(
+        probe(&format!("label:{named_label}")),
+        (200, 0),
+        "the right label, addressed by id instead of name"
+    );
+    assert_eq!(probe("newer_than:1w"), (200, 0), "an unsupported unit");
+    assert_eq!(probe("\"unbalanced"), (200, 0), "a malformed query");
+    assert!(empty_label.starts_with("Label_"));
+}
+
+/// `newer_than:Nd` is a rolling instant; `newer_than:Nm` is a calendar date.
+///
+/// MEASURED, and the least guessable thing in the query layer: the two forms
+/// differ *in kind*, so a client cannot treat `1m` as "30d with a nicer name".
+#[test]
+fn day_spans_roll_and_month_spans_land_on_a_calendar_date() {
+    let sim = sim();
+    // 2026-08-17T09:30:00Z, deliberately not midnight.
+    let now = 1_786_959_000_000;
+    sim.clock().set_ms(now);
+
+    let day = 86_400_000i64;
+    let at = |ms: i64| {
+        sim.insert_message(&MessageSpec::new().received_at(ReceivedAt::AtMs(ms)))
+            .unwrap()
+    };
+    // Straddling midnight UTC of 2026-07-17, one calendar month back.
+    let just_before_month_boundary = at(1_784_246_399_000); // 2026-07-16T23:59:59Z
+    let just_after_month_boundary_ms = 1_784_246_401_000i64; // 2026-07-17T00:00:01Z
+    let just_after_month_boundary = at(just_after_month_boundary_ms);
+    // Straddling the rolling 24-hour boundary.
+    let inside_a_day = at(now - day + 1_000);
+    let outside_a_day = at(now - day - 1_000);
+
+    let ids = |q: &str| -> Vec<String> {
+        let target = format!(
+            "/gmail/v1/users/me/messages?q={}",
+            nade_gmail_sim::api::encode_component(q)
+        );
+        get(&sim, &target).json_body()["messages"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| row["id"].as_str().unwrap().to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    // The day form rolls with the instant, to the second.
+    let within_a_day = ids("newer_than:1d");
+    assert!(within_a_day.contains(&inside_a_day));
+    assert!(!within_a_day.contains(&outside_a_day));
+    assert_eq!(ids("newer_than:24h"), within_a_day, "24h == 1d");
+
+    // The month form lands on midnight UTC of the calendar date, so a message
+    // one second before that boundary is out and one second after is in.
+    let within_a_month = ids("newer_than:1m");
+    assert!(within_a_month.contains(&just_after_month_boundary));
+    assert!(!within_a_month.contains(&just_before_month_boundary));
+
+    // …and it is genuinely not a 30-day window. One calendar month back from
+    // 2026-08-17 is 2026-07-17T00:00Z, whereas `now - 30d` is 2026-07-18T09:30Z
+    // — later, so a 30-day reading would have *missed* the message that the
+    // calendar reading catches. That is the direction the probe measured:
+    // `newer_than:1m` → 88 while `after:<now - 31d>` → 86.
+    assert!(
+        just_after_month_boundary_ms < now - 30 * day,
+        "the discriminating message must fall outside a 30-day window"
+    );
+    assert!(
+        within_a_month.contains(&just_after_month_boundary),
+        "a 30-day reading of `1m` would have missed this message"
+    );
+
+    // The equivalent `after:` on the same date agrees exactly, which is the
+    // relationship the probe measured.
+    assert_eq!(ids("after:2026/07/17"), within_a_month);
+}

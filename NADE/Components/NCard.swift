@@ -9,6 +9,21 @@
 
 import SwiftUI
 
+/// Card padding, by card. Free-standing rather than nested in `NCard` because
+/// `NCard` is generic and Swift has no static stored properties there.
+enum NCardPadding {
+    /// DS `.card` — `padding: var(--space-3)` on all four sides.
+    static let ds = EdgeInsets(
+        top: Theme.Space.s3, leading: Theme.Space.s3,
+        bottom: Theme.Space.s3, trailing: Theme.Space.s3
+    )
+    /// 1a's draft-agent card — DESIGN.md §3 1a: padding `15 / 15 / 13`, and it
+    /// **closes before its buttons**.
+    static let draftAgent = EdgeInsets(top: 15, leading: 15, bottom: 13, trailing: 15)
+    /// 1f's agent card — DESIGN.md §3 1f: padding `14 / 15`, buttons inside.
+    static let agentCard = EdgeInsets(top: 14, leading: 15, bottom: 14, trailing: 15)
+}
+
 struct NCard<Content: View>: View {
     enum Border: Sendable {
         case divider   // DS default
@@ -17,18 +32,18 @@ struct NCard<Content: View>: View {
 
     private let border: Border
     private let padding: EdgeInsets
+    private let spacing: CGFloat
     private let content: Content
 
     init(
         border: Border = .divider,
-        padding: EdgeInsets = EdgeInsets(
-            top: Theme.Space.s3, leading: Theme.Space.s3,
-            bottom: Theme.Space.s3, trailing: Theme.Space.s3
-        ),
+        padding: EdgeInsets = NCardPadding.ds,
+        spacing: CGFloat = Theme.Space.s2,
         @ViewBuilder content: () -> Content
     ) {
         self.border = border
         self.padding = padding
+        self.spacing = spacing
         self.content = content()
     }
 
@@ -44,7 +59,7 @@ struct NCard<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.s2) {
+        VStack(alignment: .leading, spacing: spacing) {
             content
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -126,7 +141,11 @@ struct NCardTitle: View {
         Text(text)
             .font(Theme.Font.heading(size))
             .foregroundStyle(Theme.Color.ink)
-            .nadeLineHeight(1.2, size: size, face: Theme.Font.PostScriptName.headingSemibold)
+            .nadeLineHeight(
+                Theme.LineHeight.cardTitle,
+                size: size,
+                face: Theme.Font.PostScriptName.headingSemibold
+            )
             // EDGE (E3): long unbroken titles wrap instead of clipping.
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -145,8 +164,8 @@ struct NCardBody: View {
     var body: some View {
         Text(text)
             .font(Theme.Font.body(size))
-            .foregroundStyle(Theme.Color.ink.opacity(0.8))
-            .nadeLineHeight(1.55, size: size)
+            .foregroundStyle(Theme.Color.ink80)
+            .nadeLineHeight(Theme.LineHeight.body, size: size)
             .fixedSize(horizontal: false, vertical: true)   // EDGE (E3)
     }
 }

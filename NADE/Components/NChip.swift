@@ -20,13 +20,23 @@ struct NChip: View {
     static let paddingV: CGFloat = 5
     static let paddingH: CGFloat = 12
 
+    /// EDGE (E6): same rule as `NButton` — a chip with no visible name is a
+    /// layout edge case, never an unnamed accessibility element.
+    static func resolvedAccessibilityLabel(title: String, explicit: String?) -> String {
+        if let explicit, !explicit.isEmpty { return explicit }
+        if !title.isEmpty { return title }
+        return String(localized: "Filter", comment: "Fallback VoiceOver name for a mail filter chip with no visible title")
+    }
+
     private let title: String
     private let isSelected: Bool
+    private let a11yLabel: String
     private let action: () -> Void
 
-    init(_ title: String, isSelected: Bool, action: @escaping () -> Void) {
+    init(_ title: String, isSelected: Bool, accessibilityLabel: String? = nil, action: @escaping () -> Void) {
         self.title = title
         self.isSelected = isSelected
+        self.a11yLabel = NChip.resolvedAccessibilityLabel(title: title, explicit: accessibilityLabel)
         self.action = action
     }
 
@@ -38,6 +48,9 @@ struct NChip: View {
                 // EDGE (E3): long label names truncate; the chip row scrolls.
                 .lineLimit(1)
                 .truncationMode(.tail)
+                // Inherited `line-height: 1.55` — 12.5 × 1.55 + 10 = 29.4, the
+                // chip's real height in the mockup.
+                .nadeLineHeight(Theme.LineHeight.body, size: Self.fontSize)
                 .padding(.vertical, Self.paddingV)
                 .padding(.horizontal, Self.paddingH)
                 // EDGE (E4): an empty label keeps the pill's shape.
@@ -50,10 +63,12 @@ struct NChip: View {
                     )
                 }
                 .contentShape(Capsule())
+                // EDGE (E17): the chip is ~29 pt tall — under the minimum.
+                .nadeHitTarget()
         }
         .buttonStyle(.plain)
         // EDGE (E6): VoiceOver hears the name, and hears that it is selected.
-        .accessibilityLabel(title)
+        .accessibilityLabel(a11yLabel)
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
         // EDGE (E1): chrome ceiling — the chip row must stay a row.
         .dynamicTypeSize(...Theme.Metrics.chromeTypeCeiling)

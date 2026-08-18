@@ -53,6 +53,10 @@ struct NToggle: View {
             }
             .frame(width: Self.trackWidth, height: Self.trackHeight)
             .contentShape(Capsule())
+            // EDGE (E17): 46 × 26 — wide enough, 18 pt short vertically. The
+            // row it sits in is sized by the label beside it, so the target
+            // has to grow without the track doing.
+            .nadeHitTarget()
         }
         .buttonStyle(.plain)
         // EDGE (E7): no animation under Reduce Motion — the knob jumps.

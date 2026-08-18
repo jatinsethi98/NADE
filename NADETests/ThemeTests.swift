@@ -68,26 +68,81 @@ final class ThemeTests: XCTestCase {
         }
     }
 
-    func testRampEndpointsResolveToTheDesignValues() {
-        assertColor(Theme.Color.neutral100, 0xf8f4f4, "neutral100")
-        assertColor(Theme.Color.neutral500, 0x9b9797, "neutral500")
-        assertColor(Theme.Color.neutral900, 0x2d2b2b, "neutral900")
-
-        assertColor(Theme.Color.accent100, 0xfff3e4, "accent100")
-        assertColor(Theme.Color.accent500, 0xc28d41, "accent500")
-        assertColor(Theme.Color.accent800, 0x5a3b0a, "accent800")
-        assertColor(Theme.Color.accent900, 0x3a270d, "accent900")
-
-        assertColor(Theme.Color.accent2_100, 0xfff3e4, "accent2-100")
-        assertColor(Theme.Color.accent2_500, 0xbc8f4e, "accent2-500")
-        assertColor(Theme.Color.accent2_900, 0x382810, "accent2-900")
+    /// Every step of every ramp, to the exact hex in
+    /// `docs/MockUps/_ds/classical-*/styles.css`. Endpoints-only coverage left
+    /// 200/300/400/600/700/800 free to be anything at all.
+    func testEveryNeutralStepResolvesToTheDesignValue() {
+        let ramp: [(Color, UInt32, String)] = [
+            (Theme.Color.neutral100, 0xf8f4f4, "neutral100"),
+            (Theme.Color.neutral200, 0xeae7e7, "neutral200"),
+            (Theme.Color.neutral300, 0xd7d3d3, "neutral300"),
+            (Theme.Color.neutral400, 0xbab6b6, "neutral400"),
+            (Theme.Color.neutral500, 0x9b9797, "neutral500"),
+            (Theme.Color.neutral600, 0x7d7979, "neutral600"),
+            (Theme.Color.neutral700, 0x605d5d, "neutral700"),
+            (Theme.Color.neutral800, 0x444141, "neutral800"),
+            (Theme.Color.neutral900, 0x2d2b2b, "neutral900"),
+        ]
+        for (color, hex, name) in ramp { assertColor(color, hex, name) }
     }
 
-    /// The two ramps share their 100 step but diverge from 200 — an easy place
-    /// for a copy-paste to go unnoticed.
-    func testAccentAndAccent2RampsAreDistinct() {
-        XCTAssertNotEqual(rgba(Theme.Color.accent200).b, rgba(Theme.Color.accent2_200).b)
-        XCTAssertNotEqual(rgba(Theme.Color.accent700).r, rgba(Theme.Color.accent2_700).r)
+    func testEveryAccentStepResolvesToTheDesignValue() {
+        let ramp: [(Color, UInt32, String)] = [
+            (Theme.Color.accent100, 0xfff3e4, "accent100"),
+            (Theme.Color.accent200, 0xffe3bf, "accent200"),
+            (Theme.Color.accent300, 0xfacb8d, "accent300"),
+            (Theme.Color.accent400, 0xe1ad66, "accent400"),
+            (Theme.Color.accent500, 0xc28d41, "accent500"),
+            (Theme.Color.accent600, 0xa06f24, "accent600"),
+            (Theme.Color.accent700, 0x7d5411, "accent700"),
+            (Theme.Color.accent800, 0x5a3b0a, "accent800"),
+            (Theme.Color.accent900, 0x3a270d, "accent900"),
+        ]
+        for (color, hex, name) in ramp { assertColor(color, hex, name) }
+    }
+
+    func testEveryAccent2StepResolvesToTheDesignValue() {
+        let ramp: [(Color, UInt32, String)] = [
+            (Theme.Color.accent2_100, 0xfff3e4, "accent2-100"),
+            (Theme.Color.accent2_200, 0xffe3be, "accent2-200"),
+            (Theme.Color.accent2_300, 0xf5cd96, "accent2-300"),
+            (Theme.Color.accent2_400, 0xdbaf70, "accent2-400"),
+            (Theme.Color.accent2_500, 0xbc8f4e, "accent2-500"),
+            (Theme.Color.accent2_600, 0x9b7232, "accent2-600"),
+            (Theme.Color.accent2_700, 0x79561f, "accent2-700"),
+            (Theme.Color.accent2_800, 0x573d14, "accent2-800"),
+            (Theme.Color.accent2_900, 0x382810, "accent2-900"),
+        ]
+        for (color, hex, name) in ramp { assertColor(color, hex, name) }
+    }
+
+    /// The two ramps share their 100 step and diverge from 200. The previous
+    /// version of this test only asserted that two components differed, which
+    /// both values being wrong also satisfies; every step now has an exact
+    /// expectation above, so this asserts the *shape* those exact values make.
+    func testAccentAndAccent2ShareTheir100StepAndDivergeAfterIt() {
+        assertColor(Theme.Color.accent2_100, 0xfff3e4, "accent2-100 shares accent-100")
+        for (a, b, name) in [
+            (Theme.Color.accent200, Theme.Color.accent2_200, "200"),
+            (Theme.Color.accent300, Theme.Color.accent2_300, "300"),
+            (Theme.Color.accent400, Theme.Color.accent2_400, "400"),
+            (Theme.Color.accent500, Theme.Color.accent2_500, "500"),
+            (Theme.Color.accent600, Theme.Color.accent2_600, "600"),
+            (Theme.Color.accent700, Theme.Color.accent2_700, "700"),
+            (Theme.Color.accent800, Theme.Color.accent2_800, "800"),
+            (Theme.Color.accent900, Theme.Color.accent2_900, "900"),
+        ] {
+            XCTAssertNotEqual(
+                UIColor(a), UIColor(b),
+                "accent-\(name) and accent-2-\(name) resolved to the same colour"
+            )
+        }
+    }
+
+    /// `.card-body { opacity: 0.8 }` — the one raw opacity that used to live in
+    /// `NCard` rather than in the ladder.
+    func testInkLadderCoversTheCardBodyOpacity() {
+        assertColor(Theme.Color.ink80, 0x201f1d, alpha: 0.80, "ink80")
     }
 
     // MARK: Space, radius, stroke, shadow
@@ -215,6 +270,58 @@ final class ThemeTests: XCTestCase {
         }
     }
 
+    // MARK: Line height and hit targets
+
+    /// DS `body { line-height: 1.55 }`, `.btn` and `.card-title` 1.2.
+    func testLineHeightTokensAreTheDSValues() {
+        XCTAssertEqual(Theme.LineHeight.body, 1.55)
+        XCTAssertEqual(Theme.LineHeight.button, 1.2)
+        XCTAssertEqual(Theme.LineHeight.cardTitle, 1.2)
+        XCTAssertEqual(Theme.LineHeight.heading, 1.12)
+    }
+
+    /// EDGE (E17). DESIGN.md never states a minimum touch target — it draws a
+    /// 30 × 30 stepper box and a 16 pt radio — so this is the HIG's number, not
+    /// the design's, and it is applied without changing a pixel.
+    func testMinimumHitTargetIsTheHIGValue() {
+        XCTAssertEqual(Theme.Metrics.minimumHitTarget, 44)
+    }
+
+    // MARK: Accessibility composition
+
+    /// EDGE (E6). `NButton("")` used to copy the empty string straight into
+    /// `.accessibilityLabel`, producing an interactive element VoiceOver could
+    /// not name.
+    func testNoButtonOrChipCanEndUpWithAnEmptyAccessibilityLabel() {
+        XCTAssertEqual(NButton.resolvedAccessibilityLabel(title: "Approve", explicit: nil), "Approve")
+        XCTAssertEqual(NButton.resolvedAccessibilityLabel(title: "Approve", explicit: "Save note"), "Save note")
+        XCTAssertFalse(NButton.resolvedAccessibilityLabel(title: "", explicit: nil).isEmpty)
+        XCTAssertFalse(NButton.resolvedAccessibilityLabel(title: nil, explicit: "").isEmpty)
+        XCTAssertFalse(NButton.resolvedAccessibilityLabel(title: nil, explicit: nil).isEmpty)
+
+        XCTAssertEqual(NChip.resolvedAccessibilityLabel(title: "Receipts", explicit: nil), "Receipts")
+        XCTAssertFalse(NChip.resolvedAccessibilityLabel(title: "", explicit: nil).isEmpty)
+        XCTAssertFalse(NChip.resolvedAccessibilityLabel(title: "", explicit: "").isEmpty)
+    }
+
+    /// EDGE (E6). 1d's three "Ends" rows differ only in their trailing value;
+    /// the label carries the label and the hint, the value carries the rest.
+    func testRadioRowSpokenLabelKeepsTheHint() {
+        XCTAssertEqual(NRadioRow.spokenLabel(label: "Never", hint: nil), "Never")
+        XCTAssertEqual(NRadioRow.spokenLabel(label: "Never", hint: ""), "Never")
+        XCTAssertEqual(
+            NRadioRow.spokenLabel(label: "On a schedule", hint: "Daily, weekly, or a custom repeat"),
+            "On a schedule, Daily, weekly, or a custom repeat"
+        )
+    }
+
+    /// EDGE (E6). VoiceOver's own tab bars say "Tab 1 of 4".
+    func testTabBarSpeaksItsPosition() {
+        XCTAssertEqual(NTabBar.positionValue(index: 0), "Tab 1 of 4")
+        XCTAssertEqual(NTabBar.positionValue(index: 3), "Tab 4 of 4")
+        XCTAssertEqual(NTab.allCases.count, 4)
+    }
+
     // MARK: Component geometry that the design pins exactly
 
     func testToggleGeometryMatchesTheDesign() {
@@ -232,6 +339,8 @@ final class ThemeTests: XCTestCase {
         XCTAssertEqual(NStepper.box, 30)
         XCTAssertEqual(NStepper.countMinWidth, 22)
         XCTAssertEqual(NStepper.countSize, 15)
+        // DESIGN.md §3 1d: the row is `align-items: center; gap: 12`.
+        XCTAssertEqual(NStepper.gap, 12)
 
         XCTAssertEqual(NTag.fontSize, 11)
         XCTAssertEqual(NTag.paddingV, 3)
@@ -245,10 +354,50 @@ final class ThemeTests: XCTestCase {
         XCTAssertEqual(NButton.iconBox, 36)
         XCTAssertEqual(NButton.disabledOpacity, 0.45)
         XCTAssertEqual(NButton.labelGap, 6)
+    }
 
-        XCTAssertEqual(NTextField.fontSize, 14)
-        XCTAssertEqual(NSegmented<String>.fontSize, 13)
-        XCTAssertEqual(NSegmented<String>.paddingV, 7)
-        XCTAssertEqual(NSegmented<String>.paddingH, 12)
+    /// DESIGN.md §2's ask-field table, one preset per row. Rendered heights are
+    /// in `ComponentGeometryTests`; this is the table itself.
+    func testEveryAskFieldPresetIsItsScreensNumbers() {
+        let expected: [(String, NTextField.Metrics, CGFloat, CGFloat, CGFloat, CGFloat)] = [
+            ("DS .input", .input, 14, 6, 10, 36),
+            ("2a feed", .askPinned, 13.5, 8, 15, 38),
+            ("1a docked", .askDocked, 14, 9, 15, 40),
+            ("2a focus / 2b", .askCentred, 14, 10, 16, 44),
+            ("1f thread", .askThread, 13.5, 10, 15, 38),
+            ("1h search", .searchPill, 13.5, 8, 14, 38),
+        ]
+        for (name, m, font, padV, padH, minH) in expected {
+            XCTAssertEqual(m.fontSize, font, "\(name) font size")
+            XCTAssertEqual(m.paddingV, padV, "\(name) vertical padding")
+            XCTAssertEqual(m.paddingH, padH, "\(name) horizontal padding")
+            XCTAssertEqual(m.minHeight, minH, "\(name) min-height")
+        }
+        XCTAssertEqual(NTextField.Metrics.input.shape, .rounded)
+        for m in [NTextField.Metrics.askPinned, .askDocked, .askCentred, .askThread, .searchPill] {
+            XCTAssertEqual(m.shape, .pill)
+        }
+        // No two ask variants may collapse into one another.
+        XCTAssertEqual(Set(expected.map { "\($0.1.fontSize)/\($0.1.paddingV)/\($0.1.paddingH)" }).count, 6)
+    }
+
+    /// DESIGN.md §1 Components — Segmented: DS `7 / 12` @13, 1c `6 / 14` @13,
+    /// 1i `5 / 12` @12.
+    func testSegmentedMetricsCoverTheDSAndBothOverrides() {
+        XCTAssertEqual(NSegmentedMetrics.ds, NSegmentedMetrics(fontSize: 13, paddingV: 7, paddingH: 12))
+        XCTAssertEqual(NSegmentedMetrics.status, NSegmentedMetrics(fontSize: 13, paddingV: 6, paddingH: 14))
+        XCTAssertEqual(NSegmentedMetrics.noteMode, NSegmentedMetrics(fontSize: 12, paddingV: 5, paddingH: 12))
+    }
+
+    /// DESIGN.md §3 1c and 1d. One set of numbers cannot serve both screens.
+    func testRadioRowMetricsAreTheTwoDesignRows() {
+        XCTAssertEqual(
+            NRadioRow.Metrics.invocation,
+            NRadioRow.Metrics(labelSize: 15, hintSize: 12, valueSize: 13, gap: 11, paddingV: 11, alignsToFirstBaseline: true)
+        )
+        XCTAssertEqual(
+            NRadioRow.Metrics.ends,
+            NRadioRow.Metrics(labelSize: 14, hintSize: 12, valueSize: 13, gap: 11, paddingV: 9, alignsToFirstBaseline: false)
+        )
     }
 }

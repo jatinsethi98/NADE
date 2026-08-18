@@ -13,7 +13,9 @@ struct NStepper: View {
     static let box: CGFloat = 30
     static let countMinWidth: CGFloat = 22
     static let countSize: CGFloat = 15
-    static let gap: CGFloat = 8
+    /// DESIGN.md §3 1d: the "Repeat every" row is `align-items: center, gap 12`
+    /// — the same 12 separates the label, the `−` box, the count and the `＋`.
+    static let gap: CGFloat = 12
 
     private let label: String
     @Binding private var value: Int
@@ -72,6 +74,9 @@ struct NStepper: View {
                         .strokeBorder(Theme.Color.divider, lineWidth: Theme.Stroke.border)
                 }
                 .contentShape(Rectangle())
+                // EDGE (E17): the design's box is 30 × 30. The row it sits in
+                // is 30 tall, so the target has to grow without the box doing.
+                .nadeHitTarget()
         }
         .buttonStyle(.plain)
         .disabled(!enabled)

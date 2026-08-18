@@ -36,9 +36,35 @@
 //! | `from:` with a genuinely empty argument is a no-op | **measured**: returns the unfiltered baseline |
 //! | An unknown operator matches nothing, never a `400` | **measured** (`zzz:qqq` → 0) |
 //! | `q=label:` is case-insensitive | **measured** |
-//! | A bare date is **midnight Pacific**, not UTC | documented only |
+//! | `newer_than:Nd` is a **rolling instant**, not a day boundary | **measured**: `1d` → 35 ≡ `after:<now − 24h>` → 35, exact; again at 30 days |
+//! | `newer_than:Nm` is a **calendar month floored to midnight UTC** | **measured**: `1m` → 88 ≡ `after:<2026-07-17 00:00 UTC>` → 88, while `after:<now − 31d>` → 86 |
+//! | A bare date is **midnight UTC** | **measured**: `after:2026/08/10` → 260 ≡ `<Aug 10 00:00 UTC>` → 260; Pacific gives 257. The docs say Pacific and are wrong |
+//! | `in:anywhere` overrides `includeSpamTrash=false` | **measured**: 84 → 93 with the parameter untouched |
+//! | `in:trash` / `in:spam` widen scope the same way | **measured**: 1 and 122 with the parameter untouched |
+//! | `q=label:` takes the **name**, never the id | **measured**: `label:Subscriptions` → 500 capped, `label:Label_8725…` → 0 |
+//! | A bare space inside a label name is tolerated | **measured**: quoted, hyphenated, lowercased and bare-space spellings all → 18 |
 //! | Ranges are half-open `[after, before)` | documented only, via Google's worked example |
-//! | `m` = 30 days, `y` = 365 days | **unmeasured** — a stated approximation |
+//! | `newer_than:1y` | **unmeasured** — every scope stayed above the 500-id page cap. Modelled as 12 calendar months by analogy with `m` |
+//!
+//! Nothing in this module is inferred any more. Every row above is measured or
+//! explicitly marked otherwise.
+//!
+//! # A zero is never evidence
+//!
+//! An unknown operator, a real label with no mail, a label addressed by id
+//! instead of name, an unsupported unit and a malformed query all return the
+//! **identical** empty result, and no `400` is ever raised for any of them. The
+//! live probe was itself caught by this: a first pass at the label-spelling
+//! measurement returned 0 for every form and looked like all of them failing,
+//! when the label simply had no messages. Any claim of the shape "the API
+//! returned nothing, therefore X is unsupported" needs a positive control first.
+//! `tests/edges.rs::four_different_mistakes_all_produce_the_same_empty_result`
+//! pins all five paths side by side.
+//!
+//! Note that `d` and `m` differ **in kind**, not just in magnitude: one is a
+//! rolling instant and the other a calendar step floored to a date. Nothing in
+//! the documentation hints at that, and no amount of reading would have found
+//! it.
 //!
 //! Only `MM/DD/YYYY` is refused despite being documented: `03/04/2004` is
 //! genuinely ambiguous against `YYYY/MM/DD` and Google publishes no
@@ -50,6 +76,8 @@
 //! sort key looks like message id descending, so two messages delivered in the
 //! same second can come back in the opposite order to their timestamps. The
 //! simulator's tie-break is id descending for exactly that reason.
+
+use chrono::{DateTime, Months, Utc};
 
 use crate::{clock::DAY_MS, label::normalise_label_query};
 
@@ -71,16 +99,23 @@ pub enum Query {
 /// One leaf condition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Term {
-    /// `newer_than:30d` — `internalDate` strictly newer than now minus the span.
-    NewerThan(i64),
+    /// `newer_than:30d` / `newer_than:1m`. See [`Span`] — the day and month
+    /// forms differ in kind, and that is measured.
+    NewerThan(Span),
     /// `older_than:1y`.
-    OlderThan(i64),
+    OlderThan(Span),
     /// `after:2026/07/01`, or an epoch-seconds value.
     After(i64),
     /// `before:2026/07/01`.
     Before(i64),
-    /// `label:` / `in:` — matched against label ids and names, folded.
-    Label(String),
+    /// `label:` / `in:` — matched against label **names** only, never ids.
+    ///
+    /// Holds the name as a word list, because a bare space inside a label name
+    /// is tolerated: `label:Awaiting Reply` finds the label "Awaiting Reply".
+    /// At match time the longest prefix that names a label the message carries
+    /// wins, and any words left over still have to match as free text — so
+    /// `label:inbox invoice` is still "in the inbox, mentioning invoice".
+    Label(Vec<String>),
     /// `from:`.
     From(String),
     /// `to:`.
@@ -97,6 +132,10 @@ pub enum Term {
     List(String),
     /// `rfc822msgid:` — an exact `Message-ID` header match.
     Rfc822MsgId(String),
+    /// `in:anywhere` — a *scope directive*, not a filter: it matches every
+    /// message and separately lifts the default Spam/Trash exclusion. See
+    /// [`Query::reaches_spam_trash`].
+    Scope(Scope),
     /// `is:unread`, `is:read`, `is:starred`, `is:important`.
     Is(State),
     /// `has:attachment`, `has:userlabels`, `has:nouserlabels`.
@@ -107,6 +146,13 @@ pub enum Term {
     Smaller(u64),
     /// A bare word or quoted phrase.
     Text(String),
+}
+
+/// Query scopes that reach outside the default Spam/Trash exclusion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// `in:anywhere` — all mail, Spam and Trash included.
+    Anywhere,
 }
 
 /// The `is:` states.
@@ -199,6 +245,32 @@ impl Query {
         parsed.unwrap_or(Self::All)
     }
 
+    /// Does the query itself reach into Spam and Trash?
+    ///
+    /// MEASURED: `newer_than:3d in:anywhere` returned 94 against a baseline of
+    /// 85, with `includeSpamTrash` left at its default `false`. So `q` can
+    /// override the parameter, and a client that relies on the parameter alone
+    /// to keep Trash out of a sync is wrong.
+    ///
+    /// `in:spam` and `in:trash` do the same, also **measured**: against a
+    /// baseline of 84 with the parameter at its default, `in:anywhere` → 93,
+    /// `in:trash` → 1 and `in:spam` → 122.
+    #[must_use]
+    pub fn reaches_spam_trash(&self) -> bool {
+        match self {
+            Self::And(children) | Self::Or(children) => {
+                children.iter().any(Self::reaches_spam_trash)
+            }
+            Self::Term(Term::Scope(Scope::Anywhere)) => true,
+            Self::Term(Term::Label(words)) => {
+                matches!(words.join(" ").as_str(), "spam" | "trash")
+            }
+            // An empty query does not widen the scope, and neither does a
+            // *negated* one — `-in:anywhere` must not reach into Trash.
+            Self::All | Self::Not(_) | Self::Term(_) => false,
+        }
+    }
+
     /// Does this message match?
     ///
     /// `label_name` resolves a label id to its display name, so `label:receipts`
@@ -231,17 +303,47 @@ impl Term {
         label_name: &dyn Fn(&str) -> Option<String>,
     ) -> bool {
         match self {
-            // EDGE: strictly greater-than. A message exactly `30d` old is
-            // outside `newer_than:30d`, which is the boundary a 30-day sync
-            // window lands on every single day.
-            Self::NewerThan(span) => facts.internal_date_ms > facts.now_ms - span,
-            Self::OlderThan(span) => facts.internal_date_ms < facts.now_ms - span,
+            // MEASURED: `newer_than:1d` is a rolling instant (`now - 24h`,
+            // exact to the millisecond), while `newer_than:1m` is a calendar
+            // month floored to midnight UTC. The two differ in kind, so the
+            // boundary is computed by the span itself.
+            //
+            // EDGE: the rolling form is strictly greater-than, so a message
+            // exactly `30d` old is *outside* `newer_than:30d` — the boundary a
+            // 30-day sync window lands on every single day.
+            Self::NewerThan(span) => {
+                let boundary = span.boundary_ms(facts.now_ms);
+                if span.is_inclusive() {
+                    facts.internal_date_ms >= boundary
+                } else {
+                    facts.internal_date_ms > boundary
+                }
+            }
+            Self::OlderThan(span) => facts.internal_date_ms < span.boundary_ms(facts.now_ms),
             Self::After(at) => facts.internal_date_ms >= *at,
             Self::Before(at) => facts.internal_date_ms < *at,
-            Self::Label(wanted) => facts.label_ids.iter().any(|id| {
-                normalise_label_query(id) == *wanted
-                    || label_name(id).is_some_and(|name| normalise_label_query(&name) == *wanted)
-            }),
+            // MEASURED, and the trap: `q=label:` takes the **name**, never the
+            // id. On a label with 19,468 messages, `label:Subscriptions` capped
+            // the page at 500 while `label:Label_8725352880648854357` returned
+            // **0**. There is no error — a program that feeds `q` the id it got
+            // from a listing gets an empty result that looks like an empty
+            // mailbox. System labels are unaffected only because their name *is*
+            // their id.
+            Self::Label(words) => {
+                let haystack = text.free_text();
+                // Longest prefix first, so "awaiting reply" beats "awaiting".
+                (1..=words.len()).rev().any(|split| {
+                    let candidate = words[..split].join(" ");
+                    let carried = facts.label_ids.iter().any(|id| {
+                        label_name(id).is_some_and(|name| normalise_label_query(&name) == candidate)
+                    });
+                    // Words the label name did not use are still search terms.
+                    carried
+                        && words[split..]
+                            .iter()
+                            .all(|word| matches_free_text(&haystack, word))
+                })
+            }
             Self::From(value) => text.from.contains(value),
             Self::To(value) => text.to.contains(value),
             Self::Cc(value) => text.cc.contains(value),
@@ -250,6 +352,9 @@ impl Term {
             Self::Filename(value) => text.filenames.iter().any(|name| name.contains(value)),
             Self::List(value) => text.list.contains(value),
             Self::Rfc822MsgId(value) => text.rfc822_msgid == *value,
+            // A scope directive filters nothing; its effect is on
+            // `includeSpamTrash`, which the caller reads separately.
+            Self::Scope(Scope::Anywhere) => true,
             Self::Is(state) => match state {
                 State::Unread => has(facts.label_ids, "UNREAD"),
                 State::Read => !has(facts.label_ids, "UNREAD"),
@@ -508,6 +613,22 @@ impl Cursor {
                         return Some(Query::All);
                     }
                 }
+                // MEASURED: a bare space inside a label name is tolerated —
+                // `label:Awaiting Reply` finds the label "Awaiting Reply",
+                // agreeing exactly with the quoted and hyphenated spellings.
+                // Only *plain* words are absorbed, so `label:inbox is:unread`
+                // keeps `is:unread` as its own filter, and anything the label
+                // name does not consume stays a search term (see `Term::Label`).
+                if let Term::Label(mut words) = parse_term(&word) {
+                    while let Some(Token::Word(next)) = self.peek().cloned() {
+                        if next.contains(':') {
+                            break;
+                        }
+                        self.at += 1;
+                        words.push(normalise_label_query(&next));
+                    }
+                    return Some(Query::Term(Term::Label(words)));
+                }
                 Some(Query::Term(parse_term(&word)))
             }
             Some(Token::CloseParen | Token::CloseBrace) => {
@@ -535,11 +656,15 @@ fn parse_term(word: &str) -> Term {
     }
     let folded = value.to_ascii_lowercase();
     match operator.to_ascii_lowercase().as_str() {
-        "newer_than" => span_ms(&folded).map_or_else(fallback(word), Term::NewerThan),
-        "older_than" => span_ms(&folded).map_or_else(fallback(word), Term::OlderThan),
+        "newer_than" => parse_span(&folded).map_or_else(fallback(word), Term::NewerThan),
+        "older_than" => parse_span(&folded).map_or_else(fallback(word), Term::OlderThan),
         "after" | "newer" => date_ms(&folded).map_or_else(fallback(word), Term::After),
         "before" | "older" => date_ms(&folded).map_or_else(fallback(word), Term::Before),
-        "label" | "in" => Term::Label(normalise_label_query(value)),
+        // MEASURED: `newer_than:3d in:anywhere` → 94 against a baseline of 85,
+        // with `includeSpamTrash` left at its default. `q` can reach Spam and
+        // Trash without the parameter.
+        "in" if folded == "anywhere" => Term::Scope(Scope::Anywhere),
+        "label" | "in" => Term::Label(vec![normalise_label_query(value)]),
         "from" => Term::From(folded),
         "to" => Term::To(folded),
         "cc" => Term::Cc(folded),
@@ -567,7 +692,9 @@ fn parse_term(word: &str) -> Term {
         // `CATEGORY_PERSONAL` — Gmail has no `CATEGORY_PRIMARY` label at all,
         // and `reservations`/`purchases` are documented `q` values with **no**
         // label id, so `q` is the only way to ask for them.
-        "category" => category_label(&folded).map_or_else(fallback(word), Term::Label),
+        "category" => {
+            category_label(&folded).map_or_else(fallback(word), |label| Term::Label(vec![label]))
+        }
         // EDGE: an operator Gmail knows and this does not (`deliveredto:`,
         // `header:`, `AROUND`, …), or an unknown one entirely. Free text, never
         // an error. It matches nothing, which is also what an unindexed operator
@@ -582,66 +709,114 @@ fn fallback(word: &str) -> impl FnOnce(()) -> Term + '_ {
     move |()| Term::Text(word.to_ascii_lowercase())
 }
 
+/// How far back a `newer_than:`/`older_than:` argument reaches.
+///
+/// **`d` and `m` differ in kind**, which is the single least guessable thing in
+/// this module and is measured, not inferred:
+///
+/// * `Nh`/`Nd` is a **rolling instant** — `now` minus the duration, to the
+///   millisecond;
+/// * `Nm`/`Ny` is a **calendar step floored to a date** — N calendar months back
+///   from today, then midnight **UTC** of that date, which makes it behave
+///   exactly like `after:` at that date rather than like a duration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Span {
+    /// `Nh`, `Nd`: milliseconds back from the instant.
+    Rolling(i64),
+    /// `Nm`, `Ny`: calendar months back, floored to midnight UTC.
+    CalendarMonths(u32),
+}
+
+impl Span {
+    /// The cut-off instant, given the simulator's clock.
+    #[must_use]
+    pub fn boundary_ms(self, now_ms: i64) -> i64 {
+        match self {
+            Self::Rolling(span) => now_ms.saturating_sub(span),
+            Self::CalendarMonths(months) => {
+                let Some(now) = DateTime::<Utc>::from_timestamp_millis(now_ms) else {
+                    return i64::MIN;
+                };
+                now.date_naive()
+                    .checked_sub_months(Months::new(months))
+                    .and_then(|date| date.and_hms_opt(0, 0, 0))
+                    .map_or(i64::MIN, |at| at.and_utc().timestamp_millis())
+            }
+        }
+    }
+
+    /// Is the boundary inclusive?
+    ///
+    /// The calendar form is, because it is `after:` at that date and `after:` is
+    /// inclusive. The rolling form is exclusive. At second resolution the
+    /// difference is unobservable, which is why the probe could not separate
+    /// them; the distinction is kept because it follows from what each form *is*.
+    fn is_inclusive(self) -> bool {
+        matches!(self, Self::CalendarMonths(_))
+    }
+}
+
 /// `24h`, `30d`, `6m`, `1y` — and **nothing else**.
 ///
-/// Google documents three units for `newer_than:`/`older_than:` — `d`, `m`, `y`
-/// ([Gmail search operators][ops]) — but a live probe against a real mailbox
-/// settles the rest, and the docs are incomplete in both directions:
+/// Google documents three units — `d`, `m`, `y` ([Gmail search operators][ops])
+/// — and a live probe against the real account settles the rest. The docs are
+/// incomplete in both directions and wrong about `m`:
 ///
 /// | Unit | Status |
 /// |---|---|
-/// | `d`, `m`, `y` | documented **and** measured |
-/// | `h` | **undocumented, and it works** — `newer_than:24h` returns exactly what `newer_than:1d` returns |
-/// | `w` | measured: returns **nothing**. Not supported |
-/// | bare number, no unit | measured: returns **nothing**. Not supported |
+/// | `d` | documented, and **measured** to be a rolling instant: `newer_than:1d` → 35 ≡ `after:<now − 24h>` → 35, exact, and again at 30 days (86 ≡ 86) |
+/// | `h` | **undocumented, and it works** — `newer_than:24h` ≡ `newer_than:1d` |
+/// | `m` | documented, and **measured** to be a *calendar* month floored to midnight UTC — `newer_than:1m` → 88 ≡ `after:<2026-07-17 00:00 UTC>` → 88, while `after:<now − 31d>` → 86 discriminates |
+/// | `y` | documented; **unmeasured** (every scope tried stayed above the 500-id page cap). Modelled as 12 calendar months by analogy with `m` |
+/// | `w` | **measured**: returns nothing. Not supported |
+/// | bare number, no unit | **measured**: returns nothing. Not supported |
 ///
 /// `w` and a bare number therefore fall back to free text and match nothing,
 /// which is what the real API does with them. Accepting them would hand back a
 /// plausible-looking window that Gmail never produces.
 ///
-/// `m` is 30 days and `y` is 365. Whether Gmail means calendar months and years
-/// is still unmeasured; this is a stated approximation, and it is why NADE's own
-/// sync should compute its window and pass `after:`/`before:` in epoch seconds
-/// rather than lean on `newer_than:` at all.
-///
 /// [ops]: https://support.google.com/mail/answer/7190
-fn span_ms(value: &str) -> Result<i64, ()> {
+fn parse_span(value: &str) -> Result<Span, ()> {
     let (digits, unit) = value.split_at(value.len().saturating_sub(1));
-    let multiplier = match unit {
-        "h" => 3_600_000,
-        "d" => DAY_MS,
-        "m" => 30 * DAY_MS,
-        "y" => 365 * DAY_MS,
-        _ => return Err(()),
-    };
-    digits
-        .parse::<i64>()
-        .ok()
-        .filter(|count| *count >= 0)
-        .and_then(|count| count.checked_mul(multiplier))
-        .ok_or(())
+    let count: i64 = digits.parse().map_err(|_| ())?;
+    if count < 0 {
+        return Err(());
+    }
+    match unit {
+        "h" => count.checked_mul(3_600_000).map(Span::Rolling).ok_or(()),
+        "d" => count.checked_mul(DAY_MS).map(Span::Rolling).ok_or(()),
+        "m" => u32::try_from(count)
+            .map(Span::CalendarMonths)
+            .map_err(|_| ()),
+        "y" => u32::try_from(count)
+            .ok()
+            .and_then(|years| years.checked_mul(12))
+            .map(Span::CalendarMonths)
+            .ok_or(()),
+        _ => Err(()),
+    }
 }
 
-/// Gmail interprets a bare date as **midnight Pacific**, not midnight UTC.
+/// `YYYY/MM/DD`, `YYYY-MM-DD` (midnight **UTC**), or epoch seconds (exact).
 ///
-/// Straight from the API's own filtering guide: *"All dates used in the search
-/// query are interpreted as midnight on that date in the PST timezone. To
-/// specify accurate dates for other timezones pass the value in seconds
-/// instead."*
+/// The API's filtering guide says dates are *"interpreted as midnight on that
+/// date in the PST timezone"*. **The API does not do that.** Measured against
+/// the real account:
 ///
-/// Modelling UTC here would put every date bound eight hours out, and a
-/// 30-day-window sync that straddles a boundary would disagree with production
-/// by a whole day's mail at the edge.
+/// ```text
+/// after:2026/08/10                 260
+/// after:<Aug 10 00:00 UTC>         260   exact
+/// after:<Aug 10 00:00 PST, -8>     257
+/// after:<Aug 10 00:00 PDT, -7>     257
+/// ```
 ///
-/// **Fixed UTC−8**, because that is what Google's word "PST" literally says.
-/// Google never states whether it means the fixed offset or DST-aware
-/// `America/Los_Angeles`, so between mid-March and early November there is a
-/// documented-ambiguity window of one hour that no simulator can resolve. The
-/// safe client behaviour — and the one NADE should adopt — is to pass epoch
-/// seconds, which this also accepts and which has no ambiguity at all.
-const PACIFIC_OFFSET_MS: i64 = 8 * 60 * 60 * 1000;
-
-/// `YYYY/MM/DD`, `YYYY-MM-DD` (midnight Pacific), or epoch seconds (exact).
+/// Confirmed independently at a second scope, where `after:2026/07/17` and
+/// `after:<2026-07-17 00:00 UTC>` both returned 88. So it is UTC, and there is
+/// no Pacific involved and therefore no DST ambiguity window at all.
+///
+/// An earlier draft of this module implemented the documented Pacific offset.
+/// It was wrong, and it was wrong in the same way as four other corrections made
+/// from the same documentation — see `CRITERIA.md` §7.6.
 ///
 /// `MM/DD/YYYY` is *also* documented by Google, and is deliberately **not**
 /// accepted: `03/04/2004` is genuinely ambiguous between the two documented
@@ -661,7 +836,7 @@ fn date_ms(value: &str) -> Result<i64, ()> {
         let date = chrono::NaiveDate::from_ymd_opt(year, month, day).ok_or(())?;
         return date
             .and_hms_opt(0, 0, 0)
-            .map(|at| at.and_utc().timestamp_millis() + PACIFIC_OFFSET_MS)
+            .map(|at| at.and_utc().timestamp_millis())
             .ok_or(());
     }
     // Epoch seconds: exact, timezone-free, and what Google tells you to use.
@@ -804,10 +979,16 @@ mod tests {
         }
     }
 
+    /// Mirrors `Mailbox::label_name`: user labels have a display name, and
+    /// system labels are **self-named** (`INBOX` is named `INBOX`). Leaving the
+    /// system half out made this double lie, and `label:inbox` appeared to break
+    /// when the id fallback was removed.
     fn names(id: &str) -> Option<String> {
         match id {
             "Label_4" => Some("Receipts".to_owned()),
             "Label_5" => Some("Work Stuff".to_owned()),
+            "Label_26" => Some("Awaiting Reply".to_owned()),
+            other if crate::label::is_system(other) => Some(other.to_owned()),
             _ => None,
         }
     }
@@ -849,43 +1030,91 @@ mod tests {
     }
 
     #[test]
-    fn only_the_three_documented_span_units_are_accepted() {
-        // Google documents exactly `d`, `m`, `y`.
-        assert_eq!(span_ms("30d"), Ok(30 * DAY_MS));
-        assert_eq!(span_ms("6m"), Ok(180 * DAY_MS));
-        assert_eq!(span_ms("1y"), Ok(365 * DAY_MS));
-
-        // MEASURED: `h` is undocumented and works — `24h` == `1d`.
-        assert_eq!(span_ms("24h"), Ok(DAY_MS));
-        assert_eq!(span_ms("1h"), Ok(3_600_000));
+    fn span_units_parse_to_the_right_kind_of_boundary() {
+        // MEASURED: `d` and `h` are rolling instants…
+        assert_eq!(parse_span("30d"), Ok(Span::Rolling(30 * DAY_MS)));
+        assert_eq!(parse_span("24h"), Ok(Span::Rolling(DAY_MS)));
+        assert_eq!(parse_span("1h"), Ok(Span::Rolling(3_600_000)));
+        // …and `m`/`y` are calendar steps, which is a different kind of thing.
+        assert_eq!(parse_span("1m"), Ok(Span::CalendarMonths(1)));
+        assert_eq!(parse_span("6m"), Ok(Span::CalendarMonths(6)));
+        assert_eq!(parse_span("1y"), Ok(Span::CalendarMonths(12)));
 
         // MEASURED: `w` and a bare number return nothing from the real API.
-        // Accepting them would hand back a window Gmail never produces.
-        for unsupported in ["2w", "7", "30D", "30 d", ""] {
+        for unsupported in ["2w", "7", "30D", "30 d", "", "abc", "-3d"] {
             assert!(
-                span_ms(unsupported).is_err(),
+                parse_span(unsupported).is_err(),
                 "{unsupported:?} is not a supported span"
             );
         }
-        assert!(span_ms("abc").is_err());
-        assert!(span_ms("-3d").is_err());
-        assert!(span_ms("99999999999999999999d").is_err());
+        assert!(parse_span("99999999999999999999d").is_err());
     }
 
     #[test]
-    fn an_undocumented_span_unit_degrades_to_free_text_and_matches_nothing() {
-        // The whole point: `newer_than:1w` must not quietly behave like a
-        // seven-day window. It becomes a search term, finds nothing, and the
-        // client notices.
+    fn a_day_span_is_a_rolling_instant_and_a_month_span_is_a_calendar_date() {
+        // 2026-08-17T09:30:00Z — deliberately not midnight, so a rolling
+        // boundary and a floored one cannot coincide.
+        let now = DateTime::parse_from_rfc3339("2026-08-17T09:30:00Z")
+            .unwrap()
+            .timestamp_millis();
+
+        // MEASURED: `newer_than:1d` == `after:<now - 24h>`, exact.
+        assert_eq!(Span::Rolling(DAY_MS).boundary_ms(now), now - DAY_MS);
+
+        // MEASURED: `newer_than:1m` == `after:<midnight UTC one calendar month
+        // back>` — 2026-07-17T00:00:00Z, not `now - 30d` and not `now - 31d`.
+        let month_back = Span::CalendarMonths(1).boundary_ms(now);
         assert_eq!(
-            Query::parse("newer_than:1w"),
-            Query::Term(Term::Text("newer_than:1w".to_owned()))
+            month_back,
+            DateTime::parse_from_rfc3339("2026-07-17T00:00:00Z")
+                .unwrap()
+                .timestamp_millis()
         );
-        assert!(!hit("newer_than:1w", &[], 1));
-        assert!(
-            hit("newer_than:7d", &[], 1),
-            "the documented form still works"
+        assert_ne!(month_back, now - 30 * DAY_MS);
+        assert_ne!(month_back, now - 31 * DAY_MS);
+
+        // Calendar arithmetic, not 30-day arithmetic: February proves it.
+        let march = DateTime::parse_from_rfc3339("2026-03-31T12:00:00Z")
+            .unwrap()
+            .timestamp_millis();
+        assert_eq!(
+            Span::CalendarMonths(1).boundary_ms(march),
+            DateTime::parse_from_rfc3339("2026-02-28T00:00:00Z")
+                .unwrap()
+                .timestamp_millis(),
+            "31 March minus one month clamps to the end of February"
         );
+
+        // A year is twelve calendar months.
+        assert_eq!(
+            Span::CalendarMonths(12).boundary_ms(now),
+            DateTime::parse_from_rfc3339("2025-08-17T00:00:00Z")
+                .unwrap()
+                .timestamp_millis()
+        );
+    }
+
+    #[test]
+    fn an_unsupported_span_unit_degrades_to_free_text_and_matches_nothing() {
+        // MEASURED: `newer_than:1w` and a bare `newer_than:30` both return
+        // nothing from the real API, so they must not quietly behave like a
+        // window here either.
+        for unsupported in ["newer_than:1w", "newer_than:30"] {
+            assert_eq!(
+                Query::parse(unsupported),
+                Query::Term(Term::Text(unsupported.to_owned())),
+                "{unsupported} must not parse as a span"
+            );
+            assert!(!hit(unsupported, &[], 1));
+        }
+        assert!(hit("newer_than:7d", &[], 1), "the documented form works");
+        // MEASURED: hours are real, and 24h is exactly 1d.
+        assert_eq!(
+            Query::parse("newer_than:24h"),
+            Query::parse("newer_than:1d")
+        );
+        assert!(hit("newer_than:24h", &[], 0));
+        assert!(!hit("newer_than:24h", &[], 2));
     }
 
     #[test]
@@ -1038,16 +1267,24 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_date_means_midnight_pacific_not_midnight_utc() {
-        // Google: "All dates used in the search query are interpreted as
-        // midnight on that date in the PST timezone." Eight hours, and a
-        // 30-day window that straddles the boundary disagrees by a day's mail.
+    fn a_bare_date_means_midnight_utc_whatever_the_docs_say() {
+        // Google's filtering guide says dates are "interpreted as midnight on
+        // that date in the PST timezone". MEASURED: they are not.
+        //
+        //   after:2026/08/10             260
+        //   after:<Aug 10 00:00 UTC>     260   exact
+        //   after:<Aug 10 00:00 -08:00>  257
+        //   after:<Aug 10 00:00 -07:00>  257
+        //
+        // Confirmed at a second scope, where `after:2026/07/17` and
+        // `<2026-07-17 00:00 UTC>` both returned 88. It is UTC, so there is no
+        // Pacific and therefore no DST ambiguity window at all.
         const UTC_MIDNIGHT: i64 = 1_785_542_400_000; // 2026-08-01T00:00:00Z
-        assert_eq!(date_ms("2026/08/01"), Ok(UTC_MIDNIGHT + 8 * 3_600_000));
-        assert_eq!(date_ms("2026-08-01"), Ok(UTC_MIDNIGHT + 8 * 3_600_000));
+        assert_eq!(date_ms("2026/08/01"), Ok(UTC_MIDNIGHT));
+        assert_eq!(date_ms("2026-08-01"), Ok(UTC_MIDNIGHT));
 
-        // Epoch seconds are exact and timezone-free — what Google tells you to
-        // send, and the only form with no ambiguity at all.
+        // Epoch seconds are exact and agree with the bare date, which is the
+        // whole point of the measurement above.
         assert_eq!(date_ms("1785542400"), Ok(UTC_MIDNIGHT));
 
         // `MM/DD/YYYY` is also documented by Google and is refused here on

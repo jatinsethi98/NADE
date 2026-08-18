@@ -6,8 +6,13 @@
 //  16 pt circle, 1.5 pt ring; selected = accent fill with a 4 pt inset ring in
 //  `bg` (a donut).
 //
-//  Row geometry from 1c Invocation / 1d Ends: padding `11 / 0` with a top
-//  divider, label 15 pt + hint 12 pt `ink55`, optional right-aligned value.
+//  Two rows, not one. The mockup uses different numbers on 1c and 1d and a
+//  single "radio row" that averages them is wrong on both screens:
+//
+//  | Preset        | Screen | Label | Gap | Padding | Align    | Trailing |
+//  |---------------|--------|-------|-----|---------|----------|----------|
+//  | `.invocation` | 1c     | 15    | 11  | 11 / 0  | top      | —        |
+//  | `.ends`       | 1d     | 14    | 11  | 9 / 0   | centre   | 13 pt    |
 //
 
 import SwiftUI
@@ -50,33 +55,70 @@ struct NRadioDot: View {
     private var ringScale: CGFloat { diameter / 16 }
 }
 
-struct NRadioRow<Trailing: View>: View {
-    static var labelSize: CGFloat { 15 }
-    static var hintSize: CGFloat { 12 }
+struct NRadioRow: View {
+    struct Metrics: Sendable, Equatable {
+        var labelSize: CGFloat
+        var hintSize: CGFloat
+        var valueSize: CGFloat
+        var gap: CGFloat
+        var paddingV: CGFloat
+        /// 1c aligns the dot to the label's first baseline (the mockup's
+        /// `align-items: flex-start` + `margin-top: 3` on the dot); 1d centres
+        /// the whole row.
+        var alignsToFirstBaseline: Bool
+
+        /// 1c Invocation — DESIGN.md §3 1c: rows `11 / 0`, gap 11, label 15,
+        /// hint 12 `ink55`, dot `margin-top: 3`.
+        static let invocation = Metrics(
+            labelSize: 15, hintSize: 12, valueSize: 13,
+            gap: 11, paddingV: 11, alignsToFirstBaseline: true
+        )
+        /// 1d Ends — DESIGN.md §3 1d: rows `9 / 0`, gap 11,
+        /// `align-items: center`, label 14, right value 13 tabular.
+        static let ends = Metrics(
+            labelSize: 14, hintSize: 12, valueSize: 13,
+            gap: 11, paddingV: 9, alignsToFirstBaseline: false
+        )
+    }
+
+    /// EDGE (E6): what VoiceOver actually says. 1d's rows differ only in their
+    /// trailing value ("16 Sep 2026", "12 runs"); drop it and the three options
+    /// are indistinguishable. Kept as a pure function so the composition is
+    /// unit-testable without a render.
+    static func spokenLabel(label: String, hint: String?) -> String {
+        guard let hint, !hint.isEmpty else { return label }
+        return "\(label), \(hint)"
+    }
 
     private let label: String
     private let hint: String?
+    private let value: String?
     private let isSelected: Bool
+    private let metrics: Metrics
     private let action: () -> Void
-    private let trailing: Trailing
 
     init(
         _ label: String,
         hint: String? = nil,
+        value: String? = nil,
         isSelected: Bool,
-        action: @escaping () -> Void,
-        @ViewBuilder trailing: () -> Trailing
+        metrics: Metrics = .invocation,
+        action: @escaping () -> Void
     ) {
         self.label = label
         self.hint = hint
+        self.value = value
         self.isSelected = isSelected
+        self.metrics = metrics
         self.action = action
-        self.trailing = trailing()
     }
 
     var body: some View {
         Button(action: action) {
-            HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s2) {
+            HStack(
+                alignment: metrics.alignsToFirstBaseline ? .firstTextBaseline : .center,
+                spacing: metrics.gap
+            ) {
                 // Baseline-aligning a shape needs an explicit anchor, otherwise
                 // the dot floats to the bottom of the row.
                 NRadioDot(isSelected: isSelected)
@@ -84,52 +126,60 @@ struct NRadioRow<Trailing: View>: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(label)
-                        .font(Theme.Font.body(Self.labelSize))
+                        .font(Theme.Font.body(metrics.labelSize))
                         .foregroundStyle(Theme.Color.ink)
+                        .nadeLineHeight(Theme.LineHeight.body, size: metrics.labelSize)
                         .fixedSize(horizontal: false, vertical: true)   // EDGE (E3)
                     if let hint, !hint.isEmpty {
                         Text(hint)
-                            .font(Theme.Font.body(Self.hintSize))
+                            .font(Theme.Font.body(metrics.hintSize))
                             .foregroundStyle(Theme.Color.ink55)
+                            .nadeLineHeight(Theme.LineHeight.body, size: metrics.hintSize)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                trailing
+                if let value, !value.isEmpty {
+                    NRadioValue(value, isSelected: isSelected, size: metrics.valueSize)
+                }
             }
-            .padding(.vertical, 11)
+            .padding(.vertical, metrics.paddingV)
             .contentShape(Rectangle())
+            // No `nadeHitTarget` here: these rows stack edge to edge, so a
+            // target taller than the row would overlap its neighbours and the
+            // last one drawn would quietly steal the other's top edge. 1c's
+            // row measures ~66 and 1d's ~40, both full-width — the 1d row is
+            // 4 pt shy of the minimum in one dimension and ~400 pt over it in
+            // the other, which is not the failure mode E17 is about.
         }
         .buttonStyle(.plain)
-        // EDGE (E6): one element, spoken as "<label>, <hint>, selected".
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(hint.map { "\(label), \($0)" } ?? label)
+        // EDGE (E6): one element, spoken as "<label>, <hint>: <value>, selected".
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Self.spokenLabel(label: label, hint: hint))
+        .nadeAccessibilityValue(value)
         .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 }
 
-extension NRadioRow where Trailing == EmptyView {
-    init(_ label: String, hint: String? = nil, isSelected: Bool, action: @escaping () -> Void) {
-        self.init(label, hint: hint, isSelected: isSelected, action: action) { EmptyView() }
-    }
-}
-
-/// The right-hand value on 1d's "Ends" rows: 13 pt tabular, accent when that
-/// option is selected, `ink55` otherwise.
+/// The right-hand value on 1d's "Ends" rows: 13 pt tabular. DESIGN.md §3 1d:
+/// "**ink when that option is selected and `ink62` when it is not** — it is the
+/// muted state that is coloured, never the selected one."
 struct NRadioValue: View {
     private let text: String
-    private let isActive: Bool
+    private let isSelected: Bool
+    private let size: CGFloat
 
-    init(_ text: String, isActive: Bool) {
+    init(_ text: String, isSelected: Bool, size: CGFloat = 13) {
         self.text = text
-        self.isActive = isActive
+        self.isSelected = isSelected
+        self.size = size
     }
 
     var body: some View {
         Text(text)
-            .font(Theme.Font.body(13))
-            .foregroundStyle(isActive ? Theme.Color.accent : Theme.Color.ink55)
+            .font(Theme.Font.body(size))
+            .foregroundStyle(isSelected ? Theme.Color.ink : Theme.Color.ink62)
             .tabularNumerals()
             .lineLimit(1)   // EDGE (E3)
     }

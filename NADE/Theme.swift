@@ -421,6 +421,17 @@ extension View {
         self.monospacedDigit()
     }
 
+    /// Sets an accessibility value only when there is one. An empty value is
+    /// noise; a missing one loses 1d's "16 Sep 2026" and "12 runs" entirely.
+    @ViewBuilder
+    func nadeAccessibilityValue(_ value: String?) -> some View {
+        if let value, !value.isEmpty {
+            self.accessibilityValue(Text(value))
+        } else {
+            self
+        }
+    }
+
     /// CSS `letter-spacing` in **em**, scaled with Dynamic Type.
     /// Uppercase eyebrows are 0.09–0.10 em; uppercase meta 0.06–0.08 em.
     func nadeTracking(_ em: CGFloat, at size: CGFloat, relativeTo style: Font.TextStyle? = nil) -> some View {

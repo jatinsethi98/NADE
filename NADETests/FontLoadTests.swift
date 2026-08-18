@@ -7,9 +7,17 @@
 //  quietly rendering in the system face and nobody noticing until a screenshot
 //  review months later.
 //
+//  Registration is necessary but not sufficient. `UIFont(name:)` returning
+//  non-nil only proves the face is *installed*; it says nothing about whether
+//  `Theme.Font.heading` / `Theme.Font.body` actually reach it. Both wrappers
+//  could be swapped for `Font.system` and every registration test would stay
+//  green. `RenderedFaceTests` (below) closes that by measuring real rendered
+//  text and comparing it with what Core Text lays out in the expected face.
+//
 
 import CoreGraphics
 import CoreText
+import SwiftUI
 import UIKit
 import XCTest
 @testable import NADE
@@ -129,19 +137,38 @@ final class FontLoadTests: XCTestCase {
         }
     }
 
-    /// Both families ship a `tnum` feature, which is what makes
-    /// `.tabularNumerals()` a real substitution rather than a no-op.
-    func testBothFamiliesSupportTabularFigures() throws {
+    /// Both families must ship the **monospaced-numbers selector**, not merely
+    /// a number-spacing feature type. `kNumberSpacingType` (6) is also the type
+    /// that carries *proportional* numbers; a face offering only selector 1
+    /// would satisfy "the type exists" while `.monospacedDigit()` did nothing.
+    func testBothFamiliesOfferTheMonospacedNumbersSelector() throws {
+        // <CoreText/SFNTLayoutTypes.h>: kNumberSpacingType = 6,
+        // kMonospacedNumbersSelector = 0.
+        let numberSpacingType = 6
+        let monospacedNumbersSelector = 0
+
         for expected in Self.expected {
             let font = try XCTUnwrap(UIFont(name: expected.psName, size: 17))
-            let ctFont = font as CTFont
-            let features = CTFontCopyFeatures(ctFont) as? [[String: Any]] ?? []
-            let hasNumberSpacing = features.contains { feature in
-                (feature[kCTFontFeatureTypeIdentifierKey as String] as? Int) == 6  // kNumberSpacingType
+            let features = CTFontCopyFeatures(font as CTFont) as? [[String: Any]] ?? []
+
+            let numberSpacing = features.first { feature in
+                (feature[kCTFontFeatureTypeIdentifierKey as String] as? Int) == numberSpacingType
+            }
+            let spacing = try XCTUnwrap(
+                numberSpacing,
+                "\(expected.psName) has no number-spacing feature (type \(numberSpacingType))"
+            )
+
+            let selectors = spacing[kCTFontFeatureTypeSelectorsKey as String] as? [[String: Any]] ?? []
+            let identifiers = selectors.compactMap {
+                $0[kCTFontFeatureSelectorIdentifierKey as String] as? Int
             }
             XCTAssertTrue(
-                hasNumberSpacing,
-                "\(expected.psName) has no number-spacing feature — .tabularNumerals() would be a no-op"
+                identifiers.contains(monospacedNumbersSelector),
+                """
+                \(expected.psName) exposes number-spacing selectors \(identifiers) but not \
+                \(monospacedNumbersSelector) (monospaced) — .tabularNumerals() would be a no-op.
+                """
             )
         }
     }
@@ -153,5 +180,113 @@ final class FontLoadTests: XCTestCase {
             Set(Theme.Font.PostScriptName.all),
             Set(Self.expected.map(\.psName))
         )
+    }
+}
+
+// MARK: - What actually renders
+
+/// Registration proves the face is installed. These prove `Theme.Font` reaches
+/// it: each one renders a real `Text` through the Theme API and compares the
+/// size SwiftUI resolves with the size Core Text lays out in the expected face —
+/// and separately with the size the **system** face would produce.
+///
+/// Swap `Theme.Font.heading`/`body` for `Font.system` and both fail.
+@MainActor
+final class RenderedFaceTests: XCTestCase {
+
+    /// Wide letters and a few numerals: Cormorant, Lora and SF separate by
+    /// 7–15 pt of width on this string at 17 pt, and by 1.4–1.7 pt of height.
+    private static let sample = "MWmw@#%&Wjgy 0123"
+    private static let size: CGFloat = 17
+
+    private struct Case {
+        let name: String
+        let font: SwiftUI.Font
+        let psName: String
+    }
+
+    private static let cases: [Case] = [
+        Case(name: "heading semibold", font: Theme.Font.heading(size), psName: Theme.Font.PostScriptName.headingSemibold),
+        Case(name: "heading regular", font: Theme.Font.heading(size, weight: .regular), psName: Theme.Font.PostScriptName.headingRegular),
+        Case(name: "body regular", font: Theme.Font.body(size), psName: Theme.Font.PostScriptName.bodyRegular),
+        Case(name: "body semibold", font: Theme.Font.body(size, weight: .semibold), psName: Theme.Font.PostScriptName.bodySemibold),
+    ]
+
+    private func rendered(_ font: SwiftUI.Font) -> CGSize {
+        RenderMeasure.size(of: Text(Self.sample).font(font).lineLimit(1))
+    }
+
+    func testEveryThemeFontRendersInItsBundledFace() throws {
+        for c in Self.cases {
+            let face = try XCTUnwrap(UIFont(name: c.psName, size: Self.size), "\(c.psName) missing")
+            let got = rendered(c.font)
+
+            // Two roundings onto the device pixel grid: ⅔ pt at @3x, 1 pt on
+            // the @2x SE. The faces are 15–20 pt apart on this sample, so this
+            // cannot swallow the wrong one.
+            let grid = 2 * RenderMeasure.snap
+            XCTAssertMeasures(
+                got.width, RenderMeasure.typesetWidth(Self.sample, font: face),
+                accuracy: grid,
+                "Theme.Font.\(c.name) rendered width (expected \(c.psName))"
+            )
+            XCTAssertMeasures(
+                got.height, face.lineHeight, accuracy: grid,
+                "Theme.Font.\(c.name) rendered line height (expected \(c.psName))"
+            )
+        }
+    }
+
+    /// The regression this suite exists for: someone replaces the wrapper's
+    /// body with `.system(size:)` and the registration tests stay green.
+    func testNoThemeFontRendersInTheSystemFace() {
+        let system = UIFont.systemFont(ofSize: Self.size)
+        let systemSize = CGSize(
+            width: RenderMeasure.typesetWidth(Self.sample, font: system),
+            height: system.lineHeight
+        )
+
+        for c in Self.cases {
+            let got = rendered(c.font)
+            let widthGap = abs(got.width - systemSize.width)
+            let heightGap = abs(got.height - systemSize.height)
+            XCTAssertTrue(
+                widthGap > 1 || heightGap > 1,
+                """
+                Theme.Font.\(c.name) rendered \(got), which is what the *system* face \
+                renders (\(systemSize)). It is not going through \(c.psName).
+                """
+            )
+        }
+    }
+
+    /// Cormorant and Lora must not be the same face — a copy-paste in
+    /// `Theme.Font` that pointed both at Lora would otherwise be invisible.
+    func testHeadingAndBodyRenderDifferently() {
+        let heading = rendered(Theme.Font.heading(Self.size))
+        let body = rendered(Theme.Font.body(Self.size))
+        XCTAssertGreaterThan(
+            abs(heading.width - body.width), 5,
+            "heading \(heading) and body \(body) render the same width — both are resolving to one face"
+        )
+    }
+
+    /// Every Theme style is `relativeTo:`, so it must actually grow with
+    /// Dynamic Type. A `Font.custom(_:fixedSize:)` regression freezes it.
+    func testThemeFontsGrowWithDynamicType() {
+        for c in Self.cases {
+            let atLarge = RenderMeasure.size(
+                of: Text(Self.sample).font(c.font).lineLimit(1),
+                dynamicTypeSize: .large
+            )
+            let atAX5 = RenderMeasure.size(
+                of: Text(Self.sample).font(c.font).lineLimit(1),
+                dynamicTypeSize: .accessibility5
+            )
+            XCTAssertGreaterThan(
+                atAX5.width, atLarge.width * 1.5,
+                "Theme.Font.\(c.name) barely grew from .large \(atLarge) to AX5 \(atAX5) — it is not dynamic"
+            )
+        }
     }
 }

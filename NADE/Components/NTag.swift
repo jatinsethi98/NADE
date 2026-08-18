@@ -64,6 +64,8 @@ struct NTag: View {
             // EDGE (E3): a tag never grows past its row; it truncates.
             .lineLimit(1)
             .truncationMode(.tail)
+            // Inherited `line-height: 1.55` — 11 × 1.55 + 6 = 23.05.
+            .nadeLineHeight(Theme.LineHeight.body, size: Self.fontSize)
             .padding(.vertical, Self.paddingV)
             .padding(.horizontal, Self.paddingH)
             // EDGE (E4): an empty tag keeps its pill rather than drawing a sliver.
