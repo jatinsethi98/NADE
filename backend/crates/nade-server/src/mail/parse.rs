@@ -52,6 +52,11 @@ pub struct ParsedAttachment {
     pub content_id: Option<String>,
     /// True when the HTML references this part with `cid:` (`API.md` §2).
     pub inline: bool,
+    /// Position among this message's attachments, in part-tree order. A name
+    /// and a size do not identify a part - a message may carry two files called
+    /// `invoice.pdf` of identical length - so this is what tells them apart
+    /// when the download resolves `att_id` back to a live Gmail part.
+    pub ordinal: i32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -674,6 +679,7 @@ fn attachments(
                 size_bytes: i64::try_from(part.len()).unwrap_or(i64::MAX),
                 content_id,
                 inline,
+                ordinal: i32::try_from(index).unwrap_or(i32::MAX),
             })
         })
         .collect()
@@ -1209,11 +1215,6 @@ mod tests {
         assert_eq!(parsed.body_text, "Real HTML.");
     }
 
-    /// `body_text` has had a cap since the red-team corpus produced 516,019
-    /// characters from one message. Its sibling had **none**: `body_html` went
-    /// into an unbounded `text` column and straight out to a `WKWebView`, so a
-    /// hostile 500 KB body sailed through untouched.
-    #[test]
     /// Regression, found by the *second* live sync — after the first fix for
     /// the same symptom.
     ///
@@ -1286,6 +1287,10 @@ Content-Type: text/html; charset=\"utf-8\"\r\n\r\n\
         println!("live control-character check: {checked} messages, 0 NULs reach storage");
     }
 
+    /// `body_text` has had a cap since the red-team corpus produced 516,019
+    /// characters from one message. Its sibling had **none**: `body_html` went
+    /// into an unbounded `text` column and straight out to a `WKWebView`, so a
+    /// hostile 500 KB body sailed through untouched.
     #[test]
     fn body_html_is_capped_in_bytes() {
         let padding = "<span>x</span>".repeat(MAX_BODY_HTML_BYTES / 4);
@@ -1679,5 +1684,35 @@ Content-Type: text/html; charset=\"utf-8\"\r\n\r\n\
         assert!(a
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'));
+    }
+
+    /// Two files, one name, one length - which is ordinary, and which name and
+    /// size alone cannot tell apart. `ordinal` is what makes the download able
+    /// to (backend/DECISIONS.md D25).
+    #[test]
+    fn identical_attachments_get_distinct_ids_and_ordinals() {
+        let raw = b"From: a@b.com\r\nSubject: two invoices\r\n\
+Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
+--b\r\nContent-Type: text/plain\r\n\r\nboth attached\r\n\
+--b\r\nContent-Type: application/pdf\r\n\
+Content-Disposition: attachment; filename=\"invoice.pdf\"\r\n\r\nAAAAAAAA\r\n\
+--b\r\nContent-Type: application/pdf\r\n\
+Content-Disposition: attachment; filename=\"invoice.pdf\"\r\n\r\nBBBBBBBB\r\n\
+--b--\r\n"
+            .to_vec();
+
+        let parsed = parse(&raw, "18f2a1b3c4d5e6f7").expect("parses");
+        assert_eq!(parsed.attachments.len(), 2);
+        let [first, second] = &parsed.attachments[..] else {
+            panic!("two attachments");
+        };
+
+        assert_eq!(first.name, second.name);
+        assert_eq!(first.size_bytes, second.size_bytes);
+        assert_eq!((first.ordinal, second.ordinal), (0, 1));
+        assert_ne!(
+            first.att_id, second.att_id,
+            "the id has to separate them even when nothing else does"
+        );
     }
 }

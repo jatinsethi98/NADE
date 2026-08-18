@@ -40,13 +40,36 @@ pair:
 
 # The consent click is the one step only a human can do; everything either side
 # of it is covered by the wiremock suite.
+#
+# `/v1/auth/gmail/start` is no longer a URL you can just type: it demands a
+# single-use capability minted by `POST /v1/auth/gmail/link`, which is behind
+# the bearer guard (backend/DECISIONS.md D15). So this recipe walks the whole
+# path a paired device walks - pair, mint, print - against a running server.
 # Print the URL to open in a browser to connect Gmail.
 gmail-connect:
-    @echo "Start the server with \`just run\`, then open:"
-    @echo "  http://${NADE_BIND:-127.0.0.1}:${NADE_PORT:-8080}/v1/auth/gmail/start"
-    @echo
-    @echo "It redirects to Google, and the callback binds the account, stores the"
-    @echo "tokens, and queues the first 30-day sync."
+    #!/usr/bin/env bash
+    set -euo pipefail
+    base="http://${NADE_BIND:-127.0.0.1}:${NADE_PORT:-8080}"
+    if ! curl -fsS "$base/v1/healthz" >/dev/null; then
+        echo "No server on $base - start one with \`just run\` first." >&2
+        exit 1
+    fi
+    code="$(NADE_ENV=${NADE_ENV:-dev} cargo run -q -p {{ crate }} -- --print-pair-code \
+              | sed -n 's/.*pairing code: *\([0-9]\{6\}\).*/\1/p' | head -1)"
+    token="$(curl -fsS -XPOST "$base/v1/auth/pair" \
+              -H 'content-type: application/json' \
+              -d "{\"code\":\"$code\",\"device_name\":\"just gmail-connect\"}" \
+              | grep -oE 'nade_[0-9a-f]{64}')"
+    url="$(curl -fsS -XPOST "$base/v1/auth/gmail/link" \
+              -H "Authorization: Bearer $token" \
+              | grep -oE 'https?://[^"]+')"
+    echo
+    echo "Open this in a browser - single use, ten minutes, and consent must"
+    echo "finish in the same browser that opens it:"
+    echo "  $url"
+    echo
+    echo "It redirects to Google, and the callback binds the account, stores the"
+    echo "tokens, and queues the first 30-day sync."
 
 # The parser conformance corpus and the live-mail smoke, with their counts.
 parser:

@@ -40,6 +40,17 @@ pub const STATE_TTL: Duration = Duration::from_secs(600);
 /// browser route must not be a memory-growth lever.
 const MAX_PENDING: usize = 64;
 
+/// The advisory-lock key that makes "this server serves exactly one mailbox"
+/// atomic rather than hopeful.
+///
+/// The value is arbitrary - the ASCII of `nadeacct`, so it is recognisable in
+/// `pg_locks` - and what matters is only that **every** writer of `accounts`
+/// takes the same one. Deliberately *not* a `unique index on accounts ((true))`:
+/// six tests in `db.rs` insert several accounts on purpose, to prove that every
+/// query is scoped per account, and a hard singleton index would forbid exactly
+/// the tests that prove isolation.
+pub const ACCOUNT_SINGLETON_LOCK: i64 = i64::from_be_bytes(*b"nadeacct");
+
 /// Refresh this long before the access token actually dies.
 ///
 /// EDGE (clock skew): our clock and Google's disagree, and a token that expires
@@ -172,10 +183,25 @@ impl OAuthConfig {
 
 // ------------------------------------------------------ pending consents --
 
-/// `state` → PKCE verifier, single-use and expiring.
+/// Everything `start` has to hand `callback`, keyed by the OAuth `state`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pending {
+    /// Proves the callback belongs to the flow we started.
+    pub verifier: String,
+    /// Proves the callback arrived in the **same browser**: the value of the
+    /// `HttpOnly` cookie `start` set. Without it, a `state` lifted out of the
+    /// redirect (a shared screen, a proxy log, a referrer) would be enough to
+    /// finish somebody else's consent.
+    pub binding: String,
+    /// The device whose capability opened this flow, so revoking it closes the
+    /// flow too. `None` is the dev-token principal, which has no `devices` row.
+    pub device_id: Option<Uuid>,
+}
+
+/// `state` → [`Pending`], single-use and expiring.
 #[derive(Debug, Default)]
 pub struct PendingAuths {
-    entries: Mutex<HashMap<String, (String, Instant)>>,
+    entries: Mutex<HashMap<String, (Pending, Instant)>>,
 }
 
 impl PendingAuths {
@@ -184,29 +210,37 @@ impl PendingAuths {
         Self::default()
     }
 
-    pub fn remember(&self, state: String, verifier: String) {
+    pub fn remember(&self, state: String, pending: Pending) {
+        self.remember_at(state, pending, Instant::now());
+    }
+
+    /// Remember with a chosen birth instant.
+    ///
+    /// `pub(crate)` and test-seam-shaped on purpose: the ten-minute `state` TTL
+    /// is otherwise a ten-minute test (CRITERIA K2a).
+    fn remember_at(&self, state: String, pending: Pending, born: Instant) {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        entries.retain(|_, (_, born)| now.duration_since(*born) < STATE_TTL);
+        entries.retain(|_, (_, seen)| !expired(*seen, now));
         if entries.len() >= MAX_PENDING {
             // Drop the oldest rather than refusing a legitimate new consent.
             if let Some(oldest) = entries
                 .iter()
-                .min_by_key(|(_, (_, born))| *born)
+                .min_by_key(|(_, (_, seen))| *seen)
                 .map(|(key, _)| key.clone())
             {
                 entries.remove(&oldest);
             }
         }
-        entries.insert(state, (verifier, now));
+        entries.insert(state, (pending, born));
     }
 
     /// Consume a `state`. `None` when it is unknown, already spent, or expired -
     /// which are deliberately indistinguishable to the caller.
-    pub fn take(&self, state: &str) -> Option<String> {
+    pub fn take(&self, state: &str) -> Option<Pending> {
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
-        let (verifier, born) = entries.remove(state)?;
-        (Instant::now().duration_since(born) < STATE_TTL).then_some(verifier)
+        let (pending, born) = entries.remove(state)?;
+        (!expired(born, Instant::now())).then_some(pending)
     }
 
     #[must_use]
@@ -218,6 +252,19 @@ impl PendingAuths {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Plant an entry with a chosen birth instant, for the TTL tests.
+    #[cfg(test)]
+    pub fn remember_expiring_at(&self, state: String, pending: Pending, born: Instant) {
+        self.remember_at(state, pending, born);
+    }
+}
+
+/// EDGE (clock skew / clock running backwards): `Instant` is monotonic, so the
+/// wall clock cannot lengthen a consent window, and `saturating_duration_since`
+/// treats an entry stamped in the future as live rather than panicking.
+fn expired(born: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(born) >= STATE_TTL
 }
 
 // --------------------------------------------------------------- tokens --
@@ -243,6 +290,14 @@ pub enum TokenError {
     NeedsReauth,
     #[error("no Gmail account is connected")]
     NotConnected,
+    /// A **different** mailbox already owns this server. v1 is single-account,
+    /// and rebinding would silently repoint every stored message at a new owner.
+    ///
+    /// Raised from inside `save_consent`'s transaction, under the singleton
+    /// advisory lock, which is what makes it authoritative rather than advisory:
+    /// two callbacks racing for two different addresses cannot both win.
+    #[error("this server is already connected to {existing}")]
+    AlreadyBound { existing: String },
     #[error("gmail oauth: {0}")]
     Other(String),
 }
@@ -364,8 +419,14 @@ impl TokenStore {
 
     /// Persist a fresh consent, creating or updating the single account row.
     ///
+    /// **This is the authoritative singleton check.** The handler's
+    /// [`existing_account_email`] pre-check is a courtesy that buys the friendly
+    /// path; only the re-check below, inside this transaction and under
+    /// [`ACCOUNT_SINGLETON_LOCK`], is a guarantee.
+    ///
     /// # Errors
-    /// Returns an error if the write fails.
+    /// [`TokenError::AlreadyBound`] when a different mailbox already owns this
+    /// server, or an error if the write fails.
     pub async fn save_consent(
         &self,
         email: &str,
@@ -373,13 +434,57 @@ impl TokenStore {
     ) -> Result<Uuid, TokenError> {
         let mut tx = self.pool.begin().await?;
 
-        let account_id: Uuid = sqlx::query_scalar(
-            "insert into accounts (email, status) values ($1, 'ok') \
-             on conflict (email) do update set status = 'ok' returning id",
-        )
-        .bind(email)
-        .fetch_one(&mut *tx)
-        .await?;
+        // First statement in the transaction, before anything is read: two
+        // concurrent callbacks used to both observe "no account" and both
+        // insert. `accounts.email` being unique did not stop them, because the
+        // whole point of the race is that the two addresses differ.
+        //
+        // EDGE (crash mid-step): `pg_advisory_xact_lock` is released by COMMIT
+        // *and* by ROLLBACK, and by the backend dying - so a consent that fails
+        // half way cannot leave the lock held and wedge every later sign-in.
+        sqlx::query("select pg_advisory_xact_lock($1)")
+            .bind(ACCOUNT_SINGLETON_LOCK)
+            .execute(&mut *tx)
+            .await?;
+
+        // EDGE (duplicate delivery): the *same* mailbox re-consenting is
+        // idempotent and must not 409 - that is the `needs_reauth` recovery
+        // path. Only a different address is refused, and case is ignored
+        // because Gmail echoes whatever the user typed.
+        let existing: Option<(Uuid, String)> =
+            sqlx::query_as("select id, email from accounts order by created_at, id limit 1")
+                .fetch_optional(&mut *tx)
+                .await?;
+
+        let account_id: Uuid = match existing {
+            Some((id, bound)) => {
+                if !bound.eq_ignore_ascii_case(email) {
+                    return Err(TokenError::AlreadyBound { existing: bound });
+                }
+                // EDGE (case): `accounts.email` is unique but PostgreSQL text
+                // is case-sensitive, so `on conflict (email)` would happily
+                // insert a *second* row for the same mailbox spelled
+                // differently. Update the row we already have instead.
+                sqlx::query("update accounts set status = 'ok' where id = $1")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                id
+            }
+            // Under the lock there is provably no account, so this cannot
+            // conflict; `on conflict` is kept only so a row inserted outside
+            // the lock (a test fixture, a manual `psql`) is absorbed rather
+            // than raising a unique violation.
+            None => {
+                sqlx::query_scalar(
+                    "insert into accounts (email, status) values ($1, 'ok') \
+                     on conflict (email) do update set status = 'ok' returning id",
+                )
+                .bind(email)
+                .fetch_one(&mut *tx)
+                .await?
+            }
+        };
 
         let access = self
             .cipher
@@ -724,14 +829,35 @@ pub struct BridgeError(String);
 /// mailbox, binding it would silently repoint every stored message at a new
 /// owner. Refuse instead.
 ///
+/// This is the **cheap pre-check**, outside any transaction, and it exists only
+/// so the friendly path renders a friendly page. The guarantee lives in
+/// [`TokenStore::save_consent`], under [`ACCOUNT_SINGLETON_LOCK`].
+///
+/// `order by created_at, id`: `created_at` alone is not a total order - two rows
+/// inserted in the same transaction, or on a clock with coarse resolution, tie -
+/// and "the account" must be the same row on every call.
+///
 /// # Errors
 /// Returns an error if the query fails.
 pub async fn existing_account_email(pool: &PgPool) -> Result<Option<String>> {
     let email: Option<String> =
-        sqlx::query_scalar("select email from accounts order by created_at limit 1")
+        sqlx::query_scalar("select email from accounts order by created_at, id limit 1")
             .fetch_optional(pool)
             .await?;
     Ok(email)
+}
+
+/// Read a single query-string parameter.
+///
+/// EDGE (empty input / unicode): an absent key, an empty value and a value that
+/// is not valid percent-encoded UTF-8 all come back as `None` or as the
+/// undecoded text, never as a panic.
+#[must_use]
+pub fn query_param(query: &str, key: &str) -> Option<String> {
+    url_pairs(query)
+        .into_iter()
+        .find(|(name, value)| name == key && !value.is_empty())
+        .map(|(_, value)| value)
 }
 
 /// Read a `state` and `code` out of the callback query string.
@@ -825,28 +951,86 @@ mod tests {
         assert_ne!(verifier, second_verifier);
     }
 
+    fn sample_pending() -> Pending {
+        Pending {
+            verifier: "verifier".into(),
+            binding: "cookie".into(),
+            device_id: None,
+        }
+    }
+
     /// Criterion K2 - single use, and expiry.
     #[test]
     fn a_state_is_single_use_and_expires() {
         let pending = PendingAuths::new();
-        pending.remember("abc".into(), "verifier".into());
-        assert_eq!(pending.take("abc").as_deref(), Some("verifier"));
+        pending.remember("abc".into(), sample_pending());
+        assert_eq!(pending.take("abc"), Some(sample_pending()));
         assert_eq!(pending.take("abc"), None, "replay must be refused");
         assert_eq!(pending.take("never-issued"), None);
         assert!(pending.is_empty());
+    }
+
+    /// Criterion K2a - the ten-minute `state` TTL itself, which used to be a
+    /// `[~]` because waiting it out costs ten minutes per run. Planting the
+    /// birth instant costs nothing.
+    #[test]
+    fn a_state_older_than_the_ttl_is_refused() {
+        let pending = PendingAuths::new();
+        let entry = sample_pending();
+
+        let Some(long_ago) = Instant::now().checked_sub(STATE_TTL + Duration::from_secs(1)) else {
+            println!("skipped: the monotonic clock has not been running for ten minutes");
+            return;
+        };
+        pending.remember_expiring_at("stale".into(), entry.clone(), long_ago);
+        assert_eq!(pending.take("stale"), None, "ten minutes is the budget");
+
+        // The boundary is expired too: `>=`, not `>`.
+        pending.remember_expiring_at(
+            "edge".into(),
+            entry.clone(),
+            Instant::now().checked_sub(STATE_TTL).unwrap(),
+        );
+        assert_eq!(pending.take("edge"), None);
+
+        // Nine minutes is still fine.
+        pending.remember_expiring_at(
+            "fresh".into(),
+            entry,
+            Instant::now().checked_sub(Duration::from_secs(540)).unwrap(),
+        );
+        assert!(pending.take("fresh").is_some());
     }
 
     #[test]
     fn pending_consents_are_bounded() {
         let pending = PendingAuths::new();
         for index in 0..(MAX_PENDING * 3) {
-            pending.remember(format!("state-{index}"), "v".into());
+            pending.remember(format!("state-{index}"), sample_pending());
         }
         assert!(
             pending.len() <= MAX_PENDING,
             "an unauthenticated route must not grow memory without bound: {}",
             pending.len()
         );
+    }
+
+    #[test]
+    fn query_params_are_read_or_absent() {
+        assert_eq!(query_param("cap=abc", "cap").as_deref(), Some("abc"));
+        assert_eq!(
+            query_param("x=1&cap=a%2Fb&y=2", "cap").as_deref(),
+            Some("a/b")
+        );
+        // EDGE (empty input): absent, blank, and valueless are all `None`.
+        assert_eq!(query_param("", "cap"), None);
+        assert_eq!(query_param("cap=", "cap"), None);
+        assert_eq!(query_param("cap", "cap"), None);
+        assert_eq!(query_param("capacity=x", "cap"), None);
+        // EDGE (unicode): decodable and undecodable bytes both come back as a
+        // string rather than a panic.
+        assert_eq!(query_param("cap=%F0%9F%94%90", "cap").as_deref(), Some("🔐"));
+        assert!(query_param("cap=%FF%FE", "cap").is_some());
     }
 
     #[test]
@@ -1256,6 +1440,194 @@ mod tests {
             server.received_requests().await.unwrap().len(),
             1,
             "eight callers, one refresh - two would burn the rotating token"
+        );
+    }
+
+    // ------------------------------------------- the singleton account (F2) --
+
+    /// A store over a private database with no account bound yet. `oauth: None`
+    /// because `save_consent` never touches the OAuth client.
+    fn bare_store(pool: PgPool) -> TokenStore {
+        TokenStore::new(
+            pool,
+            Cipher::from_key([7u8; 32]),
+            None,
+            crate::gmail::http_client().unwrap(),
+        )
+    }
+
+    fn consent_for(email: &str) -> FreshTokens {
+        FreshTokens {
+            access_token: format!("access-for-{email}"),
+            refresh_token: Some(format!("refresh-for-{email}")),
+            expires_at: Some(Utc::now() + chrono::TimeDelta::seconds(3600)),
+            scopes: vec![SCOPE.to_owned()],
+        }
+    }
+
+    /// Race `save_consent` for each address, released together.
+    async fn race_consents(
+        store: &std::sync::Arc<TokenStore>,
+        emails: [&'static str; 2],
+    ) -> Vec<Result<(&'static str, Uuid), TokenError>> {
+        let gate = std::sync::Arc::new(tokio::sync::Barrier::new(emails.len()));
+        let tasks: Vec<_> = emails
+            .into_iter()
+            .map(|email| {
+                let store = std::sync::Arc::clone(store);
+                let gate = std::sync::Arc::clone(&gate);
+                tokio::spawn(async move {
+                    gate.wait().await;
+                    store
+                        .save_consent(email, &consent_for(email))
+                        .await
+                        .map(|id| (email, id))
+                })
+            })
+            .collect();
+
+        let mut outcomes = Vec::new();
+        for task in tasks {
+            outcomes.push(task.await.expect("no consent task may panic"));
+        }
+        outcomes
+    }
+
+    /// F2 - the defect. `existing_account_email` and `save_consent` used to run
+    /// in **separate** transactions, so two callbacks for two different
+    /// addresses both observed "no account" and both inserted; `accounts.email`
+    /// being unique did not help, because the addresses differ. One survives.
+    #[tokio::test]
+    async fn two_racing_consents_bind_exactly_one_account() {
+        let db = crate::test_support::test_db().await;
+        let store = std::sync::Arc::new(bare_store(db.pool.clone()));
+
+        let outcomes = race_consents(&store, ["jatinsethi98@gmail.com", "impostor@gmail.com"]).await;
+
+        let mut winner = None;
+        let mut refusals = Vec::new();
+        for outcome in outcomes {
+            match outcome {
+                Ok((email, _)) => {
+                    assert!(winner.is_none(), "two winners is the bug itself");
+                    winner = Some(email);
+                }
+                Err(TokenError::AlreadyBound { existing }) => refusals.push(existing),
+                Err(other) => panic!("the loser must be AlreadyBound, not {other}"),
+            }
+        }
+
+        let winner = winner.expect("one of the two consents has to succeed");
+        assert_eq!(refusals, vec![winner.to_owned()], "the 409 names the winner");
+
+        let emails: Vec<String> =
+            sqlx::query_scalar("select email from accounts order by created_at, id")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            emails,
+            vec![winner.to_owned()],
+            "exactly one accounts row may survive the race"
+        );
+
+        // And the loser wrote nothing at all - no tokens, no audit row.
+        let tokens: i64 = sqlx::query_scalar("select count(*) from gmail_tokens")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(tokens, 1);
+        let audited: i64 =
+            sqlx::query_scalar("select count(*) from audit_log where action = 'gmail_consent'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(audited, 1, "the losing transaction rolled back whole");
+    }
+
+    /// EDGE (duplicate delivery): two callbacks for the **same** mailbox are
+    /// re-consent, not a conflict - that is the `needs_reauth` recovery path,
+    /// and it must stay idempotent under a race. The case difference is the
+    /// nastier half: `accounts.email` is unique, but PostgreSQL text is
+    /// case-sensitive, so an `on conflict (email)` upsert would have made two
+    /// rows for one mailbox.
+    #[tokio::test]
+    async fn racing_re_consent_for_the_same_email_is_idempotent() {
+        let db = crate::test_support::test_db().await;
+        let store = std::sync::Arc::new(bare_store(db.pool.clone()));
+
+        let outcomes = race_consents(
+            &store,
+            ["jatinsethi98@gmail.com", "JatinSethi98@Gmail.com"],
+        )
+        .await;
+
+        let ids: Vec<Uuid> = outcomes
+            .into_iter()
+            .map(|outcome| outcome.expect("re-consent must never 409").1)
+            .collect();
+        assert_eq!(ids.len(), 2, "both consents succeed");
+        assert_eq!(ids[0], ids[1], "and both land on the same account row");
+
+        let rows: i64 = sqlx::query_scalar("select count(*) from accounts")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 1, "one mailbox is one row, whatever its spelling");
+    }
+
+    /// F2 - `order by created_at` alone is not a total order. Two rows stamped
+    /// at the same instant made "the account" an arbitrary choice that could
+    /// differ between two calls in the same request.
+    #[tokio::test]
+    async fn the_singleton_account_query_is_deterministic() {
+        let db = crate::test_support::test_db().await;
+        // The same `created_at` on purpose - `now()` is transaction time, so a
+        // single statement inserting two rows already produces this.
+        sqlx::query(
+            "insert into accounts (email, created_at) values \
+                 ('b@example.com', timestamptz '2026-01-01 00:00:00Z'), \
+                 ('a@example.com', timestamptz '2026-01-01 00:00:00Z')",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+        let expected: Uuid =
+            sqlx::query_scalar("select id from accounts order by created_at, id limit 1")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        let expected_email: String = sqlx::query_scalar("select email from accounts where id = $1")
+            .bind(expected)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+
+        for _ in 0..5 {
+            assert_eq!(
+                existing_account_email(&db.pool).await.unwrap().as_deref(),
+                Some(expected_email.as_str())
+            );
+            let state = crate::state::AppState::new(
+                db.pool.clone(),
+                crate::test_support::test_config(crate::config::Env::Prod),
+            );
+            assert_eq!(state.account().await.unwrap().map(|a| a.id), Some(expected));
+        }
+    }
+
+    /// The lock key is a constant other code will one day have to match. Pin it,
+    /// so "take the same lock" is checkable rather than aspirational - and pin
+    /// that it stays inside a **signed** bigint, which is what
+    /// `pg_advisory_xact_lock` takes.
+    #[test]
+    fn the_singleton_lock_key_is_stable() {
+        assert_eq!(ACCOUNT_SINGLETON_LOCK, 0x6e61_6465_6163_6374);
+        assert_eq!(
+            ACCOUNT_SINGLETON_LOCK.to_be_bytes(),
+            *b"nadeacct",
+            "the key is the ASCII, so it is recognisable in pg_locks"
         );
     }
 

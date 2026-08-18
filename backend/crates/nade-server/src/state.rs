@@ -5,7 +5,10 @@ use std::sync::Arc;
 use sqlx::PgPool;
 
 use crate::{
-    api::auth::{pairing::PairingStore, RateLimiter},
+    api::{
+        auth::{pairing::PairingStore, RateLimiter},
+        gmail_auth::capability::LinkCapabilities,
+    },
     config::Config,
     gmail::GmailRuntime,
 };
@@ -21,6 +24,11 @@ pub struct AppState {
     pub pair_limiter: Arc<RateLimiter>,
     /// OAuth, the token store, the quota bucket and the REST endpoints.
     pub gmail: Arc<GmailRuntime>,
+    /// Single-use permission slips for `GET /v1/auth/gmail/start`, minted only
+    /// behind the bearer guard. Lives here rather than on [`GmailRuntime`]
+    /// because it is an *API* concern: it is what makes a browser-facing route
+    /// authorised without a header.
+    pub gmail_link: Arc<LinkCapabilities>,
 }
 
 impl AppState {
@@ -48,6 +56,7 @@ impl AppState {
             pairing,
             pair_limiter,
             gmail,
+            gmail_link: Arc::new(LinkCapabilities::new()),
         })
     }
 
@@ -56,11 +65,15 @@ impl AppState {
     /// v1 is single-account by design (`API.md` §0), so "the account" is a
     /// query rather than a parameter on every route.
     ///
+    /// `order by created_at, id`: `created_at` alone is **not** a total order,
+    /// so two rows stamped at the same instant made "the account" an arbitrary
+    /// choice that could differ between two calls inside one request.
+    ///
     /// # Errors
     /// Returns an error if the query fails.
     pub async fn account(&self) -> sqlx::Result<Option<Account>> {
         sqlx::query_as::<_, Account>(
-            "select id, email, status from accounts order by created_at limit 1",
+            "select id, email, status from accounts order by created_at, id limit 1",
         )
         .fetch_optional(&self.pool)
         .await

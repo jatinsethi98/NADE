@@ -333,13 +333,35 @@ mod tests {
             assert!(looks_like_a_gmail_id(&entry.id), "{}", entry.file);
             assert_eq!(entry.file, format!("{}.eml", entry.id));
         }
-        // …and a 30-day window from the default clock sees them all.
+        // …and every one of them is retrievable, whatever its age.
+        for entry in &seeded {
+            assert!(
+                mailbox.message(&entry.id).is_some(),
+                "{} was seeded but cannot be read back",
+                entry.file
+            );
+        }
+
+        // The sample is chosen for structural nastiness, not recency: it runs
+        // from 2011 to now precisely so the parser meets decades of mail. So the
+        // 30-day window must see the recent ones and *only* those - the expected
+        // count comes from the corpus itself, never from a number typed here.
         let now = crate::clock::DEFAULT_NOW_MS;
+        const THIRTY_DAYS_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+        let expected = seeded
+            .iter()
+            .filter(|entry| entry.internal_date_ms > now - THIRTY_DAYS_MS)
+            .count();
         let found = mailbox.search(&Query::parse("newer_than:30d"), now, false, &[]);
         assert_eq!(
             found.len(),
-            seeded.len(),
-            "the live sample should sit inside a 30-day window ending at the default clock"
+            expected,
+            "`newer_than:30d` must match exactly the messages that are newer than 30 days"
+        );
+        assert!(
+            expected < seeded.len(),
+            "a sample that fits entirely in the window is not the wide-history \
+             corpus this test is here to exercise"
         );
     }
 

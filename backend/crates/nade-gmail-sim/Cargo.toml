@@ -31,10 +31,20 @@ tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# Plain HTTP to a localhost socket; no TLS feature is asked for here.
 reqwest = { version = "0.13", default-features = false, features = [
   "json",
   "form",
   "query",
+] }
+# …but Cargo unifies features across the workspace, and `nade-server` builds the
+# same `reqwest` with `rustls-no-provider`. Under `cargo test` at the root this
+# crate therefore gets a `reqwest` that panics on `Client::new()` unless a
+# process-wide crypto provider is installed, even though it never speaks TLS.
+# `ring`, to match the server: two providers in one process is a trap.
+rustls = { version = "0.23", default-features = false, features = [
+  "ring",
+  "std",
 ] }
 
 [features]

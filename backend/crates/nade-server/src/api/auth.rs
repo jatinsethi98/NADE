@@ -299,9 +299,13 @@ async fn authenticate(state: &AppState, presented: &str) -> Result<Auth, ApiErro
 
 /// v1 is single-account (PLAN.md §Design parity map), so the dev token adopts
 /// whichever account exists. At P1 there is none yet.
+///
+/// `order by created_at, id` for the same reason as [`AppState::account`]:
+/// `created_at` alone is not a total order, and "the account" must be the same
+/// row every time it is asked for.
 async fn singleton_account(state: &AppState) -> Result<Option<Account>, ApiError> {
     Ok(
-        sqlx::query_as("select id, email, status from accounts order by created_at limit 1")
+        sqlx::query_as("select id, email, status from accounts order by created_at, id limit 1")
             .fetch_optional(&state.pool)
             .await?,
     )

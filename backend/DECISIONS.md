@@ -315,3 +315,93 @@ Test databases are created fresh per test and never see this. The dev one is
 fixed by `just db-reset`, added for the purpose. Recorded here because the
 symptom is a startup failure with no obvious cause, and it will recur every time
 P3 touches the migration before the first real deployment.
+
+## D24 — A search cursor carries a fingerprint of its query.
+
+`API.md` §0 already said it: "the query is fingerprinted into the cursor and a
+mismatched pair is `400 bad_request`". The code did not do it. `TokenPayload`
+held Gmail's `pageToken` alone, so `?q=<anything>&cursor=<token minted for
+something else>` was forwarded to Gmail unchecked.
+
+Gmail does not reliably reject that pair. It can answer with a page of the
+*other* search — the user scrolls one query and is served another, with a 200.
+
+The fingerprint is a SHA-256 of the **canonical** query (`NormalisedQuery::
+as_str`), truncated to 12 bytes, not the raw `q`: `from:A  OR  from:B` and
+`from:a or from:b` are one search, and a cursor has to survive the user
+retyping it. Hashed rather than embedded because a cursor travels in URLs and
+logs, and the query is the user's mail.
+
+Validation therefore has to happen *before* the cursor is decoded, which
+reorders `search()`. A pre-fingerprint cursor fails to deserialise and is
+refused — correct, since nothing in it says which query it belonged to.
+
+## D25 — `attachments.ordinal`, because a name and a size do not identify a part.
+
+The sync fetches `format=raw`, which carries no `attachmentId`, so a stored
+attachment is matched back to a live Gmail part at download time (D14). That
+match was `filename == name && size == size`, first hit wins.
+
+A message with two files of the same name and the same length — the ordinary
+`invoice.pdf` twice — served the **first** one's bytes for both. Deterministic,
+silent, 200.
+
+`ordinal` is the position among *our* attachments in part-tree order. The
+resolver now prefers a `Content-ID` (unique within a message, RFC 2392), and
+otherwise collects every part matching name and size and picks by rank among
+the stored look-alikes. Rank, not absolute tree position: the two sides are
+built by different parsers and their trees do not align part-for-part, but they
+agree on order, which is all a rank needs.
+
+Fewer candidates than the rank asks for is a **404**. Falling back to the first
+would be the original bug wearing a different name.
+
+## D26 — `threads.complete`, and a thread completes itself when opened.
+
+`docs/SEARCH.md` traded a local index for Gmail's, which makes the cache
+deliberately incomplete. Search hydrates the messages that *matched* a query —
+for an old conversation, one message out of ten — and `GET /threads/{id}` then
+read local rows only. Nine absences, no marker, `msg_count` wrong: a thread
+that looked whole and was not. An agent under a token budget cannot tell.
+
+So the thread endpoint asks `users.threads.get?format=minimal` (10 quota units)
+for the true message list, fetches what is missing, verifies by **count** that
+the rows landed, and only then records `complete = true` and sets `msg_count`
+to Gmail's own. Verified rather than attempted, because a sub-request can fail
+silently inside a `200` batch.
+
+Cost is one call per thread, once, ever; after that it is a local read. This is
+what Superhuman and Spark do.
+
+When completion fails — throttled, offline, dead credential — the cached rows
+are still served, with `partial: true`, and `complete` stays false so the next
+open tries again. The rows are worth showing; presenting them as the whole
+conversation is not.
+
+EDGE (staleness): a completed thread that receives a new message is still
+complete once the message is ingested. Until P3's webhook lands, that ingest
+waits for the next sync — the same window the mail list already has.
+
+## D27 — `cargo test` at the workspace root failed while `cargo test -p …` passed.
+
+Five `nade-gmail-sim` HTTP tests panicked with "No rustls crypto provider is
+configured" — but only in a whole-workspace run.
+
+Cargo unifies features per dependency across the workspace. `nade-server` builds
+`reqwest` with `rustls-no-provider` and installs `ring` itself at startup
+(`gmail/mod.rs`). The simulator asks for `reqwest` with no TLS feature at all —
+it speaks plain HTTP to a localhost socket — but the unified build gives it
+`rustls-no-provider` anyway, and `reqwest::Client::new()` then panics because
+nothing in *that* process installed a provider.
+
+`cargo test -p nade-gmail-sim` does not unify, so it passed. `CLAUDE.md`
+documents the per-crate command, which is exactly why this hid: the failing
+command was the one nobody ran.
+
+Fixed by installing the `ring` provider once in the simulator's own tests — the
+library and the `determinism` integration binary separately, since an
+integration test is its own process. `ring` rather than aws-lc-rs, to match the
+server: two providers in one process is a trap.
+
+The general lesson: a per-crate test command can pass on a feature set the real
+build never uses. The workspace command is the one that tells the truth.

@@ -99,5 +99,6 @@
       "summary": "Couldn't finish — Gmail was unavailable.",
       "feed_item_id": null
     }
-  ]
+  ],
+  "partial": false
 }

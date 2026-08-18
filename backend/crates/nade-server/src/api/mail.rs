@@ -136,6 +136,11 @@ pub struct ThreadDetail {
     pub messages: Vec<MessageView>,
     /// Newest first.
     pub agent_cards: Vec<AgentCard>,
+    /// True when `messages` is **not** the whole conversation - we hold some of
+    /// it and could not reach Gmail for the rest. The cache is windowed by
+    /// design (`docs/SEARCH.md`), so the honest answer is the rows plus this
+    /// flag, never the rows presented as the whole thing.
+    pub partial: bool,
 }
 
 // ---------------------------------------------------------------- queries --
@@ -276,13 +281,37 @@ pub async fn thread(
 ) -> ApiResult<Json<ThreadDetail>> {
     let account = state.account().await?.ok_or_else(ApiError::not_found)?;
 
-    let head: Option<(String,)> =
-        sqlx::query_as("select subject from threads where account_id = $1 and thread_id = $2")
+    let head = |thread_id: String| {
+        let pool = state.pool.clone();
+        async move {
+            sqlx::query_as::<_, (String,)>(
+                "select subject from threads where account_id = $1 and thread_id = $2",
+            )
             .bind(account.id)
-            .bind(&thread_id)
-            .fetch_optional(&state.pool)
-            .await?;
-    let Some((subject,)) = head else {
+            .bind(thread_id)
+            .fetch_optional(&pool)
+            .await
+        }
+    };
+
+    // Establish it is ours before spending a Gmail call on it.
+    if head(thread_id.clone()).await?.is_none() {
+        return Err(ApiError::not_found());
+    }
+
+    // Before reading the rows, not after: a thread the cache holds only part of
+    // is completed from Gmail here, once, and is a local read forever after.
+    // Search hydrates the messages that *matched* a query, which for an old
+    // conversation can be one message out of ten - and nine silent absences in
+    // a thread view is mail the reader does not know they are missing.
+    let completeness =
+        crate::mail::cache::ensure_thread_complete(&state, account.id, &thread_id).await?;
+
+    // Re-read, because completing the thread can have added a message *newer*
+    // than anything we held, and the subject is the newest message's.
+    // EDGE (crash mid-step / concurrent delete): the thread can also have gone
+    // between the two reads.
+    let Some((subject,)) = head(thread_id.clone()).await? else {
         return Err(ApiError::not_found());
     };
 
@@ -335,6 +364,7 @@ pub async fn thread(
         messages,
         // P4/P5 fill these in; the field exists now so the shape never changes.
         agent_cards: Vec::new(),
+        partial: completeness.is_partial(),
     }))
 }
 
@@ -352,18 +382,25 @@ pub async fn attachment(
 ) -> ApiResult<Response> {
     let account = state.account().await?.ok_or_else(ApiError::not_found)?;
 
-    let stored: Option<StoredAttachment> = sqlx::query_as(
-        "select a.att_id, a.name, a.mime, a.size_bytes, a.content_id \
+    // Every attachment on the message, not just the one asked for: two parts
+    // can share a name and a size, so identifying the requested one against
+    // Gmail needs to know how many siblings look exactly like it.
+    let siblings: Vec<StoredAttachment> = sqlx::query_as(
+        "select a.att_id, a.name, a.mime, a.size_bytes, a.content_id, a.ordinal \
            from attachments a \
            join messages m on m.id = a.message_id \
-          where m.account_id = $1 and m.gmail_id = $2 and a.att_id = $3",
+          where m.account_id = $1 and m.gmail_id = $2 \
+          order by a.ordinal, a.id",
     )
     .bind(account.id)
     .bind(&gmail_id)
-    .bind(&att_id)
-    .fetch_optional(&state.pool)
+    .fetch_all(&state.pool)
     .await?;
-    let Some(stored) = stored else {
+    let Some(stored) = siblings
+        .iter()
+        .find(|candidate| candidate.att_id == att_id)
+        .cloned()
+    else {
         return Err(ApiError::not_found());
     };
 
@@ -372,7 +409,7 @@ pub async fn attachment(
         return Err(ApiError::payload_too_large());
     }
 
-    let bytes = fetch_attachment_bytes(&state, account.id, &gmail_id, &stored).await?;
+    let bytes = fetch_attachment_bytes(&state, account.id, &gmail_id, &stored, &siblings).await?;
     if i64::try_from(bytes.len()).unwrap_or(i64::MAX) > MAX_ATTACHMENT_BYTES {
         return Err(ApiError::payload_too_large());
     }
@@ -584,27 +621,64 @@ async fn mailbox_name_for(
 /// `format=raw` - the format the sync uses, because it is the only one our MIME
 /// parser can see - carries no `attachmentId` at all, so the mapping happens
 /// here, on demand, against `format=full`. backend/DECISIONS.md D14.
+///
+/// The two sides are produced by different parsers, so the part *tree* cannot
+/// be walked position-for-position. What survives that mismatch is identity:
+/// a `Content-ID` is unique within a message and settles it outright, and
+/// failing that, a name and a size narrow it to a candidate list whose order
+/// both parsers agree on - leaving `ordinal` to say which of the identical
+/// twins was asked for.
 async fn fetch_attachment_bytes(
     state: &AppState,
     account_id: Uuid,
     gmail_id: &str,
     stored: &StoredAttachment,
+    siblings: &[StoredAttachment],
 ) -> ApiResult<Vec<u8>> {
     let client = state.gmail.client_for(account_id);
     let message = client.get_message_full(gmail_id).await.map_err(upstream)?;
+    let parts = message.flat_parts();
 
-    let matched = message.flat_parts().into_iter().find(|part| {
-        let by_name = part.filename.as_deref().is_some_and(|filename| {
-            !filename.is_empty() && filename == stored.name && part.body.size == stored.size_bytes
+    // A `Content-ID` is unique within a message (RFC 2392), so one match is the
+    // answer and needs no tie-break.
+    let by_content_id = stored.content_id.as_ref().and_then(|ours| {
+        let ours = crate::mail::html::normalise_content_id(ours);
+        let mut matches = parts.iter().filter(|part| {
+            part.header("content-id")
+                .is_some_and(|theirs| crate::mail::html::normalise_content_id(theirs) == ours)
         });
-        let by_content_id = match (&stored.content_id, part.header("content-id")) {
-            (Some(ours), Some(theirs)) => {
-                crate::mail::html::normalise_content_id(ours)
-                    == crate::mail::html::normalise_content_id(theirs)
-            }
-            _ => false,
-        };
-        by_name || by_content_id
+        matches.next().filter(|_| matches.next().is_none())
+    });
+
+    // Otherwise: every part that looks like this one, in tree order.
+    let matched = by_content_id.or_else(|| {
+        let candidates: Vec<_> = parts
+            .iter()
+            .filter(|part| {
+                part.filename.as_deref().is_some_and(|filename| {
+                    !filename.is_empty()
+                        && filename == stored.name
+                        && part.body.size == stored.size_bytes
+                })
+            })
+            .collect();
+
+        // Which of the identical twins this is. Our own attachment list is in
+        // the same tree order, so the nth look-alike here is the nth there.
+        //
+        // EDGE (duplicate delivery): before this, a message carrying two files
+        // of the same name and size served the *first* for both - deterministic,
+        // silent, and wrong. A 404 is the right answer when the counts disagree;
+        // handing over the wrong file is not.
+        let rank = siblings
+            .iter()
+            .filter(|sibling| {
+                sibling.name == stored.name && sibling.size_bytes == stored.size_bytes
+            })
+            .position(|sibling| sibling.att_id == stored.att_id)
+            .unwrap_or(0);
+
+        candidates.get(rank).copied()
     });
 
     let Some(part) = matched else {
@@ -789,13 +863,16 @@ struct AttachmentRow {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+#[derive(Clone)]
 struct StoredAttachment {
-    #[allow(dead_code)]
     att_id: String,
     name: String,
     mime: String,
     size_bytes: i64,
     content_id: Option<String>,
+    /// Position among the message's attachments, in part-tree order.
+    #[allow(dead_code)]
+    ordinal: i32,
 }
 
 #[cfg(test)]

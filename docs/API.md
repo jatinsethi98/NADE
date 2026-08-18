@@ -259,7 +259,8 @@ row renders under the snippet.
    }, …],
    "agent_cards": [{"run_id": "…", "agent_name": "Job Search Tracker",
                     "status": "pending_approval", "summary": "Two next steps found…",
-                    "feed_item_id": "…"}]}   // feed_item_id: string|null
+                    "feed_item_id": "…"}],   // feed_item_id: string|null
+   "partial": false}                         // true ⇒ `messages` is not the whole conversation
 ```
 
 There is **no `id` field on a message.** `gmail_id` is the identity. The
@@ -276,6 +277,18 @@ The "View original" affordance keys off `body_html != null`.
 `/v1/messages/{gmail_id}/attachments/{att_id}` before the response is built.
 
 `messages` is ordered oldest first. `agent_cards` is ordered newest first.
+
+**`partial` is how the windowed cache tells the truth.** Postgres holds a recent
+window plus whatever has been looked at, never the mailbox (`docs/SEARCH.md`), so
+a thread can be present with only some of its messages — a search that matched
+one message of a ten-message conversation cached exactly that one. Opening a
+thread therefore asks Gmail for the thread's full message list and fetches what
+is missing, once; from then on it is a local read. `partial` is `true` only when
+that completion could not finish — Gmail unreachable, throttled, or a credential
+that needs re-auth — and it means *what you are reading has gaps*. Clients must
+surface it rather than render the rows as a complete thread. `msg_count` in the
+list is the count within the window; after a thread has been completed it is
+Gmail's own count.
 
 ### `GET /messages/{gmail_id}/attachments/{att_id}`
 

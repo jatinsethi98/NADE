@@ -14,7 +14,8 @@ use super::{
     oauth::{AccessTokens, TokenError},
     quota::{self, Bucket},
     types::{
-        Attachment, GmailMessage, HistoryList, Label, LabelsList, MessageRef, MessagesList, Profile,
+        Attachment, GmailMessage, GmailThread, HistoryList, Label, LabelsList, MessageRef,
+        MessagesList, Profile,
     },
 };
 
@@ -283,6 +284,26 @@ impl GmailClient {
         self.get_json(
             &format!("/gmail/v1/users/me/messages/{}?format=full", encode(id)),
             quota::cost::MESSAGES_GET,
+        )
+        .await
+    }
+
+    /// `users.threads.get?format=minimal` - the thread's whole message list,
+    /// ids and labels only.
+    ///
+    /// This is the only call that answers "how much of this conversation is
+    /// there?". `messages.list` never says how big a thread is, so without it a
+    /// windowed cache cannot tell a complete thread from a fragment of one.
+    ///
+    /// # Errors
+    /// [`GmailError::NotFound`] when the thread is gone.
+    pub async fn get_thread_minimal(&self, thread_id: &str) -> Result<GmailThread, GmailError> {
+        self.get_json(
+            &format!(
+                "/gmail/v1/users/me/threads/{}?format=minimal",
+                encode(thread_id)
+            ),
+            quota::cost::THREADS_GET,
         )
         .await
     }

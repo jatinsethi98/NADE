@@ -21,6 +21,21 @@ use nade_gmail_sim::{
     MessageSpec, Scenario, Simulator, Target,
 };
 
+/// Nothing here speaks TLS, and this is still required.
+///
+/// Cargo unifies features across the workspace, so under `cargo test` at the
+/// root our `reqwest` is built with `nade-server`'s `rustls-no-provider`, and
+/// `reqwest::Client::new()` panics without a process-wide provider. An
+/// integration test is its own binary, so installing it in the library's own
+/// tests does not reach here.
+fn install_crypto_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // Errs only if something already installed one, which is fine.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// A mailbox and a script rich enough that almost any nondeterminism shows up:
 /// every endpoint, a batch, a fault, paging, unicode, an attachment, a thread.
 fn build_world(sim: &Simulator) -> Vec<String> {
@@ -214,6 +229,7 @@ fn repeating_one_request_against_unchanged_state_returns_the_same_bytes() {
 
 #[tokio::test]
 async fn http_and_in_process_agree_byte_for_byte() {
+    install_crypto_provider();
     // Two simulators driven identically, one behind a socket and one not. If the
     // transports diverged at all — a header dropped, a query parameter decoded
     // differently, a body truncated — the bytes would differ here.
@@ -256,6 +272,7 @@ async fn http_and_in_process_agree_byte_for_byte() {
 
 #[tokio::test]
 async fn the_http_transport_preserves_the_headers_that_carry_meaning() {
+    install_crypto_provider();
     let sim = Arc::new(Simulator::new());
     sim.insert_message(&MessageSpec::new()).unwrap();
     sim.inject(
@@ -289,6 +306,7 @@ async fn the_http_transport_preserves_the_headers_that_carry_meaning() {
 
 #[tokio::test]
 async fn a_slow_fault_really_waits_over_http_so_a_client_timeout_can_fire() {
+    install_crypto_provider();
     let sim = Arc::new(Simulator::new());
     sim.inject(FaultRule::new(Fault::Delay(Duration::from_millis(400))).times(1));
     let server = SimServer::start(Arc::clone(&sim)).await.unwrap();

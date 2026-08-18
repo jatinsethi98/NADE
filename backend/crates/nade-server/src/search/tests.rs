@@ -803,3 +803,158 @@ async fn an_upstream_failure_is_a_502_rather_than_a_partial_page() {
     assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(body["error"]["code"], "upstream_unavailable");
 }
+
+// ------------------------------------------- thread completeness --
+
+impl Harness {
+    /// Seed one message into an existing conversation.
+    fn seed_in_thread(&self, thread_id: &str, days: i64, subject: &str, body: &str) -> String {
+        self.sim()
+            .insert_message(
+                &MessageSpec::new()
+                    .subject(subject)
+                    .text(body)
+                    .thread_id(thread_id)
+                    .received_at(ReceivedAt::AtMs(self.now_ms() - days * DAY_MS)),
+            )
+            .expect("seeding the fake mailbox")
+    }
+
+    async fn open_thread(&self, thread_id: &str) -> (StatusCode, Value) {
+        let response = authed_get(
+            &self.app,
+            &format!("/v1/threads/{thread_id}"),
+            Some(&self.token),
+        )
+        .await;
+        let status = response.status();
+        (status, response_json(response).await)
+    }
+
+    async fn thread_is_marked_complete(&self, thread_id: &str) -> bool {
+        sqlx::query_scalar("select complete from threads where account_id = $1 and thread_id = $2")
+            .bind(self.account)
+            .bind(thread_id)
+            .fetch_one(&self.app.db.pool)
+            .await
+            .unwrap()
+    }
+}
+
+/// The defect: search hydrates the messages that **matched**, and nothing else.
+/// One hit inside a ten-message conversation cached one message of it, and the
+/// thread view then served those rows as the conversation - no gap, no marker,
+/// nine messages the reader never learned existed.
+#[tokio::test]
+async fn a_thread_found_by_search_is_completed_when_it_is_opened() {
+    let harness = harness().await;
+    let thread = "1a00000000000042";
+
+    // A conversation that ran for two years. Only the newest is inside the
+    // 30-day window the sync covers.
+    harness.seed_in_thread(thread, 700, "Lease renewal", "the original terms");
+    let matched = harness.seed_in_thread(thread, 400, "Re: Lease renewal", "the sublet clause");
+    harness.seed_in_thread(thread, 3, "Re: Lease renewal", "signing this week");
+    harness.sync_thirty_days().await;
+
+    // Exactly one of the three is cached, and it is not the one search finds.
+    assert_eq!(harness.cached_gmail_ids().await.len(), 1);
+
+    let found = harness.search("sublet").await;
+    assert_eq!(thread_ids(&found), vec![thread.to_owned()]);
+    let cached_after_search = harness.cached_gmail_ids().await;
+    assert!(
+        cached_after_search.contains(&matched),
+        "search caches what it matched"
+    );
+    assert_eq!(
+        cached_after_search.len(),
+        2,
+        "…and only what it matched: the 700-day-old message is still missing"
+    );
+
+    // Opening it is what completes it.
+    let (status, detail) = harness.open_thread(thread).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        detail["messages"].as_array().unwrap().len(),
+        3,
+        "the whole conversation, not the part that happened to match: {detail}"
+    );
+    assert_eq!(detail["partial"], false);
+    assert!(harness.thread_is_marked_complete(thread).await);
+
+    // Oldest first, still (`API.md` §2).
+    let subjects: Vec<&str> = detail["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["body_text"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        subjects,
+        vec!["the original terms", "the sublet clause", "signing this week"]
+    );
+}
+
+/// Completing costs one Gmail call, once. A thread already known whole is a
+/// local read - otherwise every scroll through a mailbox would spend quota.
+#[tokio::test]
+async fn a_completed_thread_is_never_asked_about_again() {
+    let harness = harness().await;
+    let thread = "1a00000000000043";
+    harness.seed_in_thread(thread, 2, "Standup", "notes");
+    harness.sync_thirty_days().await;
+
+    let (status, _) = harness.open_thread(thread).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(harness.thread_is_marked_complete(thread).await);
+
+    let before = harness.sim().calls().len();
+    let (status, detail) = harness.open_thread(thread).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["partial"], false);
+    assert_eq!(
+        harness.sim().calls().len(),
+        before,
+        "a thread we know is whole must not cost another threads.get"
+    );
+}
+
+/// EDGE (429/timeout/offline): the rows we hold are still the user's mail, so
+/// they are served - but flagged, and the thread is **not** recorded as whole,
+/// so the next open tries again. The failure mode this prevents is the quiet
+/// one: a truthful-looking thread with messages missing from it.
+#[tokio::test]
+async fn a_thread_that_cannot_be_completed_is_served_flagged_rather_than_silently_short() {
+    use nade_gmail_sim::fault::{Condition, Fault, FaultRule};
+
+    let harness = harness().await;
+    let thread = "1a00000000000044";
+    harness.seed_in_thread(thread, 500, "Insurance claim", "the original");
+    harness.seed_in_thread(thread, 4, "Re: Insurance claim", "the adjuster replied");
+    harness.sync_thirty_days().await;
+
+    harness.sim().inject(
+        FaultRule::new(Fault::Unavailable {
+            retry_after_seconds: None,
+        })
+        .when(Condition::PathContains("/threads/".to_owned())),
+    );
+
+    let (status, detail) = harness.open_thread(thread).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "what we hold is still worth showing: {detail}"
+    );
+    assert_eq!(
+        detail["partial"], true,
+        "…but it must not be presented as the whole conversation: {detail}"
+    );
+    assert_eq!(detail["messages"].as_array().unwrap().len(), 1);
+    assert!(
+        !harness.thread_is_marked_complete(thread).await,
+        "a failed completion must not be recorded as a completed one"
+    );
+}

@@ -26,9 +26,16 @@ struct Payload {
 /// id)` to walk (`docs/SEARCH.md`). The token is still wrapped rather than
 /// handed over raw, so the cursor stays opaque, stays one of ours, and a
 /// corrupt one is still a `400` rather than a silent restart.
+///
+/// `qf` fingerprints the query the token was minted for. Gmail's page token is
+/// only meaningful against the query that produced it, so pairing it with a
+/// different `q` pages a list that no longer exists - Gmail either errors or,
+/// worse, answers with results from a different search. `API.md` §0 requires
+/// the 400.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct TokenPayload {
     pt: String,
+    qf: String,
 }
 
 /// The keyset position of the last row on a page.
@@ -73,33 +80,59 @@ pub fn decode(raw: &str) -> ApiResult<Keyset> {
     Ok(Keyset { ts, id: payload.id })
 }
 
-/// Wrap Gmail's `pageToken` in one of our cursors.
+/// Wrap Gmail's `pageToken` in one of our cursors, bound to the **canonical**
+/// query it pages through - `NormalisedQuery::as_str`, never the raw `q`, so
+/// two spellings of one search share a cursor instead of fighting over it.
 #[must_use]
-pub fn encode_page_token(token: &str) -> String {
+pub fn encode_page_token(token: &str, canonical_query: &str) -> String {
     let payload = TokenPayload {
         pt: token.to_owned(),
+        qf: query_fingerprint(canonical_query),
     };
     let json = serde_json::to_vec(&payload).unwrap_or_default();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
 }
 
-/// Unwrap a search cursor back into Gmail's `pageToken`.
+/// Unwrap a search cursor back into Gmail's `pageToken`, refusing one minted
+/// for a different query.
 ///
 /// # Errors
 /// [`ApiError::bad_request`] for anything that is not one of ours - including a
 /// *keyset* cursor, which is a different kind of position and would page the
-/// wrong list.
-pub fn decode_page_token(raw: &str) -> ApiResult<String> {
+/// wrong list, and a token whose query fingerprint does not match.
+pub fn decode_page_token(raw: &str, canonical_query: &str) -> ApiResult<String> {
     let refuse = || ApiError::bad_request("That page marker is not valid. Search again.");
 
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(raw.trim())
         .map_err(|_| refuse())?;
+    // EDGE (schema drift): a token minted before `qf` existed has no such
+    // field, so it fails to deserialise and is refused - which is the right
+    // answer, because nothing can prove which query it belonged to.
     let payload: TokenPayload = serde_json::from_slice(&bytes).map_err(|_| refuse())?;
     if payload.pt.is_empty() {
         return Err(refuse());
     }
+    if payload.qf != query_fingerprint(canonical_query) {
+        return Err(ApiError::bad_request(
+            "That page marker belongs to a different search. Search again.",
+        ));
+    }
     Ok(payload.pt)
+}
+
+/// A short, opaque digest of the canonical query.
+///
+/// Hashed rather than embedded: a cursor travels in URLs and logs, and the
+/// query is the user's mail. 12 bytes is 96 bits - far past what a collision
+/// would need, and a collision costs a confusing page, not a leak.
+fn query_fingerprint(canonical_query: &str) -> String {
+    use sha2::{Digest as _, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(canonical_query.as_bytes());
+    let digest = hasher.finalize();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..12])
 }
 
 /// `limit`, clamped to the contract: default 50, maximum 100.
@@ -186,8 +219,8 @@ mod tests {
         // A real Gmail page token: long, and full of characters a query string
         // would otherwise have to escape.
         let token = "09876543210987654321==+/abc";
-        let cursor = encode_page_token(token);
-        assert_eq!(decode_page_token(&cursor).unwrap(), token);
+        let cursor = encode_page_token(token, "from:a@b.com");
+        assert_eq!(decode_page_token(&cursor, "from:a@b.com").unwrap(), token);
         assert!(
             cursor
                 .chars()
@@ -214,11 +247,14 @@ mod tests {
             // JSON, wrong keys.
             &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"offset":50}"#),
             // Right key, empty token - would restart the search at page one.
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"pt":""}"#),
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"pt":"","qf":"x"}"#),
+            // EDGE (schema drift): the pre-fingerprint shape. Refused, because
+            // nothing in it says which query it paged.
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"pt":"tok"}"#),
             // A keyset cursor, which is a position in a different kind of list.
             keyset.as_str(),
         ] {
-            let error = decode_page_token(bad).unwrap_err();
+            let error = decode_page_token(bad, "from:a@b.com").unwrap_err();
             assert_eq!(
                 error.code,
                 crate::error::ErrorCode::BadRequest,
@@ -227,7 +263,51 @@ mod tests {
         }
 
         // And the mirror: a page-token cursor is not a keyset cursor either.
-        assert!(decode(&encode_page_token("tok")).is_err());
+        assert!(decode(&encode_page_token("tok", "from:a@b.com")).is_err());
+    }
+
+    /// Gmail's page token means nothing apart from the query that produced it.
+    /// Pairing them wrongly is the interesting case: Gmail does not reliably
+    /// reject it, so it can answer with a page of a *different* search - the
+    /// user scrolls one query and is served another. `API.md` §0 requires 400.
+    #[test]
+    fn a_page_token_is_refused_with_a_different_query() {
+        let cursor = encode_page_token("tok", "from:alice@example.com");
+
+        let error = decode_page_token(&cursor, "from:bob@example.com").unwrap_err();
+        assert_eq!(error.code, crate::error::ErrorCode::BadRequest);
+        assert!(
+            error.message.contains("different search"),
+            "the message must say which of the two things went wrong: {:?}",
+            error.message
+        );
+
+        // EDGE (empty input): the empty query is a query like any other, and
+        // must not collide with a real one.
+        assert!(decode_page_token(&encode_page_token("tok", ""), "in:inbox").is_err());
+        assert!(decode_page_token(&encode_page_token("tok", "in:inbox"), "").is_err());
+
+        // EDGE (unicode): a query is the user's own words, in their own script.
+        let jp = encode_page_token("tok", "配送のお知らせ");
+        assert_eq!(decode_page_token(&jp, "配送のお知らせ").unwrap(), "tok");
+        assert!(decode_page_token(&jp, "配送のお知らせ ").is_err());
+    }
+
+    /// The fingerprint travels in URLs and server logs, so it must not carry
+    /// the query back out again.
+    #[test]
+    fn the_fingerprint_does_not_leak_the_query() {
+        let cursor = encode_page_token("tok", "from:oncologist@hospital.example");
+        let decoded = String::from_utf8(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(&cursor)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !decoded.contains("oncologist") && !decoded.contains("hospital"),
+            "the query must not be legible in the cursor: {decoded}"
+        );
     }
 
     /// EDGE (unicode): a Gmail id is hex, but the decoder must not corrupt

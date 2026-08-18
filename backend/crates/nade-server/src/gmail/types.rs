@@ -58,6 +58,18 @@ pub struct MessagesList {
     pub next_page_token: Option<String>,
 }
 
+/// `users.threads.get?format=minimal` - Gmail's own answer to how many messages
+/// a conversation has, which is the only authority on whether our copy of it is
+/// whole.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GmailThread {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub messages: Vec<MessageRef>,
+}
+
 /// `users.messages.get`, in either `format=raw` or `format=full`.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]

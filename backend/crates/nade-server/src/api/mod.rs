@@ -1,9 +1,14 @@
 //! The `/v1` router.
 //!
-//! Two public routes, and then *everything else* under `/v1` - including paths
+//! Four public routes, and then *everything else* under `/v1` - including paths
 //! that do not exist yet - goes through the bearer guard. That ordering is
 //! deliberate: a route added in P2 is protected the moment it is written, and
 //! forgetting to guard it is not a thing that can happen.
+//!
+//! The two browser-facing OAuth routes take no bearer header, but they are not
+//! open either: `start` demands a single-use capability minted by the
+//! authenticated `POST /auth/gmail/link`, and `callback` demands the cookie
+//! `start` set. backend/DECISIONS.md D15.
 
 pub mod auth;
 pub mod cursor;
@@ -33,6 +38,10 @@ pub fn router(state: AppState) -> Router {
     // caller gets 401 and learns nothing about which routes exist.
     let protected = Router::new()
         .route("/me", get(mail::me))
+        // Authorises the browser-facing `start` below. Behind the guard, which
+        // is the entire point: only an already-paired device may hand out a
+        // permission slip to link this server's mailbox.
+        .route("/auth/gmail/link", post(gmail_auth::link))
         .route("/mailboxes", get(mail::mailboxes))
         .route("/mailboxes/{id}/threads", get(mail::threads))
         .route("/threads/{id}", get(mail::thread))
@@ -52,7 +61,9 @@ pub fn router(state: AppState) -> Router {
     let v1 = Router::new()
         .route("/healthz", get(health::healthz))
         .route("/auth/pair", post(auth::pair))
-        // Browser-facing, so unauthenticated - backend/DECISIONS.md D15.
+        // Browser-facing, so no bearer header - but not unauthorised:
+        // `start` consumes a capability from `/auth/gmail/link`, and `callback`
+        // requires the cookie `start` set. backend/DECISIONS.md D15.
         .route("/auth/gmail/start", get(gmail_auth::start))
         .route("/auth/gmail/callback", get(gmail_auth::callback))
         // P3 adds /webhooks/gmail here - public, but OIDC-verified.

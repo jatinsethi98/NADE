@@ -467,6 +467,7 @@ THREAD_DETAIL_T1 = {
         },
     ],
     "agent_cards": [],  # filled in below, once the runs exist
+    "partial": False,
 }
 
 THREAD_DETAIL_T2 = {
@@ -490,6 +491,7 @@ THREAD_DETAIL_T2 = {
         }
     ],
     "agent_cards": [],
+    "partial": False,
 }
 
 

@@ -87,6 +87,11 @@ create table attachments (
     content_id text,
     -- True when the HTML references this part with `cid:`.
     inline     boolean not null default false,
+    -- Position among *this message's* attachments, in part-tree order. Two
+    -- parts can share a name and a size, so name+size does not identify a part;
+    -- this is what tells the second `invoice.pdf` from the first when the
+    -- download resolves `att_id` back to a live Gmail part.
+    ordinal    integer not null default 0,
     constraint attachments_message_id_att_id_key unique (message_id, att_id)
 );
 
@@ -110,6 +115,12 @@ create table threads (
     -- True when ANY message in the thread is unread (API.md §2).
     unread     boolean     not null default false,
     msg_count  integer     not null default 0,
+    -- False until we have confirmed against Gmail that we hold every message in
+    -- the thread. The cache is windowed and search hydrates only the messages
+    -- that matched, so a thread row routinely covers part of a conversation;
+    -- serving that as the whole thing is how an agent reasons from mail it
+    -- cannot see. `GET /threads/{id}` completes the thread before answering.
+    complete   boolean     not null default false,
     updated_at timestamptz not null default now(),
     primary key (account_id, thread_id)
 );

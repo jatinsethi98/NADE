@@ -5,5 +5,6 @@
 //! plus the three traps that probe found. This module implements that recipe; it
 //! does not re-explore it.
 
+pub mod cache;
 pub mod html;
 pub mod parse;

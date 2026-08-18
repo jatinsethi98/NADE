@@ -592,6 +592,7 @@ async fn thread_detail_matches_the_contract() {
                 size_bytes: 245_760,
                 content_id: None,
                 inline: false,
+                ordinal: 0,
             }],
             ..Seed::new("newer", "18f2a1b3c4d5e6f7", at(60))
         },
@@ -607,7 +608,8 @@ async fn thread_detail_matches_the_contract() {
             "mailbox_name",
             "account_email",
             "messages",
-            "agent_cards"
+            "agent_cards",
+            "partial"
         ])
     );
     assert_eq!(body["id"], "18f2a1b3c4d5e6f7");
@@ -799,6 +801,7 @@ async fn app_with_attachment(name: &str, size: i64) -> (TestApp, String, wiremoc
                 size_bytes: size,
                 content_id: None,
                 inline: false,
+                ordinal: 0,
             }],
             ..Seed::new("18f2a1b3c4d5e6f7", "t0", at(0))
         },
@@ -961,6 +964,156 @@ async fn a_small_attachment_is_served_from_the_inline_body() {
         1,
         "an inline part needs no attachments.get"
     );
+}
+
+/// Two attachments, one name, one size - and before this, both downloads
+/// returned the **first** one's bytes. Deterministically, silently, with a 200.
+///
+/// `format=raw` carries no `attachmentId`, so the stored row has to be matched
+/// back to a live part by hand; matching on name and size alone cannot tell
+/// identical twins apart. `ordinal` is the tie-break, and it works because our
+/// attachment list and Gmail's part tree agree on *order* even though they are
+/// built by different parsers (backend/DECISIONS.md D14).
+#[tokio::test]
+async fn two_attachments_with_one_name_and_size_stay_distinct() {
+    use base64::Engine as _;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    // Same length, so size cannot separate them either.
+    let first = b"FIRST-ONE";
+    let second = b"SECOND!!!";
+    assert_eq!(first.len(), second.len());
+
+    let server = MockServer::start().await;
+    let mut app = test_app(Env::Prod).await;
+    app.set_gmail_base(&server.uri());
+    let token = app.device_token().await;
+    let account = connected(&app).await;
+    seed_default_labels(&app, account).await;
+    seed_token(&app, account).await;
+
+    let twin = |att_id: &str, ordinal: i32| ParsedAttachment {
+        att_id: att_id.to_owned(),
+        name: "invoice.pdf".to_owned(),
+        mime: "application/pdf".to_owned(),
+        size_bytes: 9,
+        content_id: None,
+        inline: false,
+        ordinal,
+    };
+    seed_message(
+        &app,
+        account,
+        Seed {
+            attachments: vec![twin("AttA", 0), twin("AttB", 1)],
+            ..Seed::new("18f2a1b3c4d5e6f7", "t0", at(0))
+        },
+    )
+    .await;
+
+    let b64 = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages/18f2a1b3c4d5e6f7"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"id":"18f2a1b3c4d5e6f7","payload":{{"mimeType":"multipart/mixed","parts":[
+                     {{"mimeType":"application/pdf","filename":"invoice.pdf",
+                       "body":{{"size":9,"data":"{}"}}}},
+                     {{"mimeType":"application/pdf","filename":"invoice.pdf",
+                       "body":{{"size":9,"data":"{}"}}}}]}}}}"#,
+                    b64(first),
+                    b64(second)
+                )
+                .into_bytes(),
+                "application/json",
+            ),
+        )
+        .mount(&server)
+        .await;
+
+    for (att_id, expected) in [("AttA", first.as_slice()), ("AttB", second.as_slice())] {
+        let response = authed_get(
+            &app,
+            &format!("/v1/messages/18f2a1b3c4d5e6f7/attachments/{att_id}"),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK, "{att_id}");
+        let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(
+            body.as_ref(),
+            expected,
+            "{att_id} served the wrong file's bytes"
+        );
+    }
+}
+
+/// EDGE (the message changed under us): we hold two look-alikes, Gmail now has
+/// one. The second must 404 rather than quietly serve the first - a wrong file
+/// with a 200 is worse than an honest miss.
+#[tokio::test]
+async fn a_twin_that_gmail_no_longer_has_is_a_404_not_the_other_twin() {
+    use base64::Engine as _;
+    use wiremock::{
+        matchers::{method, path},
+        Mock, MockServer, ResponseTemplate,
+    };
+
+    let server = MockServer::start().await;
+    let mut app = test_app(Env::Prod).await;
+    app.set_gmail_base(&server.uri());
+    let token = app.device_token().await;
+    let account = connected(&app).await;
+    seed_default_labels(&app, account).await;
+    seed_token(&app, account).await;
+
+    let twin = |att_id: &str, ordinal: i32| ParsedAttachment {
+        att_id: att_id.to_owned(),
+        name: "invoice.pdf".to_owned(),
+        mime: "application/pdf".to_owned(),
+        size_bytes: 9,
+        content_id: None,
+        inline: false,
+        ordinal,
+    };
+    seed_message(
+        &app,
+        account,
+        Seed {
+            attachments: vec![twin("AttA", 0), twin("AttB", 1)],
+            ..Seed::new("18f2a1b3c4d5e6f7", "t0", at(0))
+        },
+    )
+    .await;
+
+    Mock::given(method("GET"))
+        .and(path("/gmail/v1/users/me/messages/18f2a1b3c4d5e6f7"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"id":"18f2a1b3c4d5e6f7","payload":{{"mimeType":"multipart/mixed","parts":[
+                     {{"mimeType":"application/pdf","filename":"invoice.pdf",
+                       "body":{{"size":9,"data":"{}"}}}}]}}}}"#,
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"FIRST-ONE")
+                )
+                .into_bytes(),
+                "application/json",
+            ),
+        )
+        .mount(&server)
+        .await;
+
+    let response = authed_get(
+        &app,
+        "/v1/messages/18f2a1b3c4d5e6f7/attachments/AttB",
+        Some(&token),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 /// Criterion O9 - the 25 MB cap, refused before any Gmail quota is spent.

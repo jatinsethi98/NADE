@@ -48,7 +48,8 @@ docs/                          PLAN, DESIGN, PHASE0, contract/, MockUps/, screen
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"          # cargo is NOT on the default PATH
-cd backend && cargo test -p nade-server        # or -p nade-agent-sdk
+cd backend && cargo test                       # the whole workspace; see DECISIONS.md D27
+cd backend && cargo test -p nade-server        # faster, but a per-crate feature set
 xcodebuild -project NADE.xcodeproj -scheme NADE \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build test
 ```

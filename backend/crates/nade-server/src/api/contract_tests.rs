@@ -274,6 +274,7 @@ fn thread_detail(name: &str) -> ThreadDetail {
                 feed_item_id: card["feed_item_id"].as_str().map(str::to_owned),
             })
             .collect(),
+        partial: value["partial"].as_bool().unwrap(),
     }
 }
 

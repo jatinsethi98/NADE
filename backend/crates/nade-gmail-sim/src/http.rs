@@ -182,7 +182,23 @@ mod tests {
     use crate::MessageSpec;
 
     async fn server() -> SimServer {
+        install_crypto_provider();
         SimServer::fresh().await.expect("bind 127.0.0.1:0")
+    }
+
+    /// Nothing here speaks TLS, and this is still required.
+    ///
+    /// Cargo unifies features across the workspace, so under `cargo test` at the
+    /// root our `reqwest` is built with `nade-server`'s `rustls-no-provider` and
+    /// `Client::new()` panics without a process-wide provider. Per-crate runs
+    /// (`cargo test -p nade-gmail-sim`) do not unify and so never saw it - which
+    /// is exactly why it hid, since that is the command `CLAUDE.md` documents.
+    fn install_crypto_provider() {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            // Errs only if something already installed one, which is fine.
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
     }
 
     #[tokio::test]

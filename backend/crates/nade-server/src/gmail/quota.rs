@@ -62,6 +62,7 @@ pub mod cost {
     pub const HISTORY_LIST: u32 = 2;
     pub const MESSAGES_LIST: u32 = 5;
     pub const MESSAGES_GET: u32 = 5;
+    pub const THREADS_GET: u32 = 10;
     pub const ATTACHMENTS_GET: u32 = 5;
 }
 

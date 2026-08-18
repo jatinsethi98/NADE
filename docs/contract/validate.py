@@ -307,6 +307,10 @@ THREAD_DETAIL = OBJ({
     "account_email": "email",
     "messages": ARR(MESSAGE),
     "agent_cards": ARR(AGENT_CARD),
+    # True when the cache holds only part of the conversation and Gmail could
+    # not be reached for the rest. The window is a cache, not the mailbox
+    # (docs/SEARCH.md); a fragment must never be served as the whole thread.
+    "partial": "bool",
 })
 
 NOTE_ROW = OBJ({

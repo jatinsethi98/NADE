@@ -192,12 +192,12 @@ pub async fn upsert_message(
     for attachment in &row.attachments {
         sqlx::query(
             "insert into attachments \
-                 (message_id, att_id, name, mime, size_bytes, content_id, inline) \
-             values ($1, $2, $3, $4, $5, $6, $7) \
+                 (message_id, att_id, name, mime, size_bytes, content_id, inline, ordinal) \
+             values ($1, $2, $3, $4, $5, $6, $7, $8) \
              on conflict (message_id, att_id) do update set \
                  name = excluded.name, mime = excluded.mime, \
                  size_bytes = excluded.size_bytes, content_id = excluded.content_id, \
-                 inline = excluded.inline",
+                 inline = excluded.inline, ordinal = excluded.ordinal",
         )
         .bind(message_id)
         .bind(&attachment.att_id)
@@ -206,6 +206,7 @@ pub async fn upsert_message(
         .bind(attachment.size_bytes)
         .bind(attachment.content_id.as_ref())
         .bind(attachment.inline)
+        .bind(attachment.ordinal)
         .execute(&mut **tx)
         .await?;
     }

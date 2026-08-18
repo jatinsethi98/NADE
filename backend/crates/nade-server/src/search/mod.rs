@@ -35,11 +35,8 @@ use crate::{
         mail::{agent_notes, ThreadRow, ThreadSummary},
     },
     error::ApiResult,
-    gmail::{
-        client::{BatchOutcome, GmailClient, MAX_BATCH},
-        types::MessageRef,
-    },
-    mail::parse,
+    gmail::{client::GmailClient, types::MessageRef},
+    mail::cache,
     state::AppState,
     sync::store,
 };
@@ -91,20 +88,29 @@ pub async fn search(
     raw_query: &str,
     cursor: Option<&str>,
 ) -> ApiResult<SearchPage> {
-    // Opaque in, opaque out, and a corrupt one is a 400 rather than a silent
-    // reset to page one - the same rule as the keyset cursors (`API.md` §0).
-    let page_token = cursor.map(cursor::decode_page_token).transpose()?;
-
     let Some(account) = state.account().await? else {
         // No Gmail connected. Validate anyway: "nothing is connected" must not
         // turn a malformed query into an empty page, which is the exact
         // ambiguity this module exists to remove.
-        query::validate(raw_query, &LabelIndex::empty())?;
+        let valid = query::validate(raw_query, &LabelIndex::empty())?;
+        // EDGE (cursor): and a bad cursor is still a 400 here, so a client does
+        // not learn a different answer depending on whether mail is connected.
+        cursor
+            .map(|raw| cursor::decode_page_token(raw, valid.as_str()))
+            .transpose()?;
         return Ok(SearchPage::empty());
     };
 
     let labels = label_index(state, account.id).await?;
     let valid = query::validate(raw_query, &labels)?;
+    // Opaque in, opaque out, and a corrupt one is a 400 rather than a silent
+    // reset to page one - the same rule as the keyset cursors (`API.md` §0).
+    // After validation, because the cursor is bound to the *canonical* query:
+    // `from:A  OR  from:B` and `from:a or from:b` are one search, and a cursor
+    // must survive the user retyping it.
+    let page_token = cursor
+        .map(|raw| cursor::decode_page_token(raw, valid.as_str()))
+        .transpose()?;
     tracing::debug!(
         query = valid.as_str(),
         widens_scope = valid.widens_scope(),
@@ -134,7 +140,7 @@ pub async fn search(
         next_cursor: listed
             .next_page_token
             .as_deref()
-            .map(cursor::encode_page_token),
+            .map(|token| cursor::encode_page_token(token, valid.as_str())),
     })
 }
 
@@ -168,99 +174,17 @@ fn thread_order(refs: &[MessageRef]) -> Vec<String> {
 /// Fetch anything Gmail returned that we do not already hold, and store it.
 ///
 /// The cache warms as a side effect: a message found by search is a message
-/// opening the thread will not have to fetch again.
-///
-/// A whole batch failing is a `502` - a page missing ten of its results is not
-/// a result. A *single* sub-request failing is logged and skipped, because
-/// losing one row is better than losing the other forty-nine.
+/// opening the thread will not have to fetch again. Only the *matching*
+/// messages, though - completing the conversation around them is the thread
+/// endpoint's job (`crate::mail::cache::ensure_thread_complete`).
 async fn hydrate(
     state: &AppState,
     account_id: Uuid,
     client: &GmailClient,
     refs: &[MessageRef],
 ) -> ApiResult<()> {
-    let mut wanted: Vec<String> = Vec::with_capacity(refs.len());
-    let mut seen: BTreeSet<&str> = BTreeSet::new();
-    for entry in refs {
-        if seen.insert(&entry.id) {
-            wanted.push(entry.id.clone());
-        }
-    }
-    // EDGE (empty input): nothing matched, so nothing is fetched.
-    if wanted.is_empty() {
-        return Ok(());
-    }
-
-    let cached: Vec<String> = sqlx::query_scalar(
-        "select gmail_id from messages \
-          where account_id = $1 and gmail_id = any($2) and deleted_at is null",
-    )
-    .bind(account_id)
-    .bind(&wanted)
-    .fetch_all(&state.pool)
-    .await?;
-    let cached: BTreeSet<String> = cached.into_iter().collect();
-
-    let misses: Vec<String> = wanted
-        .into_iter()
-        .filter(|id| !cached.contains(id))
-        .collect();
-    if misses.is_empty() {
-        return Ok(());
-    }
-
-    for chunk in misses.chunks(MAX_BATCH) {
-        let outcomes = client
-            .batch_get_raw(chunk)
-            .await
-            .map_err(crate::api::mail::upstream)?;
-
-        let mut threads: BTreeSet<String> = BTreeSet::new();
-        for outcome in outcomes {
-            match outcome {
-                BatchOutcome::Fetched {
-                    gmail_id,
-                    message,
-                    raw,
-                } => {
-                    // Exactly the sync's rule: an unparseable message becomes a
-                    // metadata-only row rather than a hole.
-                    let row = match parse::parse(&raw, &gmail_id) {
-                        Ok(parsed) => store::IngestRow::parsed(&message, parsed),
-                        Err(error) => {
-                            tracing::warn!(%gmail_id, %error, "unparseable search result; caching metadata only");
-                            store::IngestRow::metadata_only(&message)
-                        }
-                    };
-                    let mut tx = state.pool.begin().await?;
-                    store::upsert_message(&mut tx, account_id, &row).await?;
-                    tx.commit().await?;
-                    threads.insert(row.thread_id.clone());
-                }
-                // Deleted between the list and the get. Normal; it simply does
-                // not appear.
-                BatchOutcome::Gone { gmail_id } => {
-                    tracing::debug!(%gmail_id, "search result vanished between list and get");
-                }
-                BatchOutcome::Failed {
-                    gmail_id,
-                    status,
-                    detail,
-                    ..
-                } => {
-                    tracing::warn!(%gmail_id, status, %detail, "could not hydrate a search result");
-                }
-            }
-        }
-
-        for thread_id in &threads {
-            let mut tx = state.pool.begin().await?;
-            store::refresh_thread(&mut tx, account_id, thread_id).await?;
-            tx.commit().await?;
-        }
-    }
-
-    Ok(())
+    let ids: Vec<String> = refs.iter().map(|entry| entry.id.clone()).collect();
+    cache::fetch_missing(state, account_id, client, &ids).await
 }
 
 /// The thread rows for `order`, **in `order`** - Gmail's relevance ranking,
