@@ -65,10 +65,19 @@ never exist.
 | `GET /feed` | yes | 50 |
 | `GET /runs` | yes | 50 |
 
-A cursor is an opaque base64url string. Clients must not parse it. It is
-**keyset**, not offset: `{"ts": "...", "id": "..."}` of the last row on the
-page, so a row inserted mid-scroll cannot duplicate or skip an item. An unknown
-or corrupt cursor is `400 bad_request`, never a silent reset to page one.
+A cursor is an opaque base64url string. **Clients must not parse it, and its
+contents differ per endpoint** — the guarantees below are the endpoint's, not
+the cursor format's. An unknown or corrupt cursor is `400 bad_request`, never a
+silent reset to page one.
+
+- **List endpoints over our own rows** (threads, notes, drafts, feed, runs) use
+  a **keyset** cursor — the `ts` and `id` of the last row — so a row inserted
+  mid-scroll can neither duplicate nor skip an item.
+- **`GET /search` wraps Gmail's `pageToken`** and inherits whatever paging
+  guarantees Gmail gives. A `pageToken` is scoped to the query that produced
+  it, so a cursor is only valid with the same `q`; the query is fingerprinted
+  into the cursor and a mismatched pair is `400 bad_request` rather than a
+  confusing upstream failure.
 
 The last page has `next_cursor: null`. An empty collection returns an empty
 array **and** `next_cursor: null` — never `404`.
@@ -278,10 +287,42 @@ them. Over 25 MB → `413 payload_too_large`. Gmail no longer has the message �
 
 ### `GET /search?q&cursor`
 
-Same body shape as the threads list. `q` is matched with
-`websearch_to_tsquery('simple')` against `messages.fts`. Empty or
-whitespace-only `q` → `400 bad_request`. No results is an empty array, not a
-404.
+Same body shape as the threads list. **Search is delegated to Gmail** — see
+`docs/SEARCH.md` for why. `q` goes to `users.messages.list`, the returned ids
+are hydrated from our rows, misses are batch-fetched and cached, and the page
+comes back in **Gmail's relevance order, not date order**. It therefore covers
+the whole mailbox, not the synced window.
+
+`q` is **validated before it is sent**, and a refusal explains itself. Gmail
+never answers a bad query with a 400 — it answers with an empty 200 — so a
+malformed query is otherwise indistinguishable from "no such mail". The
+validator refuses what Gmail would silently swallow: unknown operators, an
+operator with an empty argument (which matches *everything*), unsupported
+`newer_than` units, and a lowercase `or` (which is matched as a literal word
+and narrows the result to nothing). It normalises what is recoverable —
+operator names fold case, a space after a colon is absorbed, and a **label id
+is translated to its name**, since `q=label:` takes names and matches nothing
+given an id.
+
+Empty or whitespace-only `q` → `400 bad_request`. No results is an empty array,
+not a 404.
+
+**Errors**, beyond the shared set: `400 bad_request` for a rejected query, a
+corrupt cursor, or a cursor paired with a different query; `502
+upstream_unavailable` when Gmail fails after retries; `409 needs_reauth` when
+the credential is dead. A client that cannot reach search must say so rather
+than presenting locally-filtered rows as a complete result.
+
+Two consequences worth stating, because both surprise:
+
+- **A page of 50 is an upper bound on threads, not a count.** Gmail pages
+  *messages*, and several may share a thread.
+- **Hydrated old mail joins the mailbox lists** at its original date — that is,
+  at the bottom. It follows from the cache holding anything we have looked at.
+
+A whole batch failing while hydrating is a `502`: a page missing ten of its
+results is not a result. A single message failing is logged and skipped, so the
+page is one row shorter.
 
 ---
 
@@ -292,7 +333,17 @@ draft is a NADE draft, not a Gmail draft.
 
 ### `GET /notes?q&cursor`
 
-Paginated. `q` optional, same FTS treatment over title and body.
+Paginated. `q` optional.
+
+Notes are **our** rows, so Gmail cannot search them, and `docs/SEARCH.md`
+forbids standing up a second index. `q` is therefore a plain case-insensitive
+substring predicate over `title` and `body_md` — a sequential scan, deliberately.
+
+That is correct rather than lazy: a note is written by an agent run, and the
+dev caps bound runs to a handful a day, so this table holds tens of rows and
+will hold hundreds. Indexing hundreds of rows costs more than scanning them.
+If it ever passes ~10,000, revisit — and revisit with `pg_trgm`, not with a
+tsvector, since substring is what the UI's "Search notes" box actually means.
 
 ```json
 ← {"notes": [{"id": "…", "run_id": "…"|null, "thread_id": "…"|null,

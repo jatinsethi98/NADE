@@ -149,7 +149,7 @@ constraints and indexes; the sketch that used to sit here was pseudocode
 silently permitted a much weaker schema. It is deleted rather than kept in sync.
 
 The tables: `accounts`, `gmail_tokens`, `messages` (with the stored generated
-`fts` column), `attachments`, `labels`, `sync_state`, `agents`, `agent_runs`,
+`attachments`, `labels`, `sync_state`, `agents`, `agent_runs`,
 `run_journal`, `notes`, `drafts`, `feed_items`, `audit_log`, `devices`,
 `settings`, `jobs`. Ownership columns are `not null` and cascade from
 `accounts`; every enum column carries a check constraint; `agents.status`
@@ -212,7 +212,13 @@ Triggers: strong model compiles `nl_definition`→`spec` at save. Deterministic 
 
 Injection defenses, all on: fenced untrusted-data blocks (10 KB) · mutating tools approval-gated · host-enforced `allowed_tools` · never-messaged recipients flagged red · size-capped tool results · secrets never in prompts.
 
-Ask retrieval: `websearch_to_tsquery('simple')` over `fts` (thread-scoped if given) → top 30 `ts_rank` → recency re-rank (30-day half-life) → 8k-token pack newest-first → strong model, cite gmail_ids → SSE per contract (with the `route` event first).
+Ask retrieval: **delegated to Gmail** — see `docs/SEARCH.md`. The validated
+query goes to `users.messages.list` (thread-scoped when a `thread_id` is
+given), hits are hydrated from the cache and misses batch-fetched, then
+recency re-ranked (30-day half-life) and packed newest-first into 8k tokens
+for the strong model, citing `gmail_id`s → SSE per contract, `route` first.
+There is no local index: the tsvector indexed 0.78% of the mailbox and
+answered everything older with a silent empty result.
 
 ### iOS app
 

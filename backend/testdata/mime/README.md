@@ -17,7 +17,8 @@ through any parser of ours. Every case is something that actually arrives in an
 inbox and a real way naive parsers break.
 
 Real mail still gets tested — at P2, against the live account, but as a
-*smoke* (nothing panics, `body_text` is never empty, every message round-trips)
+*smoke* (nothing panics, every message round-trips, a sender and a
+timestamp are always recovered)
 rather than as golden output. Those messages stay out of git.
 
 ## Files
@@ -75,29 +76,37 @@ than a spec-literal one:
 | 23 | unknown charset | error instead of a fallback |
 | 24 | duplicate Subject | non-deterministic choice |
 | 25 | mixed CRLF/LF | losing the header/body boundary |
-| 26 | 200 KB body | silent truncation; the `fts` column caps at 100k, the body does not |
+| 26 | 200 KB body | silent truncation. `body_text` caps at 10 KB and `body_html` at 256 KB, both cut on a char boundary and marked; nothing else caps, and no index truncates (there is no index) |
 
 ## What real mail in this account actually looks like
 
-Profiled from 60 raw messages pulled out of the live 30-day window on
-2026-08-17 (`backend/testdata/fetch_live.sh`, output gitignored):
+The live sample (`backend/testdata/fetch_live.sh`, gitignored) is **247 real
+messages**, chosen for structural nastiness rather than sampled at random: 45
+from before 2012, 30 `multipart/signed`, 26 carrying `text/calendar`, 20
+Hangouts chats, 15 drafts, 23 over 2 MB — one of them 11 MB whose entire
+content is two MP3 attachments — a 41-leaf-part message, and 2 with genuine
+8-bit bytes in their headers.
 
 | Dimension | Distribution |
 |---|---|
-| Top-level content type | `multipart/alternative` 33 · **`text/html` 23** · `multipart/mixed` 3 · `multipart/related` 1 |
-| Transfer encoding | quoted-printable 73 · 7bit 16 · base64 8 |
-| Declared charset | utf-8 majority · **iso-8859-1 11** · us-ascii 3 |
-| RFC 2047 subjects | 11 of 60 |
+| Top level | `multipart/alternative` 111 · `multipart/mixed` 59 · `text/html` 34 · `multipart/signed` 30 · `text/plain` 8 · `multipart/related` 5 |
+| Transfer encoding | quoted-printable 258 · base64 246 · 7bit 188 · 8bit 1 |
+| Declared charset | utf-8 337 · none 233 · us-ascii 71 · **iso-8859-1 41** · windows-1252 10 |
+| RFC 2047 headers | 46 |
 
-Two numbers change how this corpus should be read:
+Three numbers change how this corpus should be read:
 
-1. **38% of real messages are `text/html` with no plain-text part at all.**
-   Case 09 is not an exotic fallback — html2text is a primary path, and the
-   quality of that conversion is the quality of the mail list snippet, the
-   search index, and everything an agent reads. Treat it accordingly.
-2. **`iso-8859-1` really is declared in this inbox.** Case 12's cp1252
-   substitution is not a theoretical nicety; without it a chunk of ordinary
-   mail renders with replacement characters.
+1. **Nearly half of real messages have no plain-text part at all**, so the
+   HTML→text conversion is a primary path. Its quality is the quality of the
+   list snippet, the thread view, and everything an agent reads under a token
+   budget. (It is *not* the quality of search — search is delegated to Gmail,
+   see `docs/SEARCH.md`, and nothing we extract is an index input.)
+2. **`iso-8859-1` really is declared here, 41 times**, and `windows-1252` ten.
+   Case 12's cp1252 substitution is not a theoretical nicety.
+3. **8% of real messages have a genuinely empty body** — 15 attachment-only,
+   5 blank sends whose text part is literally `"\r\n"`. A test asserting
+   "body_text is never empty for real mail" is asserting something false; the
+   contract permits empty and reality produces it.
 
 The 30-day window holds ~500 messages, comfortably under the
 `MAX_SYNC_MESSAGES=2000` dev cap, so a full test sync is cheap.
