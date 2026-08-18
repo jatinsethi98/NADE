@@ -547,6 +547,7 @@ ERROR_ENVELOPE = OBJ({
 FIXTURE_SHAPES = {
     # 1. Auth and identity
     "pair.json": OBJ({"token": "str"}),
+    "gmail_link.json": OBJ({"url": "str", "expires_at": "ts"}),
     "me.json": OBJ({"email": "email", "status": ENUM(["ok", "needs_reauth"])}),
     "me_needs_reauth.json": OBJ({"email": "email",
                                  "status": ENUM(["ok", "needs_reauth"])}),

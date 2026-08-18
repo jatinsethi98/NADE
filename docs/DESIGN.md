@@ -742,8 +742,13 @@ uppercase `ink62` `0.1em` at `20 / 22 / 6` — except the **first**, which is
 v1 sections:
 - **ACCOUNT** — one row: the connected Gmail `email`, value "Connected ›" or
   "Needs sign-in ›" when `status == "needs_reauth"`; a second row "Sign in
-  again" (accent, 14.5 pt) appears only in that state, pushing
-  `GET /auth/gmail/start`.
+  again" (accent, 14.5 pt) appears only in that state, starting the Gmail link
+  flow. That is **two** calls, not one: `POST /auth/gmail/link` returns a
+  single-use `url`, and the app opens it (`API.md` §1, backend/DECISIONS.md
+  D15). Open it with `ASWebAuthenticationSession` or Safari — **never** a
+  throwaway `WKWebView`. `start` sets an `HttpOnly` cookie that `callback`
+  requires, so a session the app discards loses the cookie and the user is told
+  the link expired.
   `v1 →` the mockup's two account rows and its accent "＋ Add mailbox" row are
   gone (parity map).
 - **AGENTS** — "Approve before it acts" with the hint "Applies to every new

@@ -24,7 +24,7 @@ Edit the generator, never the JSON.
 |---|---|
 | `GET /healthz` | Liveness must answer before anything else works. Returns nothing sensitive. |
 | `POST /auth/pair` | It is how a token is obtained. Guarded by a single-use 6-digit code with a 10-minute TTL and a 10/minute rate limit. |
-| `GET /auth/gmail/start`, `GET /auth/gmail/callback` | **Browser-facing** — a redirect and a Google callback, neither of which can set a header. Guarded by a single-use `state` with PKCE, a bounded in-flight set, and a refusal to bind a second Google account. |
+| `GET /auth/gmail/start`, `GET /auth/gmail/callback` | **Browser-facing** — a redirect and a Google callback, neither of which can set a header. They are authorised without one: `start` consumes a **single-use, ten-minute capability** minted by the bearer-guarded `POST /auth/gmail/link`, and refuses with a page (never a redirect) that is identical whether or not a mailbox is connected; `callback` requires the `HttpOnly` cookie `start` set, so consent must finish in the browser that began it. Also guarded by a single-use `state` with PKCE, a bounded in-flight set, and a refusal to bind a second Google account. |
 | `POST /webhooks/gmail` | Pub/Sub cannot present a bearer. Guarded by full OIDC verification — JWKS signature, `iss`, `aud`, `email == PUSH_SA_EMAIL`, `email_verified`. |
 
 **Time** ISO-8601 UTC, second precision, always `Z`-suffixed:
@@ -147,12 +147,31 @@ exactly the state it renders after a token dies: the same re-sign-in row. A 404
 would force the client to carry a third case that behaves identically to the
 second.
 
+### `POST /auth/gmail/link`
+
+Authenticated. Mints the single-use permission slip that `GET /auth/gmail/start`
+demands, and returns the URL to open in a browser.
+
+```json
+← {"url": "http://localhost:8080/v1/auth/gmail/start?cap=…",
+   "expires_at": "2026-08-16T09:22:04Z"}
+```
+
+`url` is absolute, single-use, and dead after ten minutes; `expires_at` says
+when. The client opens it in a **browser session it does not discard** — the
+same session has to receive Google's redirect. Ask for a fresh one rather than
+storing it.
+
 ### `GET /auth/gmail/start`
 
-`302` to Google, carrying PKCE + `state`. The callback
-(`/v1/auth/gmail/callback`) is browser-facing, binds the returned account to
-the single `accounts` row, and renders a plain "you can close this tab" page.
-Used both for first connection and for re-consent.
+`302` to Google, carrying PKCE + `state`, and setting an `HttpOnly` cookie that
+binds the consent to this browser. Requires the `cap` from
+`POST /auth/gmail/link`; without a live one it renders a `403` page rather than
+redirecting, and that page is identical whether or not a mailbox is already
+connected. The callback (`/v1/auth/gmail/callback`) requires the same cookie,
+binds the returned account to the single `accounts` row, and renders a plain
+"you can close this tab" page. Used both for first connection and for
+re-consent.
 
 ---
 
@@ -932,6 +951,7 @@ where clients crash.
 | Fixture | Endpoint / case |
 |---|---|
 | `pair.json` | `POST /auth/pair` |
+| `gmail_link.json` | `POST /auth/gmail/link` |
 | `me.json`, `me_needs_reauth.json` | `GET /me`, both statuses |
 | `mailboxes.json` | `GET /mailboxes` |
 | `threads.json`, `threads_last_page.json`, `threads_empty.json` | thread list, all three page shapes |

@@ -208,26 +208,53 @@ message on every sync forever, and it would still need correlation logic,
 because the `full` part tree and our parsed part list are produced by different
 parsers.
 
-## D15 — Both `/auth/gmail/*` routes are unauthenticated.
+## D15 — The `/auth/gmail/*` routes carry no bearer, but are not open.
 
 `API.md` §0 exempts only `/healthz`, `/auth/pair` and `/webhooks/gmail` from the
-bearer guard. Both Gmail OAuth routes have to join that list, because neither
-can carry a bearer token: `start` is a URL a human types into Safari, and
+bearer guard. The two Gmail OAuth routes have to join that list, because neither
+can carry a bearer token: `start` is a URL that opens in a browser, and
 `callback` is where Google's redirect lands.
 
-Reported to the contract lane as an `API.md` §0 omission rather than fixed in
-`docs/`.
+The first cut of this stopped there, and that was a hole. PKCE and `state` prove
+a callback belongs to a flow *someone* started; they do not prove that someone
+was allowed to configure this server. On a reachable, not-yet-connected server,
+any caller could complete consent with their own Google account, become the
+singleton mailbox, and leave the real owner meeting the 409.
 
-What stops this being a hole:
+So authorisation to **initiate** moved to a route that can be authenticated, and
+the browser itself is bound:
 
-* `callback` binds nothing without a `state` **we** minted, single-use, with a
-  10-minute TTL, plus the PKCE verifier stored beside it;
-* the pending-consent map is capped at 64 entries, so an unauthenticated route
-  cannot grow memory;
-* a completed consent for a **different** mailbox is refused with a 409 page
-  (`a_second_google_account_is_refused`) — v1 is single-account, and binding a
-  second one would silently repoint every stored message;
-* `start` leaks nothing: it 302s to Google's own consent screen.
+* `POST /v1/auth/gmail/link` sits **behind** the bearer guard and mints a
+  single-use, ten-minute capability, returning the full `start` URL carrying it.
+  Pairing is the trust root — the pairing code is printed on the server's own
+  console — so a device with a bearer token has already proved console access,
+  and there is no bootstrapping problem.
+* `GET /auth/gmail/start` verifies and consumes that capability before anything
+  else, re-checks that the minting device is still paired, and only then
+  redirects. Without one it renders a refusal page: `403`, never a redirect,
+  never a `Set-Cookie`, and byte-identical whether or not a mailbox is already
+  connected — the refusal must not double as a "is this server up for grabs?"
+  probe. Because the capability is checked first, an unauthorised caller also
+  cannot fingerprint whether `secrets/web_client.json` exists, and cannot put a
+  single entry into the pending-consent map.
+* `start` sets `nade_gmail_link` — 32 random bytes, `HttpOnly`, `SameSite=Lax`,
+  `Path` scoped to the OAuth routes, `Max-Age=600`, and `Secure` when the
+  registered redirect is https — and stores its value beside the PKCE verifier.
+  `callback` requires it to match, in constant time, **before** the token
+  exchange. Consent must finish in the browser that started it, so a `state`
+  lifted out of a redirect is worth nothing on its own. `SameSite=Lax` is a
+  decision, not a default: Google's redirect back is a cross-site top-level GET,
+  which `Lax` permits and `Strict` would drop.
+* Revoking a device is checked at **both** ends — `start` and `callback` — so
+  revoking a stolen token also closes a consent that is already half way through
+  Google, rather than only refusing new ones.
+* Everything the earlier note claimed still holds: single-use `state` with a
+  10-minute TTL and its PKCE verifier, a pending map capped at 64, and a
+  completed consent for a **different** mailbox refused with a 409 page.
+
+Neither browser-facing URL needs a bearer header. The `API.md` §0 exception
+table was reported to the contract lane rather than patched here.
+
 
 ## D16 — Gmail tokens are AES-256-GCM at rest.
 
@@ -405,3 +432,38 @@ server: two providers in one process is a trap.
 
 The general lesson: a per-crate test command can pass on a feature set the real
 build never uses. The workspace command is the one that tells the truth.
+
+## D28 — The singleton account is an advisory lock, not a unique index.
+
+`existing_account_email` and `save_consent` used to run in **separate**
+transactions. Two callbacks for two different addresses could both observe "no
+account" and both insert; `accounts.email` being unique does not help, because
+the whole premise of the race is that the addresses differ. `state.account()`
+then picked an arbitrary earliest row.
+
+`save_consent` now takes `pg_advisory_xact_lock(ACCOUNT_SINGLETON_LOCK)` as the
+**first** statement of its existing transaction and re-checks inside it,
+returning `TokenError::AlreadyBound { existing }` rather than inserting. The
+handler maps that to the same 409 page as the cheap pre-check, which stays only
+to buy the friendly path. The key is `i64::from_be_bytes(*b"nadeacct")`, so it is
+recognisable in `pg_locks`; what matters is only that every writer of `accounts`
+takes the same one. `pg_advisory_xact_lock` is released by COMMIT, ROLLBACK, and
+the backend dying, so a consent that fails half way cannot wedge every later
+sign-in.
+
+**A `unique index on accounts ((true))` was considered and rejected.** Six tests
+in `db.rs` insert several accounts on purpose, to prove that every query is
+scoped per account. A hard singleton index would forbid exactly the tests that
+prove isolation, and the lock closes the race without that cost.
+
+Two smaller things fell out of the same transaction:
+
+* `accounts.email` is unique but PostgreSQL text is case-sensitive, so the old
+  `on conflict (email) do update` would have produced a **second** row for one
+  mailbox spelled two ways — both spellings pass the `eq_ignore_ascii_case`
+  guard. When a row exists it is now updated by id; the insert arm only runs
+  under the lock, where there provably is none.
+* `order by created_at` is not a total order. Every "the account" query —
+  `AppState::account`, `oauth::existing_account_email`,
+  `api::auth::singleton_account` — now orders by `created_at, id`, so two calls
+  inside one request cannot disagree.

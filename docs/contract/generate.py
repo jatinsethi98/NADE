@@ -1605,6 +1605,13 @@ def build_fixtures():
 
     # -- 1. Auth and identity ----------------------------------------------
     add("pair.json", {"token": PAIR_TOKEN})
+    # `cap` is an example value, exactly like PAIR_TOKEN: a real one exists
+    # once, is consumed by `GET /auth/gmail/start`, and is never stored.
+    add("gmail_link.json", {
+        "url": "http://localhost:8080/v1/auth/gmail/start?cap="
+               "9f2c7a1e8b40d6539ac1e7f204b8d3617e5a09c4d82b6f13a7e05c9b41d8f26a",
+        "expires_at": "2026-08-16T09:22:04Z",
+    })
     add("me.json", {"email": ACCOUNT_EMAIL, "status": "ok"})
     add("me_needs_reauth.json", {"email": ACCOUNT_EMAIL, "status": "needs_reauth"})
 
