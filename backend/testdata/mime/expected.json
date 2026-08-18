@@ -435,9 +435,10 @@
     ],
     "cc": [],
     "date_utc": "2026-08-22T09:00:00Z",
-    "body_text_min_length": 100000,
     "body_html_present": false,
     "attachments": [],
-    "note": "The messages.fts generated column truncates at 100k chars. body_text itself is not truncated at parse time; anything that caps it must do so explicitly and say so."
+    "note": "The messages.fts generated column truncates at 100k chars, and body_text is now itself capped at MAX_BODY_TEXT_CHARS (10 KiB of CHARACTERS, not bytes) with an explicit [nade:truncated] marker. PLAN.md promises a 10 KB fenced block and until the cap existed nothing enforced it: the red-team corpus's dos-01 produced 516,019 characters, which the token budget absorbed only after paying for the tokens. The cap says so where it cuts, so a truncated body is never mistaken for a short one.",
+    "body_text_exact_length": 10256,
+    "body_text_ends_with": "[nade:truncated]"
   }
 }

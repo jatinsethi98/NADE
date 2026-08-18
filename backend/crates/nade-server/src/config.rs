@@ -115,8 +115,11 @@ pub struct GmailConfig {
     pub max_sync_messages: usize,
     /// PLAN.md's 30-day window.
     pub sync_window_days: u32,
-    /// Messages per `multipart/mixed` batch. 45 x 5 units = 225, inside the
-    /// 250/s ceiling.
+    /// Messages per `multipart/mixed` batch, capped at
+    /// [`crate::gmail::client::MAX_BATCH`]. Sized against Gmail's **concurrency**
+    /// limit, not its unit ceiling: Google runs the sub-requests of a batch in
+    /// parallel, and 45 of them produced `"Too many concurrent requests for
+    /// user."` on the first live sync.
     pub batch_size: usize,
 }
 
@@ -191,11 +194,12 @@ impl Config {
         if sync_window_days == 0 {
             bail!("NADE_SYNC_WINDOW_DAYS must be at least 1");
         }
-        let batch_size = parse::<usize>("NADE_SYNC_BATCH_SIZE", 45)?;
+        let batch_size = parse::<usize>("NADE_SYNC_BATCH_SIZE", crate::gmail::client::MAX_BATCH)?;
         if batch_size == 0 || batch_size > crate::gmail::client::MAX_BATCH {
             bail!(
-                "NADE_SYNC_BATCH_SIZE must be between 1 and {} (45 x 5 quota units keeps a \
-                 batch inside Gmail's 250/s ceiling)",
+                "NADE_SYNC_BATCH_SIZE must be between 1 and {} - Google runs a batch's \
+                 sub-requests concurrently, so the batch width is a concurrency figure and \
+                 45 produced `Too many concurrent requests for user` on the live account",
                 crate::gmail::client::MAX_BATCH
             );
         }
@@ -407,7 +411,7 @@ pub(crate) mod tests {
             token_key_file: PathBuf::from("/nonexistent/token-key"),
             max_sync_messages: 2_000,
             sync_window_days: 30,
-            batch_size: 45,
+            batch_size: crate::gmail::client::MAX_BATCH,
         }
     }
 
@@ -416,7 +420,11 @@ pub(crate) mod tests {
         let gmail = sample_gmail();
         assert_eq!(gmail.max_sync_messages, 2_000, "MAX_SYNC_MESSAGES");
         assert_eq!(gmail.sync_window_days, 30, "the 30-day window");
-        assert_eq!(gmail.batch_size, 45, "45 messages per batch");
+        assert_eq!(
+            gmail.batch_size,
+            crate::gmail::client::MAX_BATCH,
+            "the batch width is the concurrency cap, not a number PLAN.md fixed"
+        );
     }
 
     pub(crate) fn sample() -> Config {

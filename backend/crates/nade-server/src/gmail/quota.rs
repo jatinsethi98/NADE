@@ -1,13 +1,29 @@
 //! Gmail's quota, respected rather than discovered.
 //!
-//! Gmail allows **250 quota units per user per second**. `messages.get` costs 5,
-//! so the real ceiling is 50 gets per second - not "50 requests", which is what
-//! a naive request-per-second limiter would enforce and which would get us
-//! throttled the moment a batch of 45 lands.
+//! Gmail rations a user along **two independent axes**, and a limiter that
+//! models one of them is not a limiter:
 //!
-//! The bucket debits the **true** cost of each call. Everything here is driven
-//! by [`Instant`], which is monotonic, so a wall-clock jump cannot make the
-//! limiter either stall or open the floodgates (edge case 8).
+//! 1. **Rate** - 250 quota units per user per second. `messages.get` costs 5,
+//!    so the real ceiling is 50 gets per second, not "50 requests", which is
+//!    what a naive request-per-second limiter would enforce and which would get
+//!    us throttled the moment a batch of 45 lands. [`Bucket`] debits the
+//!    **true** cost of each call.
+//! 2. **Concurrency** - how many requests for that user are in flight at once.
+//!    This is a *count*, not a rate, and no amount of unit accounting can
+//!    express it.
+//!
+//! The first live sync was throttled on axis 2 while comfortably inside axis 1:
+//! Gmail answered 91 sub-requests with
+//! `429 rateLimitExceeded: "Too many concurrent requests for user."` A
+//! `multipart/mixed` batch is one HTTP request to us and **`n` simultaneous
+//! operations to Google**, so a 45-wide batch is 45 concurrent requests for one
+//! user. The unit budget said 225 of 250 and was right; the concurrency budget
+//! was never being kept. [`MAX_CONCURRENT_REQUESTS`] and
+//! [`MAX_CONCURRENT_SUBREQUESTS`] are that second budget.
+//!
+//! Everything here is driven by [`Instant`], which is monotonic, so a
+//! wall-clock jump cannot make the limiter either stall or open the floodgates
+//! (edge case 8).
 
 use std::{
     sync::Mutex,
@@ -16,6 +32,28 @@ use std::{
 
 /// Gmail's per-user, per-second quota.
 pub const UNITS_PER_SECOND: f64 = 250.0;
+
+/// How many Gmail HTTP requests this process keeps in flight for one account.
+///
+/// One. Not a throughput choice - a correctness one: two `gmail_sync` jobs, or
+/// a sync and an on-demand fetch, would otherwise overlap and Gmail counts them
+/// against the same per-user concurrency budget that produced the live 429s.
+/// Every call in this crate is sequential anyway, so this costs nothing and
+/// makes "we never ran two Gmail calls at once" true by construction rather
+/// than by the shape of the current call sites.
+pub const MAX_CONCURRENT_REQUESTS: usize = 1;
+
+/// How many sub-requests one `multipart/mixed` batch may carry.
+///
+/// Gmail's own protocol limit is 100 and its quota limit is 50 `messages.get`
+/// per second, but neither is the binding constraint: **Google expands the
+/// batch and runs the sub-requests concurrently**, so the batch width *is* a
+/// concurrency figure. 45 produced
+/// `"Too many concurrent requests for user."` on the real account. 10 is the
+/// value Google's own Gmail guidance uses in its batching examples, and it
+/// still costs only 50 units - a fifth of the rate ceiling - so the two axes
+/// now have headroom on both.
+pub const MAX_CONCURRENT_SUBREQUESTS: usize = 10;
 
 /// Quota units per method, from Google's published table.
 pub mod cost {
@@ -45,13 +83,26 @@ struct State {
     last: Instant,
 }
 
-/// A token bucket over quota units.
+/// A token bucket over quota units, plus the concurrency gate.
+///
+/// Shared through `GmailRuntime`, so every client for every account debits the
+/// same budget and queues behind the same gate.
 #[derive(Debug)]
 pub struct Bucket {
     state: Mutex<State>,
     capacity: f64,
     per_second: f64,
+    /// Axis 2. A `Semaphore` rather than a counter because the only useful
+    /// answer to "the budget is spent" is *wait*, and waiting has to be async.
+    in_flight: tokio::sync::Semaphore,
 }
+
+/// Proof that the holder owns one of Gmail's per-user concurrency slots.
+///
+/// Held for exactly as long as a request is on the wire and dropped before any
+/// backoff sleep, so a retrying caller does not sit on the slot while idle.
+#[derive(Debug)]
+pub struct Slot<'a>(#[allow(dead_code)] tokio::sync::SemaphorePermit<'a>);
 
 impl Bucket {
     /// Gmail's real limit.
@@ -71,6 +122,7 @@ impl Bucket {
             }),
             capacity: per_second,
             per_second,
+            in_flight: tokio::sync::Semaphore::new(MAX_CONCURRENT_REQUESTS),
         }
     }
 
@@ -106,6 +158,30 @@ impl Bucket {
             tracing::debug!(cost, wait_ms = wait.as_millis(), "gmail quota: waiting");
             tokio::time::sleep(wait).await;
         }
+    }
+
+    /// Both budgets, in the only order that is safe: take the concurrency slot
+    /// **first**, then the units.
+    ///
+    /// The other order debits units and then blocks holding the debit, which
+    /// makes the recorded rate diverge from the rate Gmail actually sees.
+    ///
+    /// # Panics
+    /// Never: the semaphore is owned by this `Bucket` and is never closed.
+    pub async fn enter(&self, cost: u32) -> Slot<'_> {
+        let permit = self
+            .in_flight
+            .acquire()
+            .await
+            .expect("the gmail concurrency semaphore is never closed");
+        self.acquire(cost).await;
+        Slot(permit)
+    }
+
+    /// Concurrency slots currently free. Test-only visibility into axis 2.
+    #[must_use]
+    pub fn free_slots(&self) -> usize {
+        self.in_flight.available_permits()
     }
 }
 
@@ -305,6 +381,68 @@ mod tests {
         // EDGE: an HTTP-date form, or nonsense, is absent rather than an error.
         assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
         assert_eq!(parse_retry_after(""), None);
+    }
+
+    /// The axis the unit bucket cannot express, and the one the live sync was
+    /// actually throttled on: `"Too many concurrent requests for user."`
+    ///
+    /// A rate budget with capacity to spare still says yes to two simultaneous
+    /// callers, which is exactly what Gmail says no to.
+    #[tokio::test]
+    async fn a_second_caller_waits_for_the_concurrency_slot() {
+        let bucket = std::sync::Arc::new(Bucket::new());
+        assert_eq!(bucket.free_slots(), MAX_CONCURRENT_REQUESTS);
+
+        // One cheap call: the *rate* budget is barely touched...
+        let held = bucket.enter(cost::LABELS_LIST).await;
+        assert_eq!(bucket.free_slots(), 0, "the slot is taken while in flight");
+
+        // ...and a second caller is nonetheless made to wait, because the
+        // limit it would breach is a count and not a rate.
+        let second = tokio::spawn({
+            let bucket = std::sync::Arc::clone(&bucket);
+            async move {
+                let _slot = bucket.enter(cost::LABELS_LIST).await;
+                true
+            }
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), async {})
+                .await
+                .is_ok()
+                && !second.is_finished(),
+            "a second caller must not proceed while a request is in flight"
+        );
+
+        drop(held);
+        assert!(tokio::time::timeout(Duration::from_secs(5), second)
+            .await
+            .expect("the second caller must proceed once the slot frees")
+            .unwrap());
+        assert_eq!(bucket.free_slots(), MAX_CONCURRENT_REQUESTS);
+    }
+
+    /// A batch is `n` simultaneous operations to Google, so the batch width is
+    /// a concurrency figure and has to sit inside the concurrency budget - not
+    /// merely inside the unit budget, which is what 45 was chosen against.
+    #[test]
+    fn the_batch_width_is_sized_against_concurrency_not_units() {
+        const {
+            assert!(
+                MAX_CONCURRENT_SUBREQUESTS <= 10,
+                "45 sub-requests produced `Too many concurrent requests for user` live"
+            );
+        }
+        // And it is still comfortably inside the rate ceiling, so fixing one
+        // axis did not break the other.
+        let units = f64::from(cost::MESSAGES_GET)
+            * u32::try_from(MAX_CONCURRENT_SUBREQUESTS)
+                .map(f64::from)
+                .unwrap_or(f64::MAX);
+        assert!(
+            units <= UNITS_PER_SECOND / 2.0,
+            "a batch costs {units} units of a {UNITS_PER_SECOND}/s ceiling"
+        );
     }
 
     /// Criterion L7 - concurrent callers share one schedule and none of them

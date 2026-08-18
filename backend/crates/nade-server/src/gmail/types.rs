@@ -302,6 +302,41 @@ impl ApiErrorEnvelope {
     }
 }
 
+/// Will trying this again ever help?
+///
+/// **One classifier, two call sites.** `client::send` consults it for a whole
+/// HTTP response and `sync` consults it for a `multipart/mixed` **sub**-response,
+/// and the second is the one the first live sync got wrong: Gmail answers a
+/// batch `200` and puts the per-message `429`s *inside* it, so the client's
+/// retry loop never saw them and the sync treated a rate limit as "this message
+/// does not exist". Anything not provably permanent is transient here, because
+/// the cost of an unnecessary retry is a second of latency and the cost of a
+/// wrong "permanent" is mail that is never fetched again.
+///
+/// `404`/`410` are neither: the message is gone and the caller handles that
+/// before asking.
+#[must_use]
+pub fn is_transient(status: u16, body: &[u8]) -> bool {
+    match status {
+        // No sub-response carried our `Content-ID` at all. We know nothing
+        // about this message, and "we know nothing" is never permission to
+        // forget it.
+        0 => true,
+        // The request itself is wrong. Sending it again produces the same 400.
+        400 => false,
+        // The access token died mid-batch; `client::send` refreshes it and the
+        // retry is then a different request.
+        401 => true,
+        // The ambiguous one: `rateLimitExceeded` means slow down,
+        // `insufficientPermissions` means never.
+        403 => ApiErrorEnvelope::parse(body).is_rate_limit(),
+        404 | 410 => false,
+        429 => true,
+        code if (500..600).contains(&code) => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,6 +416,52 @@ mod tests {
         // Garbage never panics and is never mistaken for a throttle.
         assert!(!ApiErrorEnvelope::parse(b"<html>502</html>").is_rate_limit());
         assert!(!ApiErrorEnvelope::parse(b"").is_rate_limit());
+    }
+
+    /// The classification the first live sync got wrong. The body here is the
+    /// **verbatim** payload Gmail returned inside a `200` batch response, 91
+    /// times, while `sync` skipped each of those messages and then advanced the
+    /// cursor past them.
+    #[test]
+    fn a_429_inside_a_batch_is_transient_and_a_400_is_not() {
+        let live = br#"{"error":{"code":429,
+             "message":"Too many concurrent requests for user.",
+             "errors":[{"message":"Too many concurrent requests for user.",
+                        "domain":"global","reason":"rateLimitExceeded"}],
+             "status":"RESOURCE_EXHAUSTED"}}"#;
+        assert!(
+            is_transient(429, live),
+            "a 429 must be retried, never skipped"
+        );
+
+        assert!(is_transient(500, b""), "a backend error is transient");
+        assert!(is_transient(503, b""));
+        assert!(
+            is_transient(0, b""),
+            "no sub-response means we know nothing"
+        );
+        assert!(is_transient(401, b""), "the token can be refreshed");
+        assert!(is_transient(
+            403,
+            br#"{"error":{"code":403,"errors":[{"reason":"userRateLimitExceeded"}]}}"#
+        ));
+
+        assert!(
+            !is_transient(400, b""),
+            "a malformed request stays malformed"
+        );
+        assert!(!is_transient(
+            403,
+            br#"{"error":{"code":403,"errors":[{"reason":"insufficientPermissions"}]}}"#
+        ));
+        assert!(
+            !is_transient(404, b""),
+            "a deleted message is Gone, not failed"
+        );
+        assert!(!is_transient(410, b""));
+        assert!(!is_transient(200, b""));
+        // Garbage bodies never panic and never become a retry loop.
+        assert!(!is_transient(403, b"<html>nope"));
     }
 
     #[test]

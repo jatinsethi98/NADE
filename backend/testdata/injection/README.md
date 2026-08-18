@@ -168,19 +168,31 @@ effect** — exactly one, keyed on the deterministic `effect_id`.
 ## Findings — attacks v1's stated defenses would **not** stop
 
 Measured against the real shipped pipeline (`--features real_parser`), not
-assumed. Each is pinned by `shipped_pipeline_known_gaps`, which is written to
-**fail when the gap is closed**, so fixing one forces retiring the entry here.
+assumed. Each open finding is pinned by `shipped_pipeline_known_gaps`, which is
+written to **fail when the gap is closed**, so fixing one forces retiring the
+entry here. A closed one moves to `shipped_pipeline_already_closes_these` and is
+asserted positively, so it cannot quietly reopen.
 
 **None of these is exploitable end-to-end in v1**, because the approval gate
 stops the effect regardless — that is what the containment tests prove. They are
 the reasons a fence/sanitiser layer must exist *before* P5 wires a model in.
 
+### Closed — findings 1-4, fixed in the sync path
+
+The first live Gmail sync forced these shut, and the corpus is what said which
+four. They are now asserted in `shipped_pipeline_already_closes_these`.
+
+| # | Was | Now |
+|---|---|---|
+| 1 | **Hidden HTML text reaches `body_text`** (High). No CSS was evaluated, so `display:none`, `font-size:0`, `visibility:hidden`, off-screen, `hidden` and `aria-hidden` text all became agent input, invisible to the human reviewing the same message. | `html.rs` runs a hidden-aware pass before the two extraction passes and leaves `[nade:withheld-hidden-text]` where the content was — dropping it silently would be worse, because then nobody knows the message had a hidden half. Reads inline `style` only; still a heuristic (see the "does not cover" list). |
+| 2 | **Bidi controls survive** (High). `U+202E` and `U+2066` reached `body_text`, so the agent read the attacker's *rendering*: `report<U+202E>fdp.exe` looks like `reportexe.pdf` to a human. | Deleted, not spaced, which is what makes the filename read as what it is. Same treatment on the plain-text path. |
+| 3 | **Unicode tag characters (`U+E0000`) survive entirely** (Critical). A complete instruction in zero visible pixels — invisible in the body, the feed card *and* the run log. | Stripped, along with C0/C1 controls. The control half was not academic: a `NUL` in a live body made `insert into messages` fail with `invalid byte sequence for encoding "UTF8": 0x00` and killed the sync job on all five attempts. |
+| 4 | **`body_text` is uncapped** (Medium). `dos-01` yielded **516,019 characters**, 50× the 10 KB fence budget, with the token budget as the only backstop — and it fails *after* paying for the tokens. | Capped at `MAX_BODY_TEXT_CHARS` (10 KiB of **characters**, never bytes) with an explicit `[nade:truncated]` marker, so a cut body is never mistaken for a short one. |
+
+### Open
+
 | # | Finding | Evidence | Severity |
 |---|---|---|---|
-| 1 | **Hidden HTML text reaches `body_text`.** `html.rs` evaluates no CSS — it removes only `script, style, head, noscript, template, svg, iframe, object`. So `display:none`, `font-size:0`, `visibility:hidden`, off-screen, `hidden` and `aria-hidden` text all become agent input, invisible to the human reviewing the same message. 7 cases, 9 payloads. | `hidden-01/02/03/04/07/08/09` | **High** |
-| 2 | **Bidi controls survive.** `U+202E` and `U+2066` reach `body_text`; only six padding invisibles are normalised. The agent reads the attacker's *rendering*, not the true byte order — `report<U+202E>fdp.exe` looks like `reportexe.pdf` to a human. | `encoding-08` | **High** |
-| 3 | **Unicode tag characters (`U+E0000`) survive entirely.** A complete instruction can be written in zero visible pixels. Worse than #2: it is invisible in the mail body, the feed card *and* the run log, so a human reviewing the incident afterwards sees nothing. | `encoding-09` | **Critical** |
-| 4 | **`body_text` is uncapped.** One case yields **516,019 characters** — 50× the 10 KB fence budget. `PLAN.md` promises a 10 KB fence but nothing in the sync path enforces it; the token budget is currently the only backstop, and it fails *after* paying for the tokens. | `dos-01` | **Medium** |
 | 5 | **A fixed fence label is forgeable.** Marker-shaped text arrives intact in `body_text`, so a fence whose delimiter is a constant is guessable the moment this repo is readable. **The fence needs a per-run nonce**, which is what the reference implements. | `fence-06` | **High** |
 | 6 | **The Subject is a separate field.** `body_text` never contains it, so a prompt builder that fences only the body leaves an attacker-controlled string outside the fence. Easy to miss precisely because it is a header. | `direct-08` | **Medium** |
 | 7 | **`alt` text is agent input by design** and cannot be dropped — image-only marketing mail has no other content. This is not a bug to fix; it is proof that *extraction can never be the defense*. | `hidden-06` | Accepted |
@@ -190,14 +202,27 @@ the reasons a fence/sanitiser layer must exist *before* P5 wires a model in.
 
 ### What the shipped pipeline already closes (pinned so it cannot regress)
 
-HTML comments, `<head>`/`<title>`/`<meta>`, and `<style>` content never reach
-`body_text`; `href`/`src` targets are dropped while link text is kept;
-`text/plain` wins over `text/html` so an HTML-only payload in a
-`multipart/alternative` never becomes agent input; content smuggled into the MIME
-preamble, the epilogue, or an unterminated part yields an empty `body_text`
-(verified, `dos-05`/`dos-06`); and base64/ROT13/hex/URL-encoded
+Findings 1-4 above, plus: HTML comments, `<head>`/`<title>`/`<meta>`, and
+`<style>` content never reach `body_text`; `href`/`src` targets are dropped
+while link text is kept; `text/plain` wins over `text/html` so an HTML-only
+payload in a `multipart/alternative` never becomes agent input; content smuggled
+into the MIME preamble, the epilogue, or an unterminated part yields an empty
+`body_text` (verified, `dos-05`/`dos-06`); and base64/ROT13/hex/URL-encoded
 payloads are *not* auto-decoded into prose. Asserted by
 `shipped_pipeline_already_closes_these`.
+
+`<title>` and `<meta>` are dropped by name as well as through `<head>`, because
+`lol_html` is a streaming rewriter with no tree construction: it matches the
+`head` selector only against an explicit, properly closed `<head>`, and real
+mail frequently has neither.
+
+A `text/plain` part that is **actually HTML** goes through the HTML extractor
+rather than being trusted — 18 of 176 messages in the live sample did this, nine
+of them carrying an entire `<!doctype html>` document, and all of it used to
+reach `body_text` verbatim down a path the two-pass design never sees. The
+detector is a list of HTML *element names*, not a shape test, which is what
+stops it eating `</system>`, `<untrusted_email>` and `[INST]` — payloads a
+reader is supposed to see.
 
 ## What this corpus does **not** cover
 
@@ -211,18 +236,22 @@ Read this before treating a green run as proof of safety.
   reference `agent_view` is a *specification* for the first of those, not a test
   of it.
 - **The `agent_view` fence is not shipped code.** `nade_server` has no fence
-  layer today. The harness cross-checks its extractor against the real one, but
-  the sanitiser, cap and nonce exist only here until P5 adopts them.
+  layer today. The harness cross-checks its extractor against the real one, and
+  the sanitiser and the cap now live in `nade_server` — but the fence itself and
+  the per-run nonce exist only here until P5 adopts them.
 - **No iOS coverage.** How the approval card *renders* decides findings 9 and 10,
   and nothing here tests SwiftUI.
 - **No Gmail-layer coverage.** SPF/DKIM/DMARC are not evaluated anywhere in NADE;
   `identity-06` documents that they are text, not evidence.
 - **No multi-message state.** `multistage-01/02` are two files, but nothing here
   runs them as a sequence against a shared note store — that needs P5's runtime.
-- **The hidden-text heuristic is a heuristic.** It reads inline `style`
-  attributes only. `<style>`-block class rules, `<font color>`, and CSS
-  specificity are not resolved, and a determined sender can hide text in ways it
-  will not catch.
+- **The hidden-text heuristic is a heuristic**, in the harness and in
+  `nade_server` alike — they are the same code path, kept honest by
+  `real_parser_agrees_with_reference`. It reads inline `style` attributes only.
+  `<style>`-block class rules, `<font color>`, and CSS specificity are not
+  resolved, and a determined sender can hide text in ways it will not catch.
+  `[nade:withheld-hidden-text]` therefore means "we found some", never "we found
+  all of it".
 - **Attachment contents are never parsed.** v1 stores metadata only, so an
   injection inside a PDF or DOCX is out of scope — and stays out of scope only as
   long as nothing learns to read attachments.

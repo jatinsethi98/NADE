@@ -1,7 +1,10 @@
 //! Sync tests. Every Gmail call goes through `wiremock`; nothing here touches
 //! Google.
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
@@ -30,8 +33,15 @@ struct Fixture {
     raw: Vec<u8>,
     /// Answer this sub-request with a 404, as if the user had just deleted it.
     gone: bool,
-    /// Answer with a 500, as if Gmail hiccuped on this one message.
+    /// Answer with a 500, as if Gmail hiccuped on this one message. Transient.
     broken: bool,
+    /// Answer with a 400. Permanent: asking again produces the same 400.
+    permanent: bool,
+    /// Answer with the **verbatim** 429 the live account returned, this many
+    /// times, then serve the message. Shared across clones so the count
+    /// survives into the mock closure.
+    throttle_first: usize,
+    throttled: Arc<AtomicUsize>,
 }
 
 impl Fixture {
@@ -49,6 +59,9 @@ impl Fixture {
             ),
             gone: false,
             broken: false,
+            permanent: false,
+            throttle_first: 0,
+            throttled: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -81,7 +94,26 @@ impl Fixture {
         self.broken = true;
         self
     }
+
+    fn permanently_broken(mut self) -> Self {
+        self.permanent = true;
+        self
+    }
+
+    /// Throttled for `times` requests, then served - a real rate limit, which
+    /// is temporary by definition.
+    fn throttled_for(mut self, times: usize) -> Self {
+        self.throttle_first = times;
+        self
+    }
 }
+
+/// Byte-for-byte what Gmail returned inside a `200` batch response 91 times
+/// during the first live sync. Copied from the `audit_log` rather than invented,
+/// because the exact `reason` is what the classifier keys on.
+const LIVE_429: &str = r#"{"error":{"code":429,"message":"Too many concurrent requests for user.",
+  "errors":[{"message":"Too many concurrent requests for user.","domain":"global",
+             "reason":"rateLimitExceeded"}],"status":"RESOURCE_EXHAUSTED"}}"#;
 
 fn rfc822(from: &str, subject: &str, body: &str) -> Vec<u8> {
     format!(
@@ -212,6 +244,21 @@ fn batch_reply(request: &Request, fixtures: &[Fixture]) -> ResponseTemplate {
                 500,
                 r#"{"error":{"code":500,"message":"Backend Error"}}"#.to_owned(),
             ),
+            Some(Fixture {
+                permanent: true, ..
+            }) => (
+                400,
+                r#"{"error":{"code":400,"message":"Invalid id value","errors":[
+                     {"domain":"global","reason":"invalidArgument"}]}}"#
+                    .to_owned(),
+            ),
+            Some(fixture)
+                if fixture.throttle_first > 0
+                    && fixture.throttled.fetch_add(1, Ordering::SeqCst)
+                        < fixture.throttle_first =>
+            {
+                (429, LIVE_429.to_owned())
+            }
             Some(fixture) => {
                 let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&fixture.raw);
                 let labels: Vec<String> = fixture
@@ -258,10 +305,15 @@ fn fast_options() -> SyncOptions {
     SyncOptions {
         query: "newer_than:30d".to_owned(),
         max_messages: 2_000,
-        batch_size: 45,
+        batch_size: crate::gmail::client::MAX_BATCH,
         // The pacer is a real 1 s in production; the tests assert that
         // separately in `the_dev_caps_are_applied` rather than sleeping here.
         batch_interval: std::time::Duration::from_millis(1),
+        max_retry_rounds: MAX_RETRY_ROUNDS,
+        // The retry *schedule* is asserted in `retry_delay_is_exponential`;
+        // the sync tests assert the outcome, and must not sleep for 30 s to
+        // do it.
+        retry_backoff: std::time::Duration::from_millis(1),
     }
 }
 
@@ -373,21 +425,22 @@ async fn the_dev_caps_are_applied() {
     assert_eq!(stored, 4, "the cap is a hard stop, not a suggestion");
 }
 
-/// Criterion N3.
+/// Criterion N3, restated against the batch width the live sync forced.
 #[tokio::test]
-async fn batches_are_45_and_paced() {
-    let fixtures: Vec<Fixture> = (0..90).map(Fixture::new).collect();
+async fn batches_are_capped_and_paced() {
+    let width = crate::gmail::client::MAX_BATCH;
+    let fixtures: Vec<Fixture> = (0..width * 2).map(Fixture::new).collect();
     let gmail = FakeGmail::start(fixtures).await;
     let (db, account) = connected().await;
 
     let report = run_sync(&db.pool, &gmail.client(), account, &fast_options())
         .await
         .unwrap();
-    assert_eq!(report.listed, 90);
-    assert_eq!(report.ingested, 90);
+    assert_eq!(report.listed, width * 2);
+    assert_eq!(report.ingested, width * 2);
     assert_eq!(
         report.batches, 2,
-        "90 messages is exactly two batches of 45"
+        "twice the batch width is exactly two batches"
     );
 
     let sizes: Vec<usize> = gmail
@@ -403,7 +456,11 @@ async fn batches_are_45_and_paced() {
                 .count()
         })
         .collect();
-    assert_eq!(sizes, vec![45, 45]);
+    assert_eq!(sizes, vec![width, width]);
+    assert!(
+        width <= crate::gmail::quota::MAX_CONCURRENT_SUBREQUESTS,
+        "a batch is `n` concurrent requests to Google; 45 produced 429s live"
+    );
 
     // Real pacing, measured once at a scale that does not slow the suite down.
     let paced = std::time::Instant::now();
@@ -525,21 +582,27 @@ async fn a_message_that_vanished_is_skipped() {
     assert_eq!(noise, 0);
 }
 
-/// A single message Gmail could not serve is counted, audited, and left for the
-/// next sync - it does not take the batch with it.
+/// A message Gmail will **never** serve is counted, audited, and left behind -
+/// it does not take the batch with it, and it does not hold the cursor either,
+/// because asking again cannot change the answer.
 #[tokio::test]
-async fn one_broken_message_does_not_stop_the_batch() {
+async fn one_permanently_broken_message_does_not_stop_the_batch() {
     let mut fixtures: Vec<Fixture> = (0..5).map(Fixture::new).collect();
-    fixtures[1] = fixtures[1].clone().broken();
+    fixtures[1] = fixtures[1].clone().permanently_broken();
 
     let gmail = FakeGmail::start(fixtures).await;
     let (db, account) = connected().await;
 
     let report = run_sync(&db.pool, &gmail.client(), account, &fast_options())
         .await
-        .unwrap();
+        .expect("a permanent failure is not a reason to fail the sync");
     assert_eq!(report.ingested, 4);
     assert_eq!(report.fetch_failures, 1);
+    assert_eq!(
+        report.unresolved, 0,
+        "a 400 is resolved: it will never work"
+    );
+    assert_eq!(report.retry_rounds, 0, "a 400 must not be retried at all");
 
     let audited: i64 = sqlx::query_scalar(
         "select count(*) from audit_log \
@@ -549,6 +612,278 @@ async fn one_broken_message_does_not_stop_the_batch() {
     .await
     .unwrap();
     assert_eq!(audited, 1);
+
+    // The cursor moves, because nothing is outstanding.
+    let stored: Option<i64> =
+        sqlx::query_scalar("select last_history_id from sync_state where account_id = $1")
+            .bind(account)
+            .fetch_optional(&db.pool)
+            .await
+            .unwrap()
+            .flatten();
+    assert_eq!(stored, Some(9_412_771));
+}
+
+/// **The defect the first live sync found, as a test.**
+///
+/// Gmail 429s a fraction of the messages. Every one of them must end up stored:
+/// a rate limit is temporary and a skipped message is forever.
+#[tokio::test]
+async fn a_throttled_sync_stores_every_message() {
+    let mut fixtures: Vec<Fixture> = (0..30).map(Fixture::new).collect();
+    // A third of the window, throttled twice each, exactly as the live account
+    // behaved: a `200` batch with `429` sub-responses inside it.
+    for index in (0..30).step_by(3) {
+        fixtures[index] = fixtures[index].clone().throttled_for(2);
+    }
+
+    let gmail = FakeGmail::start(fixtures).await;
+    let (db, account) = connected().await;
+
+    let report = run_sync(&db.pool, &gmail.client(), account, &fast_options())
+        .await
+        .expect("a transient throttle must not fail the sync");
+
+    assert_eq!(report.listed, 30);
+    assert_eq!(
+        report.ingested, 30,
+        "every throttled message must still land"
+    );
+    assert_eq!(report.unresolved, 0);
+    assert_eq!(report.fetch_failures, 0, "a 429 is not a fetch failure");
+    assert_eq!(
+        report.retried, 10,
+        "the ten throttled messages came back later"
+    );
+    assert!(report.retry_rounds >= 1, "the retry actually happened");
+
+    let stored: i64 = sqlx::query_scalar("select count(*) from messages where account_id = $1")
+        .bind(account)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 30, "no message may be missing after a throttle");
+
+    // The throttle is on the record, and it is NOT recorded as a lost message.
+    let throttled: i64 =
+        sqlx::query_scalar("select count(*) from audit_log where action = 'gmail_sync_throttled'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(throttled >= 1);
+    let lost: i64 =
+        sqlx::query_scalar("select count(*) from audit_log where action = 'message_fetch_failed'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(lost, 0);
+
+    // And the sync is allowed to say it finished.
+    let completed: i64 =
+        sqlx::query_scalar("select count(*) from audit_log where action = 'gmail_sync_completed'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(completed, 1);
+}
+
+/// **The other half of the same rule.** When the throttle does not lift, the
+/// cursor must not move and the job must fail, so the queue fetches those
+/// messages again. The live failure mode was the opposite: skip, then commit.
+#[tokio::test]
+async fn a_sync_that_cannot_resolve_everything_fails_and_leaves_the_cursor() {
+    let mut fixtures: Vec<Fixture> = (0..5).map(Fixture::new).collect();
+    // Throttled far more times than the sync will re-ask.
+    fixtures[2] = fixtures[2].clone().throttled_for(1_000);
+
+    let gmail = FakeGmail::start(fixtures).await;
+    let (db, account) = connected().await;
+
+    let error = run_sync(&db.pool, &gmail.client(), account, &fast_options())
+        .await
+        .expect_err("an unresolved message must fail the job, not complete it");
+    let incomplete = error
+        .downcast_ref::<SyncIncomplete>()
+        .expect("the failure must be distinguishable from a database outage");
+    assert_eq!(incomplete.unresolved, 1);
+    assert_eq!(incomplete.listed, 5);
+    assert_eq!(incomplete.rounds, MAX_RETRY_ROUNDS);
+
+    // THE assertion: the cursor did not move, so the next sync re-lists and
+    // re-fetches the message we could not get.
+    let cursor: Option<i64> =
+        sqlx::query_scalar("select last_history_id from sync_state where account_id = $1")
+            .bind(account)
+            .fetch_optional(&db.pool)
+            .await
+            .unwrap()
+            .flatten();
+    assert_eq!(
+        cursor, None,
+        "advancing history_id past an unfetched message deletes it from NADE forever"
+    );
+
+    // The four that did arrive are still stored - a failed sync is not a
+    // rollback, it is an incomplete one.
+    let stored: i64 = sqlx::query_scalar("select count(*) from messages where account_id = $1")
+        .bind(account)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, 4);
+
+    // ...and their thread rollups exist, because rollups happen per batch. The
+    // live sync ingested 176 messages, died before its single trailing rollup
+    // loop, and left the mail list rendering nothing.
+    let threads: i64 = sqlx::query_scalar("select count(*) from threads where account_id = $1")
+        .bind(account)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(threads, 4, "partial progress must still be readable");
+
+    // The audit trail says which of the two endings this was.
+    let (incomplete_rows, completed_rows): (i64, i64) = sqlx::query_as(
+        "select count(*) filter (where action = 'gmail_sync_incomplete'), \
+                count(*) filter (where action = 'gmail_sync_completed') from audit_log",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(incomplete_rows, 1, "a sync that gave up says so");
+    assert_eq!(completed_rows, 0, "and must never claim it completed");
+}
+
+/// A `5xx` is Gmail saying "not now", not "not ever", so it takes the same path
+/// as a `429`: retried, and if it never lifts the sync fails rather than
+/// silently dropping the message. This is the case that used to read
+/// `report.fetch_failures == 1` and complete.
+#[tokio::test]
+async fn a_backend_error_is_transient_too() {
+    let mut fixtures: Vec<Fixture> = (0..5).map(Fixture::new).collect();
+    fixtures[1] = fixtures[1].clone().broken();
+
+    let gmail = FakeGmail::start(fixtures).await;
+    let (db, account) = connected().await;
+
+    let error = run_sync(&db.pool, &gmail.client(), account, &fast_options())
+        .await
+        .expect_err("a 500 that never lifts must fail the sync");
+    assert_eq!(
+        error.downcast_ref::<SyncIncomplete>().map(|i| i.unresolved),
+        Some(1)
+    );
+
+    let cursor: Option<i64> =
+        sqlx::query_scalar("select last_history_id from sync_state where account_id = $1")
+            .bind(account)
+            .fetch_optional(&db.pool)
+            .await
+            .unwrap()
+            .flatten();
+    assert_eq!(cursor, None, "the cursor must not move over a 500");
+}
+
+/// Two workers, one account: the second finds the lock held and does nothing,
+/// rather than doubling the number of requests Gmail counts for that user.
+#[tokio::test]
+async fn a_second_sync_of_the_same_account_stands_down() {
+    let fixtures: Vec<Fixture> = (0..3).map(Fixture::new).collect();
+    let gmail = FakeGmail::start(fixtures).await;
+    let (db, account) = connected().await;
+
+    // Hold the lock from outside, exactly as a first worker would.
+    let mut held = db.pool.acquire().await.unwrap();
+    let taken: bool = sqlx::query_scalar("select pg_try_advisory_lock($1, $2)")
+        .bind(SYNC_LOCK_NAMESPACE)
+        .bind(account_lock_key(account))
+        .fetch_one(&mut *held)
+        .await
+        .unwrap();
+    assert!(taken);
+
+    let report = run_sync(&db.pool, &gmail.client(), account, &fast_options())
+        .await
+        .unwrap();
+    assert!(report.skipped_concurrent, "the second sync must stand down");
+    assert_eq!(report.listed, 0);
+    assert!(
+        gmail.server.received_requests().await.unwrap().is_empty(),
+        "the second sync must not make a single Gmail call"
+    );
+
+    // Once the first worker is done, the next sync runs normally.
+    sqlx::query("select pg_advisory_unlock($1, $2)")
+        .bind(SYNC_LOCK_NAMESPACE)
+        .bind(account_lock_key(account))
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    drop(held);
+
+    let report = run_sync(&db.pool, &gmail.client(), account, &fast_options())
+        .await
+        .unwrap();
+    assert!(!report.skipped_concurrent);
+    assert_eq!(report.ingested, 3);
+}
+
+/// Two live-probed Gmail behaviours, held here because neither is detectable at
+/// runtime and both are easy to reintroduce.
+///
+/// 1. **A malformed `q` is not an error.** An unknown operator, an empty
+///    `label:` and outright nonsense all return `200` with zero messages -
+///    indistinguishable from an empty window. So the query must be a fixed
+///    template over a validated integer and never string concatenation.
+/// 2. **`includeSpamTrash=false` gates nothing.** `in:anywhere`, `in:trash` and
+///    `in:spam` widen the scope past it regardless. Keeping Trash and Spam out
+///    is a property of the query carrying no scope operator.
+#[test]
+fn the_sync_query_is_a_fixed_template_with_no_scope_operator() {
+    for days in [1u32, 7, 30, 365] {
+        let mut config = crate::config::tests::sample();
+        config.gmail.sync_window_days = days;
+        let query = SyncOptions::from_config(&config).query;
+
+        assert_eq!(query, format!("newer_than:{days}d"));
+        for operator in ["in:", "label:", "OR", "{", "}", "-"] {
+            assert!(
+                !query.contains(operator),
+                "{operator:?} in the sync query would widen or narrow the scope silently: {query}"
+            );
+        }
+    }
+
+    // The template's only variable is an integer the config already refuses to
+    // leave at zero, so there is no input that can make the query malformed.
+    assert!(
+        crate::config::tests::sample().gmail.sync_window_days >= 1,
+        "a zero-day window would produce `newer_than:0d`, which Gmail answers \
+         with an empty page rather than an error"
+    );
+}
+
+/// The retry schedule, asserted without sleeping through it.
+#[test]
+fn retry_delay_is_exponential_and_capped() {
+    let options = SyncOptions {
+        query: String::new(),
+        max_messages: 1,
+        batch_size: 1,
+        batch_interval: std::time::Duration::ZERO,
+        max_retry_rounds: MAX_RETRY_ROUNDS,
+        retry_backoff: std::time::Duration::from_secs(2),
+    };
+    let schedule: Vec<u64> = (0..8)
+        .map(|round| options.retry_delay(round).as_secs())
+        .collect();
+    assert_eq!(schedule, vec![2, 4, 8, 16, 32, 60, 60, 60]);
+    assert!(
+        options
+            .retry_delay(MAX_RETRY_ROUNDS)
+            .le(&crate::gmail::quota::MAX_BACKOFF),
+        "no retry may outlast the job lease"
+    );
 }
 
 /// Criteria N6 + N7 - mandated edge cases 3 (crash mid-step) and 4 (duplicate

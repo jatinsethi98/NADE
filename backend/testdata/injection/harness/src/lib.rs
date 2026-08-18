@@ -265,13 +265,9 @@ fn hides_content(style: Option<&str>, hidden_attr: bool, aria_hidden: Option<&st
         .collect::<String>()
         .to_ascii_lowercase();
 
-    const STRUCTURAL: [&str; 10] = [
+    const STRUCTURAL: [&str; 6] = [
         "display:none",
         "visibility:hidden",
-        "opacity:0;",
-        "opacity:0\"",
-        "font-size:0",
-        "max-height:0",
         "mso-hide:all",
         "text-indent:-9999",
         "left:-9999",
@@ -280,17 +276,17 @@ fn hides_content(style: Option<&str>, hidden_attr: bool, aria_hidden: Option<&st
     if STRUCTURAL.iter().any(|needle| flat.contains(needle)) {
         return true;
     }
-    // `opacity:0` as the whole declaration.
-    if flat == "opacity:0" || flat.ends_with(";opacity:0") {
+    if flat == "opacity:0" || flat.contains("opacity:0;") || flat.ends_with(";opacity:0") {
         return true;
     }
     // White-on-nothing: white text with no background set on the SAME element.
     // A background here means the sender chose the contrast deliberately, which
     // is legitimate dark-mode marketing, so it is not hidden.
-    let white = ["color:#fff\"", "color:#ffffff", "color:white", "color:transparent"]
+    let white = ["color:#ffffff", "color:white", "color:transparent"]
         .iter()
         .any(|needle| flat.contains(needle))
         || flat.contains("color:#fff;")
+        || flat.contains("color:#fff\"")
         || flat.ends_with("color:#fff");
     white && !flat.contains("background")
 }
@@ -301,23 +297,104 @@ fn hides_content(style: Option<&str>, hidden_attr: bool, aria_hidden: Option<&st
 /// Two passes are used downstream for the same reason `html.rs` uses two: an
 /// element removed in one pass is genuinely gone from the string the next pass
 /// reads, whereas a text handler in the *same* pass would still receive it.
-fn strip_hidden(html: &str) -> String {
-    rewrite_str(
+fn strip_hidden(html: &str) -> (String, bool) {
+    let text_only = text_only_hidden_ordinals(html);
+    let removed = Arc::new(Mutex::new(false));
+    let seen = Arc::new(Mutex::new(0usize));
+    let flag = Arc::clone(&removed);
+    let counter = Arc::clone(&seen);
+    let out = rewrite_str(
         html,
-        Settings::new().append_element_content_handler(element!("*", |el| {
+        Settings::new().append_element_content_handler(element!("*", move |el| {
+            let index = {
+                let mut n = counter.lock().expect("counter");
+                let index = *n;
+                *n += 1;
+                index
+            };
             let style = el.get_attribute("style");
             let aria = el.get_attribute("aria-hidden");
-            if hides_content(style.as_deref(), el.has_attribute("hidden"), aria.as_deref()) {
+            if hides_content(style.as_deref(), el.has_attribute("hidden"), aria.as_deref())
+                || text_only.contains(&index)
+            {
                 el.remove();
+                *flag.lock().expect("flag") = true;
             }
             Ok(())
         })),
-    )
-    .unwrap_or_else(|_| html.to_owned())
+    );
+    match out {
+        Ok(stripped) => {
+            let any = *removed.lock().expect("flag");
+            (stripped, any)
+        }
+        Err(_) => (html.to_owned(), false),
+    }
 }
 
-/// Elements whose content is never prose. Mirrors `html.rs::DROPPED` exactly.
-const DROPPED: &str = "script, style, head, noscript, template, svg, iframe, object";
+/// Styles that shrink an element's **own** text to nothing without hiding a
+/// descendant that sets its own size. Mirrors `html.rs::shrinks_own_text`.
+fn shrinks_own_text(style: Option<&str>) -> bool {
+    let Some(style) = style else { return false };
+    let flat: String = style
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    ["font-size:0", "max-height:0"]
+        .iter()
+        .any(|needle| flat.contains(needle))
+}
+
+/// Which [`shrinks_own_text`] elements hold **only** text, by document order.
+/// Mirrors `html.rs::text_only_hidden_ordinals`; see there for why.
+fn text_only_hidden_ordinals(html: &str) -> BTreeSet<usize> {
+    type EndTagHandler =
+        Box<dyn FnOnce(&mut lol_html::html_content::EndTag<'_>)
+            -> Result<(), Box<dyn std::error::Error + Send + Sync>>>;
+
+    let seen = Arc::new(Mutex::new(0usize));
+    let found = Arc::new(Mutex::new(BTreeSet::new()));
+    let counter = Arc::clone(&seen);
+    let sink = Arc::clone(&found);
+
+    let outcome = rewrite_str(
+        html,
+        Settings::new().append_element_content_handler(element!("*", move |el| {
+            let index = {
+                let mut n = counter.lock().expect("counter");
+                let index = *n;
+                *n += 1;
+                index
+            };
+            if !shrinks_own_text(el.get_attribute("style").as_deref()) {
+                return Ok(());
+            }
+            let opened_at = Arc::clone(&counter);
+            let sink = Arc::clone(&sink);
+            let at_close: EndTagHandler = Box::new(move |_| {
+                if *opened_at.lock().expect("counter") == index + 1 {
+                    sink.lock().expect("sink").insert(index);
+                }
+                Ok(())
+            });
+            let _ = el.on_end_tag(at_close);
+            Ok(())
+        })),
+    );
+    if outcome.is_err() {
+        return BTreeSet::new();
+    }
+    let out = found.lock().expect("sink").clone();
+    out
+}
+
+/// Elements whose content is never prose. Mirrors `html.rs::DROPPED` exactly —
+/// including `title`/`meta`/`link`/`base`, which are listed separately from
+/// `head` because a streaming rewriter only matches `head` against an explicit,
+/// closed `<head>` and real mail frequently has neither.
+const DROPPED: &str = "script, style, head, title, meta, link, base, \
+                       noscript, template, svg, iframe, object";
 
 /// Elements that end a line of text. Mirrors `html.rs::BLOCKS` exactly.
 const BLOCKS: &str = "p, div, br, tr, li, h1, h2, h3, h4, h5, h6, table, thead, tbody, \
@@ -333,6 +410,28 @@ pub fn html_to_text(html: &str) -> String {
     if html.trim().is_empty() {
         return String::new();
     }
+    let sanitised = html.replace(BLOCK_MARK, " ");
+    let (visible_html, any_hidden) = strip_hidden(&sanitised);
+    let visible = extract(&visible_html);
+    if !any_hidden {
+        return visible;
+    }
+    // Whether *text* went decides whether the reader is told: almost every
+    // marketing template carries an empty hidden preheader, and a marker on
+    // every message would mean nothing.
+    let full = extract(&sanitised);
+    if full == visible {
+        return visible;
+    }
+    if visible.is_empty() {
+        return WITHHELD_MARKER.to_owned();
+    }
+    format!("{visible}\n{WITHHELD_MARKER}")
+}
+
+/// The two passes and the whitespace policy, over one HTML string. Hidden
+/// content is *not* removed here — [`html_to_text`] does that first.
+fn extract(html: &str) -> String {
     let sanitised = html.replace(BLOCK_MARK, " ");
 
     let marked = rewrite_str(
@@ -350,8 +449,12 @@ pub fn html_to_text(html: &str) -> String {
                 // `alt` is KEPT on purpose: image-only marketing mail has no
                 // other content. That makes alt an injection channel by design
                 // (`hidden-06-alt-attribute`), which the fence must absorb.
-                let alt = el.get_attribute("alt").unwrap_or_default().trim().to_owned();
-                if alt.is_empty() {
+                //
+                // Decoded first, because `ContentType::Text` escapes what it
+                // inserts: an `alt="Apple&nbsp;Card"` would otherwise be escaped
+                // once and decoded once and arrive as literal `&nbsp;`.
+                let alt = decode_entities(el.get_attribute("alt").unwrap_or_default().trim());
+                if alt.trim().is_empty() {
                     el.remove();
                 } else {
                     el.replace(&format!(" {alt} "), ContentType::Text);
@@ -383,19 +486,9 @@ pub fn html_to_text(html: &str) -> String {
 }
 
 fn normalise_blocks(text: &str) -> String {
-    let mut flattened = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            BLOCK_MARK => flattened.push('\n'),
-            '\r' => {
-                if !flattened.ends_with('\n') {
-                    flattened.push('\n');
-                }
-            }
-            c if PADDING_INVISIBLES.contains(&c) => flattened.push(' '),
-            c => flattened.push(c),
-        }
-    }
+    // The block sentinel is itself a C0 control, so it becomes a newline
+    // *before* `neutralise` deletes the rest of them.
+    let flattened = neutralise(&text.replace(BLOCK_MARK, "\n"));
     let mut lines: Vec<String> = Vec::new();
     for line in flattened.split('\n') {
         let collapsed = line.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -438,7 +531,18 @@ fn decode_entities(text: &str) -> String {
             i += ch.len_utf8();
             continue;
         }
-        let limit = (i + 32).min(text.len());
+        // EDGE (unicode): `i + 32` is a *byte* offset and lands wherever it
+        // lands — frequently inside a multi-byte character, because entities
+        // and curly quotes keep close company in real mail. Slicing there
+        // panics. `i` is always a boundary; the limit has to be walked back to
+        // one. The shipped `html.rs` was fixed for this after a live sync
+        // crashed on it; this copy still had it, because every entity case in
+        // the corpus is pure ASCII and the bug needs a multi-byte character at
+        // a *specific* byte distance from an `&`.
+        let mut limit = (i + 32).min(text.len());
+        while limit > i && !text.is_char_boundary(limit) {
+            limit -= 1;
+        }
         let found = text[i..limit].find(';').filter(|off| *off > 1);
         if let Some(off) = found {
             let body = &text[i + 1..i + off];
@@ -578,8 +682,12 @@ pub fn agent_view(raw: &[u8], fence: &Fence) -> AgentView {
     let (visible_body, withheld) = match (plain, genuine_html.as_deref()) {
         (Some(text), _) if !text.trim().is_empty() => (text, String::new()),
         (_, Some(html)) => {
-            let full = html_to_text(html);
-            let visible = html_to_text(&strip_hidden(html));
+            // `html_to_text` mirrors the shipped extractor and already withholds
+            // hidden text; `extract` is the same pipeline with that step off, so
+            // the difference is a checkable claim about what was removed rather
+            // than a restatement of the marker.
+            let full = extract(html);
+            let visible = html_to_text(html);
             let withheld = difference(&full, &visible);
             (visible, withheld)
         }
@@ -594,9 +702,10 @@ pub fn agent_view(raw: &[u8], fence: &Fence) -> AgentView {
         .to_owned();
 
     let mut body = neutralise(&visible_body).trim().to_owned();
-    if !withheld.trim().is_empty() {
+    if !withheld.trim().is_empty() && !body.contains(WITHHELD_MARKER) {
         // Tell the model something was removed, rather than silently showing it
-        // less than the message contained.
+        // less than the message contained. The extractor usually says so first
+        // now; this covers the plain-text path, which has no extractor.
         body.push('\n');
         body.push_str(WITHHELD_MARKER);
     }

@@ -14,15 +14,24 @@ use super::{
     oauth::{AccessTokens, TokenError},
     quota::{self, Bucket},
     types::{
-        ApiErrorEnvelope, Attachment, GmailMessage, HistoryList, Label, LabelsList, MessageRef,
-        MessagesList, Profile,
+        Attachment, GmailMessage, HistoryList, Label, LabelsList, MessageRef, MessagesList, Profile,
     },
 };
 
-/// Gmail caps a batch at 100 sub-requests; PLAN.md §Gmail sync pins ours at 45,
-/// which is 225 quota units - comfortably inside the 250/s ceiling with room for
-/// the odd retry.
-pub const MAX_BATCH: usize = 45;
+/// The widest batch this client will send.
+///
+/// **Recorded deviation from PLAN.md §Gmail sync, forced by the first live
+/// sync.** PLAN.md pinned 45 because 45 x 5 = 225 quota units sits inside the
+/// 250 units/second ceiling. That arithmetic is correct and it is about the
+/// wrong limit: Google expands a `multipart/mixed` batch and runs the
+/// sub-requests **concurrently**, so a 45-wide batch is 45 simultaneous
+/// requests for one user, and Gmail answered 91 of them with
+/// `429 rateLimitExceeded: "Too many concurrent requests for user."` while the
+/// unit budget still read 225 of 250.
+///
+/// [`quota::MAX_CONCURRENT_SUBREQUESTS`] carries the reasoning; the cap lives
+/// here because this is the only place that can enforce it.
+pub const MAX_BATCH: usize = quota::MAX_CONCURRENT_SUBREQUESTS;
 
 /// `messages.list` page size. Gmail's maximum is 500.
 const LIST_PAGE: usize = 500;
@@ -340,6 +349,9 @@ impl GmailClient {
                         gmail_id: id.clone(),
                         status: 0,
                         detail: "no sub-response carried this Content-ID".to_owned(),
+                        // We know nothing about this message, and "we know
+                        // nothing" is never permission to forget it.
+                        transient: true,
                     },
                 }
             })
@@ -371,7 +383,11 @@ impl GmailClient {
         let mut auth_retries = 0u32;
 
         loop {
-            self.quota.acquire(cost).await;
+            // Both quota axes, released the moment the response is in hand:
+            // holding a concurrency slot through a 60 s backoff would starve
+            // every other caller for no benefit. `slot` is dropped explicitly
+            // below, before any sleep.
+            let slot = self.quota.enter(cost).await;
             let token = self.tokens.access_token().await?;
 
             let mut request = self
@@ -410,6 +426,9 @@ impl GmailClient {
                         .await
                         .map_err(|error| GmailError::Upstream(error.to_string()))?
                         .to_vec();
+                    // Off the wire: give the concurrency slot back before we
+                    // decide anything, and certainly before we sleep on it.
+                    drop(slot);
 
                     if status.is_success() {
                         return Ok((content_type, payload));
@@ -443,6 +462,7 @@ impl GmailClient {
                     // EDGE (timeout): a transport failure is retryable on the
                     // same schedule as a 429. This arm always diverges, so
                     // `status`/`content_type`/`payload` are never read unset.
+                    drop(slot);
                     if attempt + 1 >= self.max_attempts {
                         return Err(GmailError::Upstream(error.to_string()));
                     }
@@ -462,13 +482,11 @@ impl GmailClient {
         }
     }
 
+    /// Delegates to [`types::is_transient`], which is also what the sync loop
+    /// consults for a batch sub-response. One classifier, so the two can never
+    /// disagree about what a `429` means.
     fn is_retryable(&self, status: reqwest::StatusCode, body: &[u8]) -> bool {
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-            return true;
-        }
-        // 403 is the ambiguous one: `rateLimitExceeded` means slow down,
-        // `insufficientPermissions` means never.
-        status == reqwest::StatusCode::FORBIDDEN && ApiErrorEnvelope::parse(body).is_rate_limit()
+        super::types::is_transient(status.as_u16(), body)
     }
 
     async fn wait(&self, attempt: u32, retry_after: Option<std::time::Duration>) {
@@ -500,7 +518,18 @@ pub enum BatchOutcome {
     Failed {
         gmail_id: String,
         status: u16,
+        /// The sub-response body, truncated for the audit log.
         detail: String,
+        /// Whether asking again could ever help, decided **here** rather than by
+        /// the caller.
+        ///
+        /// The caller only has `detail`, which is cut to 300 characters for the
+        /// audit row - and a `403` is classified by reading Google's error
+        /// envelope out of the body. A truncated envelope does not parse, so a
+        /// throttling `403` with a long body would be read as a permanent
+        /// denial and the message dropped. Classifying where the whole body is
+        /// still in hand is the only place that cannot happen.
+        transient: bool,
     },
 }
 
@@ -529,6 +558,7 @@ fn outcome(gmail_id: &str, response: &BatchResponse) -> BatchOutcome {
                 .chars()
                 .take(300)
                 .collect(),
+            transient: super::types::is_transient(response.status, &response.body),
         };
     }
     match serde_json::from_slice::<GmailMessage>(&response.body) {
@@ -544,6 +574,9 @@ fn outcome(gmail_id: &str, response: &BatchResponse) -> BatchOutcome {
                     gmail_id: gmail_id.to_owned(),
                     status: response.status,
                     detail: "the sub-response carried no decodable `raw`".to_owned(),
+                    // A `200` with an unusable body is Gmail misbehaving, not
+                    // the message being unfetchable.
+                    transient: true,
                 },
             }
         }
@@ -551,6 +584,7 @@ fn outcome(gmail_id: &str, response: &BatchResponse) -> BatchOutcome {
             gmail_id: gmail_id.to_owned(),
             status: response.status,
             detail: format!("unreadable JSON: {error}"),
+            transient: true,
         },
     }
 }
@@ -1036,9 +1070,9 @@ mod tests {
     /// Criterion M1 + M5, end to end over HTTP: a real multipart batch where one
     /// sub-request 404s.
     #[tokio::test]
-    async fn a_real_batch_returns_the_other_44_when_one_is_gone() {
+    async fn a_real_batch_returns_the_others_when_one_is_gone() {
         let server = MockServer::start().await;
-        let ids: Vec<String> = (0..45).map(|index| format!("msg{index}")).collect();
+        let ids: Vec<String> = (0..MAX_BATCH).map(|index| format!("msg{index}")).collect();
 
         Mock::given(method("POST"))
             .and(path("/batch/gmail/v1"))
@@ -1054,12 +1088,12 @@ mod tests {
                         .starts_with("multipart/mixed; boundary="),
                     "the batch must be a real multipart request"
                 );
-                assert_eq!(body.matches("Content-ID: <item-").count(), 45);
+                assert_eq!(body.matches("Content-ID: <item-").count(), MAX_BATCH);
 
                 // Answer in reverse order, with item-7 gone, to prove the
                 // correlation is by Content-ID rather than by position.
                 let mut out = String::new();
-                for index in (0..45).rev() {
+                for index in (0..MAX_BATCH).rev() {
                     let (status, payload) = if index == 7 {
                         (404, r#"{"error":{"code":404,"message":"Not Found"}}"#.to_owned())
                     } else {
@@ -1086,13 +1120,17 @@ mod tests {
             .await;
 
         let outcomes = client_for(&server).batch_get_raw(&ids).await.unwrap();
-        assert_eq!(outcomes.len(), 45);
+        assert_eq!(outcomes.len(), MAX_BATCH);
 
         let fetched: Vec<&BatchOutcome> = outcomes
             .iter()
             .filter(|outcome| matches!(outcome, BatchOutcome::Fetched { .. }))
             .collect();
-        assert_eq!(fetched.len(), 44, "one 404 must not cost us the other 44");
+        assert_eq!(
+            fetched.len(),
+            MAX_BATCH - 1,
+            "one 404 must not cost us the rest of the batch"
+        );
         assert!(matches!(&outcomes[7], BatchOutcome::Gone { gmail_id } if gmail_id == "msg7"));
 
         // Every fetched outcome carries *its own* message, not its neighbour's.
@@ -1109,6 +1147,69 @@ mod tests {
     }
 
     /// Criterion M7, at the client level.
+    /// Retryability is decided from the **whole** sub-response body, not from
+    /// the 300-character `detail` the audit log gets.
+    ///
+    /// A `403` is the only status classified by reading Google's error
+    /// envelope, and Google pads that envelope with a `details` array that runs
+    /// well past 300 characters. Classify from `detail` and the JSON is cut
+    /// mid-object, the envelope fails to parse, a throttle reads as a permanent
+    /// denial, and the message is dropped - the same ending as the live bug, by
+    /// a different route.
+    #[tokio::test]
+    async fn a_throttling_403_is_classified_from_the_whole_body_not_the_audit_excerpt() {
+        let server = MockServer::start().await;
+        let padding = "x".repeat(600);
+        let long_403 = format!(
+            r#"{{"error":{{"code":403,"message":"Rate Limit Exceeded","errors":[
+                 {{"domain":"usageLimits","reason":"rateLimitExceeded",
+                   "message":"Rate Limit Exceeded","extendedHelp":"{padding}"}}],
+                 "status":"PERMISSION_DENIED"}}}}"#
+        );
+        assert!(
+            long_403.chars().count() > 300,
+            "the body must exceed the audit excerpt or this test proves nothing"
+        );
+
+        let body = format!(
+            "--bnd\r\nContent-Type: application/http\r\nContent-ID: <response-item-0>\r\n\r\n\
+             HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n\r\n{long_403}\r\n\
+             --bnd--\r\n"
+        );
+        Mock::given(method("POST"))
+            .and(path("/batch/gmail/v1"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(body.into_bytes(), "multipart/mixed; boundary=bnd"),
+            )
+            .mount(&server)
+            .await;
+
+        let outcomes = client_for(&server)
+            .batch_get_raw(&["m1".to_owned()])
+            .await
+            .unwrap();
+        let BatchOutcome::Failed {
+            transient, detail, ..
+        } = &outcomes[0]
+        else {
+            panic!("expected a failed sub-response, got {:?}", outcomes[0]);
+        };
+        assert!(
+            transient,
+            "a throttling 403 must be retried; classifying it from the excerpt loses the message"
+        );
+        assert_eq!(
+            detail.chars().count(),
+            300,
+            "the audit excerpt is still capped, and still not what the decision reads"
+        );
+        assert!(
+            !crate::gmail::types::is_transient(403, detail.as_bytes()),
+            "the excerpt alone really does misclassify - which is why it is not used"
+        );
+    }
+
     #[tokio::test]
     async fn an_empty_batch_makes_no_request() {
         let server = MockServer::start().await;
@@ -1121,9 +1222,12 @@ mod tests {
     #[tokio::test]
     async fn an_oversized_batch_is_refused_locally() {
         let server = MockServer::start().await;
-        let ids: Vec<String> = (0..46).map(|i| format!("m{i}")).collect();
+        let ids: Vec<String> = (0..MAX_BATCH + 1).map(|i| format!("m{i}")).collect();
         let error = client_for(&server).batch_get_raw(&ids).await.unwrap_err();
-        assert!(error.to_string().contains("at most 45"), "{error}");
+        assert!(
+            error.to_string().contains(&format!("at most {MAX_BATCH}")),
+            "{error}"
+        );
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 
