@@ -138,85 +138,101 @@ mod tests {
         assert_eq!(present, expected);
     }
 
-    /// Criterion B2 + edge case 2 (unicode).
+    /// Criterion B2, inverted by `docs/SEARCH.md`: **nothing maintains a second
+    /// index.**
+    ///
+    /// `messages` used to carry a generated `tsvector` and a GIN index over it.
+    /// It indexed the 30-day sync window - ~500 of 63,866 messages, 0.78% - so
+    /// a search for anything older returned an empty result indistinguishable
+    /// from "no such mail exists". Gmail is the index now.
+    ///
+    /// Checked from both directions, because either alone can be defeated: the
+    /// live schema must hold no tsvector, and no source file may name one. A
+    /// column added by a future migration fails the first half; a query built
+    /// at runtime against a column that does not exist fails the second before
+    /// it can fail in production.
     #[tokio::test]
-    async fn fts_column_is_generated_and_searchable() {
+    async fn nothing_maintains_a_second_index() {
         let db = test_db().await;
-        let account: uuid::Uuid =
-            sqlx::query_scalar("insert into accounts (email) values ($1) returning id")
-                .bind("fts@example.com")
-                .fetch_one(&db.pool)
-                .await
-                .unwrap();
 
-        for (gmail_id, subject, body) in [
-            ("m1", "Rechnung für Café — 15 €", "Grüße aus München 🇩🇪"),
-            ("m2", "配送のお知らせ", "荷物は明日届きます"),
-            ("m3", "plain ascii subject", "nothing interesting here"),
-        ] {
-            sqlx::query(
-                "insert into messages (account_id, gmail_id, thread_id, subject, body_text, from_email) \
-                 values ($1, $2, $3, $4, $5, 'sender@example.com')",
-            )
-            .bind(account)
-            .bind(gmail_id)
-            .bind(format!("t-{gmail_id}"))
-            .bind(subject)
-            .bind(body)
-            .execute(&db.pool)
-            .await
-            .unwrap();
+        let columns: Vec<(String, String)> = sqlx::query_as(
+            "select table_name, column_name from information_schema.columns \
+             where table_schema = 'public' and data_type = 'tsvector'",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert!(
+            columns.is_empty(),
+            "docs/SEARCH.md: nothing maintains a second index, but {columns:?} exist"
+        );
+
+        let text_indexes: Vec<String> = sqlx::query_scalar(
+            "select indexdef from pg_indexes \
+             where schemaname = 'public' and indexdef ilike '%tsvector%'",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert!(
+            text_indexes.is_empty(),
+            "a full-text index survived the migration: {text_indexes:?}"
+        );
+
+        // And the source. Assembled at runtime so this test is not its own
+        // offender, exactly like `no_compile_time_query_macros`.
+        let banned = [
+            concat!("ts", "vector"),
+            concat!("to_ts", "vector"),
+            concat!("websearch_to_ts", "query"),
+            concat!("plainto_ts", "query"),
+            concat!("phraseto_ts", "query"),
+            concat!("ts_", "rank"),
+        ];
+        let roots = [
+            PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/src")),
+            PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations")),
+        ];
+        let mut offenders = Vec::new();
+        let mut stack: Vec<PathBuf> = roots.into_iter().collect();
+        let here = file!();
+
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                match path.extension().and_then(|e| e.to_str()) {
+                    Some("rs" | "sql") => {}
+                    _ => continue,
+                }
+                if path.ends_with(here) {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                for (number, line) in text.lines().enumerate() {
+                    // A comment cannot build an index. Explaining *why* the
+                    // column is gone - which is the most useful thing either
+                    // file can say to whoever reads it next - must not trip the
+                    // check that keeps it gone.
+                    let trimmed = line.trim_start();
+                    if trimmed.starts_with("//") || trimmed.starts_with("--") {
+                        continue;
+                    }
+                    if banned.iter().any(|needle| line.contains(needle)) {
+                        offenders.push(format!("{}:{}: {trimmed}", path.display(), number + 1));
+                    }
+                }
+            }
         }
 
-        // The column exists, is generated, and is stored.
-        let (generated, kind): (String, String) = sqlx::query_as(
-            "select is_generated, data_type from information_schema.columns \
-             where table_name = 'messages' and column_name = 'fts'",
-        )
-        .fetch_one(&db.pool)
-        .await
-        .unwrap();
-        assert_eq!(generated, "ALWAYS");
-        assert_eq!(kind, "tsvector");
-
-        let hits: Vec<String> = sqlx::query_scalar(
-            "select gmail_id from messages \
-             where fts @@ websearch_to_tsquery('simple', $1) order by gmail_id",
-        )
-        .bind("München")
-        .fetch_all(&db.pool)
-        .await
-        .unwrap();
-        assert_eq!(hits, vec!["m1".to_owned()]);
-
-        // The `simple` configuration tokenises on whitespace and has no CJK
-        // word segmenter, so a Japanese run is one token and must be searched
-        // whole. Recorded in backend/DECISIONS.md D6; P2's search UX inherits
-        // it.
-        let hits: Vec<String> = sqlx::query_scalar(
-            "select gmail_id from messages \
-             where fts @@ websearch_to_tsquery('simple', $1) order by gmail_id",
-        )
-        .bind("配送のお知らせ")
-        .fetch_all(&db.pool)
-        .await
-        .unwrap();
-        assert_eq!(hits, vec!["m2".to_owned()]);
-
-        // EDGE (empty input): a message with no subject and no body still gets
-        // a (empty) tsvector rather than null.
-        sqlx::query(
-            "insert into messages (account_id, gmail_id, thread_id) values ($1, 'empty', 'te')",
-        )
-        .bind(account)
-        .execute(&db.pool)
-        .await
-        .unwrap();
-        let nulls: i64 = sqlx::query_scalar("select count(*) from messages where fts is null")
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-        assert_eq!(nulls, 0);
+        assert!(
+            offenders.is_empty(),
+            "docs/SEARCH.md: Gmail is the index and nothing here builds a second one:\n{}",
+            offenders.join("\n")
+        );
     }
 
     /// Criterion B3.
@@ -240,7 +256,9 @@ mod tests {
 
         assert!(find("messages_account_ts_idx").contains("internal_ts DESC"));
         assert!(find("messages_account_thread_idx").contains("thread_id"));
-        assert!(find("messages_fts_idx").contains("USING gin"));
+        // `messages_fts_idx` is deliberately absent - see
+        // `nothing_maintains_a_second_index`. `label_ids` keeps its GIN index:
+        // that is a plain SQL predicate over the cache, not a text index.
         assert!(find("messages_label_ids_idx").contains("USING gin"));
         assert!(find("agent_runs_status_wake_idx").contains("wake_at"));
         assert!(find("feed_items_account_status_created_idx").contains("created_at DESC"));

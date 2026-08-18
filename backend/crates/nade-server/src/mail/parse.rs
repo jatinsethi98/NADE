@@ -83,6 +83,25 @@ pub const MAX_BODY_TEXT_CHARS: usize = 10 * 1024;
 /// distinguishable from a short one by anything that reads it.
 pub const TRUNCATION_MARKER: &str = "[nade:truncated]";
 
+/// Longest `body_html` we keep, in **bytes**.
+///
+/// `body_text` has had a cap since the red-team corpus produced 516,019
+/// characters from one message; its sibling had none. It went into an unbounded
+/// `text` column and straight out to a `WKWebView`, so a hostile 500 KB body
+/// sailed through the whole pipeline untouched. 256 KB is roughly twice the
+/// largest genuine marketing mail in this account's live sample and an order of
+/// magnitude under the payloads that make the phone stutter.
+///
+/// **Bytes here, characters for `body_text`**, and deliberately: what hurts is
+/// the row size and the bytes crossing the wire to the web view, not a glyph
+/// count. The cut is still made on a character boundary - this crate has
+/// already had one panic from a byte offset landing mid-character.
+pub const MAX_BODY_HTML_BYTES: usize = 256 * 1024;
+
+/// Appended when [`MAX_BODY_HTML_BYTES`] bites. An HTML **comment**, so it does
+/// not render in the web view, and still greppable in the database.
+pub const HTML_TRUNCATION_MARKER: &str = "<!--nade:truncated-->";
+
 /// Parse one message.
 ///
 /// `gmail_id` only ever appears inside generated attachment ids and the rewritten
@@ -110,7 +129,10 @@ pub fn parse(raw: &[u8], gmail_id: &str) -> Result<ParsedMessage, ParseError> {
                     .map(|cid| (html::normalise_content_id(cid), a.att_id.clone()))
             })
             .collect();
-        html::rewrite_cid_urls(&html, gmail_id, &by_content_id)
+        // Capped *after* the rewrite, not before: rewriting a `cid:` URL into
+        // `/v1/messages/{id}/attachments/{att}` makes the document longer, so
+        // capping first would let it back over the limit.
+        cap_body_html(html::rewrite_cid_urls(&html, gmail_id, &by_content_id))
     });
 
     let body_text = cap_body_text(body_text(&message, body_html.as_deref()));
@@ -407,7 +429,7 @@ pub fn contains_markup(text: &str) -> bool {
 /// A genuine `text/plain` part wins. Otherwise we run our own extractor over the
 /// HTML - the mirror of TRAP 1, `body_text(0)`, synthesises text from HTML too,
 /// but its output fuses words across block boundaries (`Claude.aiClick`), which
-/// poisons both the tsvector and every agent's token budget.
+/// is unreadable in the thread view and poisons every agent's token budget.
 ///
 /// A `text/plain` part that is actually markup wins nothing: it goes through
 /// the HTML extractor, or gives way to the real `text/html` part when there is
@@ -489,8 +511,12 @@ fn normalise_plain(text: &str) -> String {
             // link text (`docs/PARSER.md`). A machine-generated plain-text
             // alternative *is* the HTML with its hrefs inlined: one live
             // marketing message carried thirteen ~200-character tracking URLs
-            // on their own lines, all of them tokens in the tsvector and tokens
-            // in every prompt. `body_html` still holds the real links.
+            // on their own lines, 2.6 KB of noise in the thread view and in
+            // every prompt. `body_html` still holds the real links.
+            //
+            // `docs/SEARCH.md` is why this stayed simple: nothing extracted
+            // here is an index input any more, so whether a URL survives is a
+            // display and prompt-size question and nothing else.
             continue;
         }
         lines.push(line.trim_end().to_owned());
@@ -533,6 +559,31 @@ fn cap_body_text(text: String) -> String {
     }
     let mut out: String = text.chars().take(MAX_BODY_TEXT_CHARS).collect();
     out.push_str(TRUNCATION_MARKER);
+    out
+}
+
+/// Cut `body_html` to [`MAX_BODY_HTML_BYTES`], on a character boundary.
+///
+/// `String::is_char_boundary` walking backwards rather than a `chars()` count:
+/// the limit is a byte budget, and a 256 KB document of mostly-ASCII markup
+/// would otherwise be walked codepoint by codepoint on every single message to
+/// answer a question about bytes. At most three steps back, because UTF-8
+/// sequences are at most four bytes long.
+fn cap_body_html(html: String) -> String {
+    if html.len() <= MAX_BODY_HTML_BYTES {
+        return html;
+    }
+    let mut end = MAX_BODY_HTML_BYTES;
+    while end > 0 && !html.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = html;
+    out.truncate(end);
+    // The markup is now unbalanced - an open `<div>` with no close, possibly a
+    // half-written tag. Every renderer this reaches recovers from that, and the
+    // alternative (parsing back to a safe cut point) buys a tidier document for
+    // a message that is already pathological.
+    out.push_str(HTML_TRUNCATION_MARKER);
     out
 }
 
@@ -1123,6 +1174,98 @@ mod tests {
         assert_eq!(parsed.body_text, "Real HTML.");
     }
 
+    /// `body_text` has had a cap since the red-team corpus produced 516,019
+    /// characters from one message. Its sibling had **none**: `body_html` went
+    /// into an unbounded `text` column and straight out to a `WKWebView`, so a
+    /// hostile 500 KB body sailed through untouched.
+    #[test]
+    fn body_html_is_capped_in_bytes() {
+        let padding = "<span>x</span>".repeat(MAX_BODY_HTML_BYTES / 4);
+        let raw =
+            format!("From: a@b.com\r\nContent-Type: text/html\r\n\r\n<div>{padding}</div>\r\n");
+        assert!(
+            raw.len() > 2 * MAX_BODY_HTML_BYTES,
+            "the fixture must exceed the cap or this test proves nothing"
+        );
+
+        let html = parse(raw.as_bytes(), "g").unwrap().body_html.unwrap();
+        assert!(
+            html.len() <= MAX_BODY_HTML_BYTES + HTML_TRUNCATION_MARKER.len(),
+            "body_html is {} bytes, over the {MAX_BODY_HTML_BYTES} cap",
+            html.len()
+        );
+        assert!(
+            html.ends_with(HTML_TRUNCATION_MARKER),
+            "a truncated body must be distinguishable from a short one"
+        );
+        // The marker is a comment, so it does not render in the web view.
+        assert!(HTML_TRUNCATION_MARKER.starts_with("<!--"));
+
+        // A body inside the cap is untouched, marker and all.
+        let small = b"From: a@b.com\r\nContent-Type: text/html\r\n\r\n<p>Small.</p>\r\n";
+        let html = parse(small, "g").unwrap().body_html.unwrap();
+        assert!(!html.contains(HTML_TRUNCATION_MARKER), "{html}");
+    }
+
+    /// The cut is made on a **character** boundary. This crate has already had
+    /// one panic from a byte offset landing mid-character, and a 3-byte glyph
+    /// straddling a 262,144-byte limit is exactly that offset.
+    #[test]
+    fn the_html_cap_never_slices_a_codepoint_in_half() {
+        // '配' is three bytes, so repeating it guarantees the naive cut lands
+        // inside one - and the emoji is four, for the astral case.
+        for filler in ["配", "🚀", "é"] {
+            let repeats = MAX_BODY_HTML_BYTES; // far more than enough bytes
+            let raw = format!(
+                "From: a@b.com\r\nContent-Type: text/html; charset=\"utf-8\"\r\n\r\n\
+                 <div>{}</div>\r\n",
+                filler.repeat(repeats)
+            );
+            let html = parse(raw.as_bytes(), "g").unwrap().body_html.unwrap();
+
+            // Valid UTF-8 by construction - a `String` cannot hold anything
+            // else - so the real assertion is that we got here without a panic
+            // and that the cut respected the budget.
+            assert!(html.ends_with(HTML_TRUNCATION_MARKER), "{filler}");
+            assert!(
+                html.len() <= MAX_BODY_HTML_BYTES + HTML_TRUNCATION_MARKER.len(),
+                "{filler}: {} bytes",
+                html.len()
+            );
+            // At most three bytes of slack: a UTF-8 sequence is four bytes at
+            // the outside, so backing up to a boundary can never cost more.
+            let body = html.trim_end_matches(HTML_TRUNCATION_MARKER);
+            assert!(
+                MAX_BODY_HTML_BYTES - body.len() < 4,
+                "{filler}: backed up {} bytes to find a boundary",
+                MAX_BODY_HTML_BYTES - body.len()
+            );
+        }
+    }
+
+    /// Capped **after** the `cid:` rewrite, because the rewrite makes the
+    /// document longer - capping first would let it back over the limit.
+    #[test]
+    fn the_html_cap_is_applied_after_the_cid_rewrite() {
+        let source = std::fs::read_to_string(file!()).unwrap_or_else(|_| {
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/mail/parse.rs"))
+                .unwrap()
+        });
+        let call = source
+            .split("let body_html = body_html_raw.map(")
+            .nth(1)
+            .expect("the body_html construction")
+            .split("});")
+            .next()
+            .unwrap();
+        let rewrite = call.find("rewrite_cid_urls").expect("the rewrite");
+        let cap = call.find("cap_body_html").expect("the cap");
+        assert!(
+            cap < rewrite,
+            "cap_body_html must wrap rewrite_cid_urls, not precede it:\n{call}"
+        );
+    }
+
     /// Criterion J9 + edge case 1.
     #[test]
     fn body_text_is_never_null_and_empty_is_legal() {
@@ -1265,8 +1408,8 @@ mod tests {
     /// `docs/PARSER.md`: link targets are dropped, link text is kept. A
     /// machine-generated plain-text alternative *is* the HTML with its `href`s
     /// inlined - one live marketing message carried thirteen ~200-character
-    /// tracking URLs on their own lines, all of them tsvector tokens and prompt
-    /// tokens. A URL a human wrote into a sentence stays.
+    /// tracking URLs on their own lines, 2.6 KB of noise in the thread view and
+    /// in every prompt. A URL a human wrote into a sentence stays.
     #[test]
     fn a_bare_url_line_is_a_link_target_and_goes() {
         let raw = b"From: a@b.com\r\nContent-Type: text/plain\r\n\r\n\

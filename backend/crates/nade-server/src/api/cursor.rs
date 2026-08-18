@@ -21,6 +21,16 @@ struct Payload {
     id: String,
 }
 
+/// `GET /search` pages through **Gmail's** `pageToken`, not through a keyset of
+/// ours: the rows come back in Gmail's relevance order, so there is no `(ts,
+/// id)` to walk (`docs/SEARCH.md`). The token is still wrapped rather than
+/// handed over raw, so the cursor stays opaque, stays one of ours, and a
+/// corrupt one is still a `400` rather than a silent restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TokenPayload {
+    pt: String,
+}
+
 /// The keyset position of the last row on a page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Keyset {
@@ -61,6 +71,35 @@ pub fn decode(raw: &str) -> ApiResult<Keyset> {
         .with_timezone(&Utc);
 
     Ok(Keyset { ts, id: payload.id })
+}
+
+/// Wrap Gmail's `pageToken` in one of our cursors.
+#[must_use]
+pub fn encode_page_token(token: &str) -> String {
+    let payload = TokenPayload {
+        pt: token.to_owned(),
+    };
+    let json = serde_json::to_vec(&payload).unwrap_or_default();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+}
+
+/// Unwrap a search cursor back into Gmail's `pageToken`.
+///
+/// # Errors
+/// [`ApiError::bad_request`] for anything that is not one of ours - including a
+/// *keyset* cursor, which is a different kind of position and would page the
+/// wrong list.
+pub fn decode_page_token(raw: &str) -> ApiResult<String> {
+    let refuse = || ApiError::bad_request("That page marker is not valid. Search again.");
+
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(raw.trim())
+        .map_err(|_| refuse())?;
+    let payload: TokenPayload = serde_json::from_slice(&bytes).map_err(|_| refuse())?;
+    if payload.pt.is_empty() {
+        return Err(refuse());
+    }
+    Ok(payload.pt)
 }
 
 /// `limit`, clamped to the contract: default 50, maximum 100.
@@ -138,6 +177,57 @@ mod tests {
                 "{bad:?} should be a bad_request"
             );
         }
+    }
+
+    /// The search cursor: Gmail's `pageToken`, wrapped so it stays opaque and
+    /// stays one of ours.
+    #[test]
+    fn a_page_token_round_trips_and_stays_opaque() {
+        // A real Gmail page token: long, and full of characters a query string
+        // would otherwise have to escape.
+        let token = "09876543210987654321==+/abc";
+        let cursor = encode_page_token(token);
+        assert_eq!(decode_page_token(&cursor).unwrap(), token);
+        assert!(
+            cursor
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "{cursor} must survive a query string untouched"
+        );
+        assert!(
+            !cursor.contains("0987"),
+            "the token must not be legible in the cursor: {cursor}"
+        );
+    }
+
+    /// Criterion O6, for the search cursor. The interesting entries are the
+    /// last two: a **keyset** cursor is perfectly valid and completely wrong
+    /// here, and reading it as a page token would page a different list.
+    #[test]
+    fn a_corrupt_or_mistyped_page_token_is_a_bad_request() {
+        let keyset = encode(at("2026-08-16T09:12:04Z"), "18f2a1b3c4d5e6f7");
+        for bad in [
+            "",
+            "   ",
+            "not-base64!!",
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("hello"),
+            // JSON, wrong keys.
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"offset":50}"#),
+            // Right key, empty token - would restart the search at page one.
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"pt":""}"#),
+            // A keyset cursor, which is a position in a different kind of list.
+            keyset.as_str(),
+        ] {
+            let error = decode_page_token(bad).unwrap_err();
+            assert_eq!(
+                error.code,
+                crate::error::ErrorCode::BadRequest,
+                "{bad:?} should be a bad_request"
+            );
+        }
+
+        // And the mirror: a page-token cursor is not a keyset cursor either.
+        assert!(decode(&encode_page_token("tok")).is_err());
     }
 
     /// EDGE (unicode): a Gmail id is hex, but the decoder must not corrupt

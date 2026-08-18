@@ -95,3 +95,11 @@ postgresql_embedded = { version = "0.21", default-features = false, features = [
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 wiremock = "0.6"
+
+# The search tests run against a stateful fake Gmail with a real query parser
+# rather than against stubs, because the behaviour under test *is* Gmail's query
+# language: an unknown operator answered with an empty 200, `label:` taking a
+# name and not an id, `newer_than:1w` matching nothing. A wiremock stub would
+# only echo back whatever we already believed. Dev-only, and one-directional -
+# nothing in `src/` may reach for it.
+nade-gmail-sim = { path = "../nade-gmail-sim" }

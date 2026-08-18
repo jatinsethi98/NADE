@@ -1108,16 +1108,11 @@ async fn unicode_survives_ingest() {
     assert_eq!(from_name, "Föhn Versand");
     assert!(body.contains("東京で会いましょう 🚀"), "{body}");
 
-    // And it is searchable through the generated tsvector.
-    let hits: i64 = sqlx::query_scalar(
-        "select count(*) from messages \
-          where account_id = $1 and fts @@ websearch_to_tsquery('simple', 'Bestellung')",
-    )
-    .bind(account)
-    .fetch_one(&db.pool)
-    .await
-    .unwrap();
-    assert_eq!(hits, 1);
+    // This used to end by searching the generated `fts` column. There is no
+    // such column: `docs/SEARCH.md` made Gmail the index, and what ingest owes
+    // unicode is that the *stored* row is intact - which is what the three
+    // assertions above check. Finding it is
+    // `search::tests::a_search_finds_a_message_outside_the_sync_window`.
 }
 
 /// Criterion N15 - mandated edge case 8 (clock skew).

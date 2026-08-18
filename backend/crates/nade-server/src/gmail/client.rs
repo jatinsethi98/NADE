@@ -175,16 +175,10 @@ impl GmailClient {
         let mut page_token: Option<String> = None;
 
         while out.len() < cap {
-            let want = (cap - out.len()).min(LIST_PAGE);
-            let mut path = format!(
-                "/gmail/v1/users/me/messages?maxResults={want}&q={}",
-                encode(query)
-            );
-            if let Some(token) = &page_token {
-                path.push_str(&format!("&pageToken={}", encode(token)));
-            }
-
-            let page: MessagesList = self.get_json(&path, quota::cost::MESSAGES_LIST).await?;
+            let want = cap - out.len();
+            let page = self
+                .list_message_page(query, page_token.as_deref(), want)
+                .await?;
             let empty = page.messages.is_empty();
             out.extend(page.messages);
 
@@ -199,6 +193,35 @@ impl GmailClient {
 
         out.truncate(cap);
         Ok(out)
+    }
+
+    /// **One** page of `users.messages.list`, with Gmail's own `pageToken`.
+    ///
+    /// The sync wants every id and pages internally; `GET /v1/search` wants
+    /// exactly one page, because Gmail's page boundary *is* the API's cursor
+    /// (`docs/SEARCH.md`). Sharing the request-building keeps the two from
+    /// drifting on `maxResults` clamping or parameter encoding.
+    ///
+    /// # Errors
+    /// Returns [`GmailError`] on an upstream failure. Note that a **malformed
+    /// `q` is not one**: Gmail answers it with an empty `200`, which is why
+    /// every caller validates the query first
+    /// ([`crate::search::query::validate`]).
+    pub async fn list_message_page(
+        &self,
+        query: &str,
+        page_token: Option<&str>,
+        max_results: usize,
+    ) -> Result<MessagesList, GmailError> {
+        let want = max_results.clamp(1, LIST_PAGE);
+        let mut path = format!(
+            "/gmail/v1/users/me/messages?maxResults={want}&q={}",
+            encode(query)
+        );
+        if let Some(token) = page_token {
+            path.push_str(&format!("&pageToken={}", encode(token)));
+        }
+        self.get_json(&path, quota::cost::MESSAGES_LIST).await
     }
 
     /// `users.history.list` from a stored cursor.
@@ -445,7 +468,19 @@ impl GmailClient {
                         if auth_retries > 1 {
                             return Err(GmailError::NeedsReauth);
                         }
-                        self.tokens.invalidate().await;
+                        // A failed invalidation is the **database** blinking,
+                        // never evidence that the credential is dead. Swallowing
+                        // it would re-send the same expired token, burn the one
+                        // auth retry above, and end in `needs_reauth` - telling
+                        // the user to reconnect Gmail because Postgres was
+                        // briefly away. Surface it as the retryable upstream
+                        // failure it is instead.
+                        if let Err(error) = self.tokens.invalidate().await {
+                            return Err(GmailError::Upstream(format!(
+                                "could not invalidate the cached access token, so the refresh \
+                                 would have re-sent the dead one: {error}"
+                            )));
+                        }
                         continue;
                     }
                     if !self.is_retryable(status, &payload) {
@@ -1065,6 +1100,76 @@ mod tests {
         let error = client_for(&server).get_profile().await.unwrap_err();
         assert!(matches!(error, GmailError::NeedsReauth), "{error}");
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// A transient **database** error must not be laundered into a permanent
+    /// credential failure.
+    ///
+    /// `AccessTokens::invalidate` used to return `()`. When the `gmail_tokens`
+    /// write failed, the 401 arm could not tell: it re-sent the same dead
+    /// token, the second 401 burned the one auth retry, and the caller got
+    /// `needs_reauth` - so the user was told to reconnect Gmail because
+    /// Postgres blinked for a second. It now returns `Result`, and a failure
+    /// surfaces as the retryable upstream error it is.
+    #[tokio::test]
+    async fn a_failed_invalidation_is_upstream_not_needs_reauth() {
+        /// A token source whose store is unreachable.
+        #[derive(Debug)]
+        struct DeadStore;
+
+        #[async_trait::async_trait]
+        impl crate::gmail::oauth::AccessTokens for DeadStore {
+            async fn access_token(&self) -> Result<String, crate::gmail::oauth::TokenError> {
+                Ok("ya29.expired".to_owned())
+            }
+            async fn invalidate(&self) -> Result<(), crate::gmail::oauth::TokenError> {
+                Err(crate::gmail::oauth::TokenError::Other(
+                    "pool timed out while connecting".to_owned(),
+                ))
+            }
+        }
+
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/profile"))
+            .respond_with({
+                let calls = Arc::clone(&calls);
+                move |_: &Request| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    ResponseTemplate::new(401).set_body_raw(
+                        br#"{"error":{"code":401,"message":"Invalid Credentials"}}"#.to_vec(),
+                        "application/json",
+                    )
+                }
+            })
+            .mount(&server)
+            .await;
+
+        let client = GmailClient::new(
+            crate::gmail::http_client().unwrap(),
+            Endpoints::at(&server.uri()),
+            Arc::new(Bucket::new()),
+            Arc::new(DeadStore),
+        )
+        .with_retry_budget(4, 0.001);
+
+        let error = client.get_profile().await.unwrap_err();
+        match &error {
+            GmailError::Upstream(detail) => assert!(
+                detail.contains("invalidate"),
+                "the error must name what actually failed: {detail}"
+            ),
+            other => panic!(
+                "a database failure must be a retryable upstream error, not a dead \
+                 credential: {other}"
+            ),
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the dead token must not be re-sent, because that is what burned the auth retry"
+        );
     }
 
     /// Criterion M1 + M5, end to end over HTTP: a real multipart batch where one

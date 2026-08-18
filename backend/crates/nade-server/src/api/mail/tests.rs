@@ -702,68 +702,16 @@ async fn an_empty_body_is_an_empty_string() {
 }
 
 // ------------------------------------------------------------ /search --
+//
+// `GET /search` no longer reads the database at all: `docs/SEARCH.md` made
+// Gmail the index, and the endpoint is a wrapper over `crate::search::search`.
+// Everything it does - finding mail outside the sync window, hydrating the
+// misses, keeping Gmail's ranking, refusing a query Gmail would swallow - is
+// tested in `search::tests` against a fake Gmail with a real query parser.
+// What is left here is the contract this module still owns.
 
-/// Criterion O8.
-#[tokio::test]
-async fn search_matches_the_index_and_shares_the_thread_shape() {
-    let (app, token, account) = app_with_mail().await;
-    seed_message(
-        &app,
-        account,
-        Seed {
-            subject: "Staff Product Designer at Kettle",
-            body_text: "We are hiring a staff designer to own the composer.",
-            ..Seed::new("m0", "t0", at(0))
-        },
-    )
-    .await;
-    seed_message(
-        &app,
-        account,
-        Seed {
-            subject: "配送のお知らせ",
-            body_text: "荷物は明日届きます",
-            ..Seed::new("m1", "t1", at(1))
-        },
-    )
-    .await;
-
-    let body = json(&app, "/v1/search?q=composer", &token).await;
-    assert_eq!(body["threads"].as_array().unwrap().len(), 1);
-    assert_eq!(body["threads"][0]["id"], "t0");
-    assert!(body["next_cursor"].is_null());
-    // Same row shape as the thread list.
-    assert_eq!(
-        keys(&body["threads"][0]),
-        sorted(&[
-            "id",
-            "subject",
-            "snippet",
-            "from_name",
-            "from_email",
-            "ts",
-            "unread",
-            "msg_count",
-            "agent_note"
-        ])
-    );
-
-    // Unicode round-trips through `websearch_to_tsquery('simple')`.
-    let body = json(
-        &app,
-        "/v1/search?q=%E9%85%8D%E9%80%81%E3%81%AE%E3%81%8A%E7%9F%A5%E3%82%89%E3%81%9B",
-        &token,
-    )
-    .await;
-    assert_eq!(body["threads"][0]["id"], "t1");
-
-    // No hits is an empty array, not a 404.
-    let body = json(&app, "/v1/search?q=zzzznothing", &token).await;
-    assert_eq!(body["threads"].as_array().unwrap().len(), 0);
-    assert!(body["next_cursor"].is_null());
-}
-
-/// Criterion O8 - EDGE (empty input).
+/// Criterion O8 - EDGE (empty input). The caps live in the validator now, but
+/// they are still the endpoint's promise, so they are still asserted here.
 #[tokio::test]
 async fn search_refuses_an_empty_or_oversized_query() {
     let (app, token, _) = app_with_mail().await;
@@ -784,6 +732,31 @@ async fn search_refuses_an_empty_or_oversized_query() {
     let long = "a".repeat(513);
     let response = authed_get(&app, &format!("/v1/search?q={long}"), Some(&token)).await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+/// The endpoint is a wrapper and nothing more: no second query language, no
+/// second ranking, no second cursor. If this ever grows a database read again,
+/// the 0.78% index is back.
+#[test]
+fn the_search_endpoint_delegates_rather_than_querying() {
+    let source =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/api/mail.rs")).unwrap();
+    let handler = source
+        .split("pub async fn search(")
+        .nth(1)
+        .expect("the search handler")
+        .split("\n/// ")
+        .next()
+        .unwrap();
+
+    assert!(
+        handler.contains("crate::search::search"),
+        "the handler must delegate:\n{handler}"
+    );
+    assert!(
+        !handler.contains("sqlx::"),
+        "search reads Gmail, not the cache:\n{handler}"
+    );
 }
 
 // -------------------------------------------------- attachment proxy --

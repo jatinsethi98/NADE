@@ -27,9 +27,13 @@ comment (no automated test possible at P1), `[ ]` = not done.
   accounts, gmail_tokens, messages, labels, sync_state, agents, agent_runs,
   run_journal, notes, drafts, feed_items, audit_log, devices, jobs (14).
   `db::tests::migration_creates_every_planned_table`
-- [x] B2 `messages.fts` is a stored generated tsvector and is searchable with
-  `websearch_to_tsquery('simple', …)`.
-  `db::tests::fts_column_is_generated_and_searchable`
+- [x] B2 **Superseded by `docs/SEARCH.md`.** `messages.fts` was a stored
+  generated tsvector over the 30-day sync window — 0.78% of the mailbox — so a
+  search for anything older returned an empty result indistinguishable from "no
+  such mail exists". The column, its GIN index and the 100,000-character
+  truncation are gone, and the criterion is now its inverse: **nothing
+  maintains a second index**, checked against both the live schema and the
+  source. `db::tests::nothing_maintains_a_second_index`
 - [x] B3 Required indexes exist by name and kind (btree/gin, partial where
   specified). `db::tests::required_indexes_exist`
 - [x] B4 Every `check` constraint from the plan rejects an out-of-domain value.
@@ -163,7 +167,7 @@ comment (no automated test possible at P1), `[ ]` = not done.
 | # | Edge case | Where it is handled | Verified by |
 |---|---|---|---|
 | 1 | **Empty input** — empty JSON body, empty `code`, empty `device_name`, empty queue, empty `Authorization` header | `api::auth::pair` validation; `Queue::claim` returns `None`; `require_bearer` | `malformed_json_is_a_bad_request_envelope`, `empty_or_oversized_device_name_is_rejected`, `claim_on_an_empty_queue_returns_none`, `missing_or_empty_authorization_is_unauthorized` |
-| 2 | **Unicode** — emoji/CJK device names, unicode subjects and bodies through the generated `fts` column, non-ASCII `Authorization` header | `pair` (char-count limit, NUL rejection); `messages.fts`; `HeaderValue::to_str` | `unicode_device_names_round_trip`, `fts_column_is_generated_and_searchable`, `non_ascii_authorization_header_is_unauthorized` |
+| 2 | **Unicode** — emoji/CJK device names, unicode subjects and bodies stored and searched intact, non-ASCII `Authorization` header | `pair` (char-count limit, NUL rejection); ingest + the `q` sent to Gmail; `HeaderValue::to_str` | `unicode_device_names_round_trip`, `sync::tests::unicode_survives_ingest`, `search::tests::a_search_finds_a_message_outside_the_sync_window`, `non_ascii_authorization_header_is_unauthorized` |
 | 3 | **Crash mid-step** — worker dies holding a lease | lease expiry makes the row claimable again; `Queue::release` on shutdown grace | `expired_lease_is_reclaimable`, `graceful_shutdown_lets_an_inflight_job_finish` |
 | 4 | **Duplicate delivery / replay** — same pairing code twice, same job claimed twice, replayed dedupe key | code consumed by an atomic `unlink`; `for update skip locked` + lease stamp; `agent_runs.dedupe_key` unique | `a_consumed_code_is_rejected`, `claim_is_exclusive_under_concurrency`, `agent_runs_dedupe_key_is_unique_and_nullable` |
 | 5 | **Expiry** — pairing code TTL, job lease TTL | `PairingStore::verify` TTL check; claim predicate `lease_expires_at < now()` | `an_expired_code_is_rejected`, `expired_lease_is_reclaimable` |
@@ -371,8 +375,10 @@ not done. **Nothing is `[ ]`.**
   account is connected. `sync::tests::gmail_sync_is_a_registered_job_kind`
 - [x] N13 Empty input: a window with no messages issues no batch request and
   still records the cursor. `sync::tests::an_empty_window_is_not_an_error`
-- [x] N14 Unicode: an RFC 2047 subject with an astral codepoint, a CJK body, and
-  the generated `fts` column. `sync::tests::unicode_survives_ingest`
+- [x] N14 Unicode: an RFC 2047 subject with an astral codepoint and a CJK body
+  survive ingest byte for byte. `sync::tests::unicode_survives_ingest` (finding
+  them again is Gmail's job now —
+  `search::tests::a_search_finds_a_message_outside_the_sync_window`)
 - [x] N15 Clock skew: `internal_ts` is Gmail's `internalDate`, with the sender's
   `Date` header only as a fallback.
   `sync::tests::internal_date_wins_over_the_date_header`
@@ -397,18 +403,32 @@ not done. **Nothing is `[ ]`.**
   neither duplicates nor skips.
   `api::mail::tests::an_empty_mailbox_is_an_empty_array_not_a_404`,
   `api::mail::tests::a_row_inserted_mid_scroll_neither_duplicates_nor_skips`
-- [x] O6 An unknown, corrupt, empty or foreign cursor is `400 bad_request`.
+- [x] O6 An unknown, corrupt, empty or foreign cursor is `400 bad_request` —
+  including a keyset cursor handed to `/search`, or a search cursor handed to
+  the thread list.
   `api::cursor::tests::an_unknown_or_corrupt_cursor_is_a_bad_request`,
-  `api::mail::tests::an_unknown_cursor_is_a_bad_request`
+  `api::cursor::tests::a_corrupt_or_mistyped_page_token_is_a_bad_request`,
+  `api::mail::tests::an_unknown_cursor_is_a_bad_request`,
+  `search::tests::a_corrupt_search_cursor_is_a_bad_request`
 - [x] O7 `GET /threads/{id}` matches `API.md` §2: **no `id` on a message**,
   `body_text` non-null, `body_html` null without an HTML part, messages oldest
   first, `mailbox_name` + `account_email` present.
   `api::mail::tests::thread_detail_matches_the_contract`,
   `api::mail::tests::an_empty_body_is_an_empty_string`
-- [x] O8 `GET /search` rejects empty/whitespace `q` with 400, caps `q` at 512
-  characters, returns `[]` + `null` for no hits, and shares the thread-row shape.
-  `api::mail::tests::search_matches_the_index_and_shares_the_thread_shape`,
-  `..::search_refuses_an_empty_or_oversized_query`
+- [x] O8 `GET /search` **delegates to Gmail** (`docs/SEARCH.md`): it covers the
+  whole mailbox rather than the 30-day window, validates the query before
+  sending it because Gmail answers a bad `q` with an empty `200`, hydrates cache
+  misses, keeps Gmail's relevance order, and pages through Gmail's `pageToken`
+  inside an opaque cursor. It still rejects empty/whitespace `q` with 400, caps
+  `q` at 512 characters, returns `[]` + `null` for no hits, and shares the
+  thread-row shape.
+  `search::tests::a_search_finds_a_message_outside_the_sync_window`,
+  `..::a_search_hydrates_a_cache_miss_and_leaves_it_cached`,
+  `..::a_refused_query_is_a_400_that_says_why_and_gmail_would_have_said_nothing`,
+  `..::results_keep_gmails_order_and_are_not_re_sorted_by_date`,
+  `..::pages_walk_gmails_page_token_through_an_opaque_cursor`,
+  `..::a_search_row_matches_the_thread_list_contract`,
+  `api::mail::tests::search_refuses_an_empty_or_oversized_query`
 - [x] O9 The attachment proxy streams from Gmail on demand, caps at 25 MB
   (refusing **before** spending quota), sets `Content-Disposition` with an
   RFC 5987 filename, and sets `Cache-Control: no-store, private`.

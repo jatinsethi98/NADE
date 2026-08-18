@@ -1536,6 +1536,7 @@ dependencies = [
  "http-body-util",
  "lol_html",
  "mail-parser",
+ "nade-gmail-sim",
  "oauth2",
  "percent-encoding",
  "postgresql_embedded",

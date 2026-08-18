@@ -15,6 +15,7 @@ pub mod error;
 pub mod gmail;
 pub mod jobs;
 pub mod mail;
+pub mod search;
 pub mod state;
 pub mod sync;
 

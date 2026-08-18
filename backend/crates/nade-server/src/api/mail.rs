@@ -29,9 +29,6 @@ use crate::{
 /// `API.md` §0: attachment download cap.
 pub const MAX_ATTACHMENT_BYTES: i64 = 25 * 1024 * 1024;
 
-/// `API.md` §0: `q` is capped at 512 characters.
-const MAX_QUERY_CHARS: usize = 512;
-
 /// `API.md` §2, table order and display names. **Only** these system labels are
 /// exposed; the rest (`UNREAD`, `IMPORTANT`, `CHAT`, `YELLOW_STAR`, `SPAM`,
 /// `TRASH`, `DRAFT`) are flags or places v1 does not sync.
@@ -241,55 +238,32 @@ pub async fn threads(
 
 /// `GET /v1/search?q&cursor`. Same body shape as the thread list.
 ///
+/// Deliberately thin. Everything that makes a search correct - validating the
+/// query Gmail would otherwise swallow, hydrating the misses, keeping Gmail's
+/// ranking - lives in [`crate::search::search`], because P4's `search_mail`
+/// tool has to do all of it too and a second implementation would grow a second
+/// set of traps.
+///
 /// # Errors
-/// `400 bad_request` for an empty `q` or an unknown cursor.
+/// `400 bad_request` for a query we refuse (with the reason) or an unknown
+/// cursor; `502`/`409` when Gmail fails or the credential is dead - a search is
+/// a network call now, and it says so rather than serving the cache and calling
+/// it a result.
 pub async fn search(
     State(state): State<AppState>,
     Query(query): Query<SearchQuery>,
 ) -> ApiResult<Json<ThreadsResponse>> {
-    // EDGE (empty input): an empty or whitespace-only `q` is a 400, not "every
-    // thread you own".
-    let text = query.q.unwrap_or_default();
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return Err(ApiError::bad_request("Type something to search for."));
-    }
-    if trimmed.chars().count() > MAX_QUERY_CHARS {
-        return Err(ApiError::bad_request(
-            "That search is too long. Try something shorter.",
-        ));
-    }
-
-    let keyset = query.cursor.as_deref().map(cursor::decode).transpose()?;
-    let Some(account) = state.account().await? else {
-        return Ok(Json(empty_page()));
-    };
-
-    let rows: Vec<ThreadRow> = sqlx::query_as(
-        "select t.thread_id, t.subject, t.snippet, t.from_name, t.from_email, \
-                t.last_ts, t.unread, t.msg_count \
-           from threads t \
-          where t.account_id = $1 \
-            and exists ( \
-                select 1 from messages m \
-                 where m.account_id = t.account_id \
-                   and m.thread_id = t.thread_id \
-                   and m.deleted_at is null \
-                   and m.fts @@ websearch_to_tsquery('simple', $2)) \
-            and ($3::timestamptz is null \
-                 or (t.last_ts, t.thread_id) < ($3::timestamptz, $4::text)) \
-          order by t.last_ts desc, t.thread_id desc \
-          limit $5",
+    let page = crate::search::search(
+        &state,
+        query.q.as_deref().unwrap_or_default(),
+        query.cursor.as_deref(),
     )
-    .bind(account.id)
-    .bind(trimmed)
-    .bind(keyset.as_ref().map(|k| k.ts))
-    .bind(keyset.as_ref().map(|k| k.id.clone()))
-    .bind(51i64)
-    .fetch_all(&state.pool)
     .await?;
 
-    Ok(Json(page_of(&state, account.id, rows, 50).await?))
+    Ok(Json(ThreadsResponse {
+        threads: page.threads,
+        next_cursor: page.next_cursor,
+    }))
 }
 
 /// `GET /v1/threads/{id}`.
@@ -468,7 +442,10 @@ async fn page_of(
 /// composed here from a title and a body. P2 has no runs, so this is null for
 /// every thread; P5 writes `data.agent_note` and this starts returning it
 /// without the endpoint changing shape.
-async fn agent_notes(
+///
+/// Shared with [`crate::search`], so a searched thread row and a listed one
+/// carry the same note from the same query.
+pub(crate) async fn agent_notes(
     state: &AppState,
     account_id: Uuid,
     rows: &[ThreadRow],
@@ -654,8 +631,10 @@ async fn fetch_attachment_bytes(
         .map_err(upstream)
 }
 
-/// Gmail failures become the right code, never a 500.
-fn upstream(error: GmailError) -> ApiError {
+/// Gmail failures become the right code, never a 500. Shared with
+/// [`crate::search`], so the attachment proxy and search cannot disagree about
+/// what a dead credential looks like.
+pub(crate) fn upstream(error: GmailError) -> ApiError {
     match error {
         GmailError::NotFound => ApiError::not_found(),
         GmailError::NeedsReauth => ApiError::needs_reauth(),
@@ -719,8 +698,11 @@ pub fn wire_ts(value: DateTime<Utc>) -> String {
 
 // ------------------------------------------------------------- row types --
 
+/// One row of the `threads` rollup, as both the list and the search read it.
+/// `pub(crate)` with private fields: [`crate::search`] builds the same
+/// `ThreadSummary` from it, and there is exactly one place that knows how.
 #[derive(Debug, sqlx::FromRow)]
-struct ThreadRow {
+pub(crate) struct ThreadRow {
     thread_id: String,
     subject: String,
     snippet: String,
@@ -732,7 +714,11 @@ struct ThreadRow {
 }
 
 impl ThreadRow {
-    fn into_summary(self, agent_note: Option<String>) -> ThreadSummary {
+    pub(crate) fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
+
+    pub(crate) fn into_summary(self, agent_note: Option<String>) -> ThreadSummary {
         ThreadSummary {
             id: self.thread_id,
             subject: self.subject,

@@ -53,26 +53,20 @@ create table messages (
     label_ids        text[]      not null default '{}',
     has_attachments  boolean     not null default false,
     deleted_at       timestamptz,
-    -- Every function here is IMMUTABLE (the two-argument to_tsvector with a
-    -- literal regconfig is; the one-argument form is not), which is what lets
-    -- this be a stored generated column.
-    fts tsvector generated always as (
-        to_tsvector(
-            'simple',
-            left(
-                coalesce(subject, '') || ' ' ||
-                coalesce(from_email, '') || ' ' ||
-                coalesce(body_text, ''),
-                100000
-            )
-        )
-    ) stored,
     constraint messages_account_id_gmail_id_key unique (account_id, gmail_id)
 );
 
+-- There is deliberately **no full-text index here**, and there never will be.
+-- `docs/SEARCH.md`: Gmail is the search index and this table is a cache of what
+-- we have looked at. The generated `fts` tsvector this schema used to carry
+-- indexed the 30-day sync window - ~500 of 63,866 messages, 0.78% - so a search
+-- for anything older returned an empty result indistinguishable from "no such
+-- mail exists". `GET /v1/search` now calls `users.messages.list`, which covers
+-- the whole mailbox, and hydrates the misses into these rows.
+--
+-- `db::tests::nothing_maintains_a_second_index` enforces the absence.
 create index messages_account_ts_idx      on messages (account_id, internal_ts desc);
 create index messages_account_thread_idx  on messages (account_id, thread_id);
-create index messages_fts_idx             on messages using gin (fts);
 create index messages_label_ids_idx       on messages using gin (label_ids);
 
 -- Attachment *metadata* only. The bytes are never stored: the proxy endpoint

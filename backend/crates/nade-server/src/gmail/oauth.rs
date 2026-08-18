@@ -266,7 +266,17 @@ pub trait AccessTokens: Send + Sync + std::fmt::Debug {
     async fn access_token(&self) -> Result<String, TokenError>;
     /// Called after a 401: the next `access_token()` must not reuse the cached
     /// value.
-    async fn invalidate(&self);
+    ///
+    /// **Returns a `Result`, and the caller must not ignore it.** This used to
+    /// return `()`. When the `gmail_tokens` write failed, the 401 arm could not
+    /// tell, re-sent the same dead token, burned its single auth retry and
+    /// returned `needs_reauth` - so a database that blinked for one second told
+    /// the user to reconnect Gmail. A failure here is transient and upstream,
+    /// and saying so is the whole point of the signature.
+    ///
+    /// # Errors
+    /// Returns [`TokenError`] if the invalidation could not be recorded.
+    async fn invalidate(&self) -> Result<(), TokenError>;
 }
 
 /// A fixed token. Tests only.
@@ -278,7 +288,9 @@ impl AccessTokens for StaticTokens {
     async fn access_token(&self) -> Result<String, TokenError> {
         Ok(self.0.clone())
     }
-    async fn invalidate(&self) {}
+    async fn invalidate(&self) -> Result<(), TokenError> {
+        Ok(())
+    }
 }
 
 /// The database-backed token store.
@@ -608,10 +620,8 @@ impl AccessTokens for AccountTokens {
         self.store.access_token(self.account_id).await
     }
 
-    async fn invalidate(&self) {
-        if let Err(error) = self.store.invalidate(self.account_id).await {
-            tracing::warn!(%error, "could not invalidate the cached access token");
-        }
+    async fn invalidate(&self) -> Result<(), TokenError> {
+        self.store.invalidate(self.account_id).await
     }
 }
 
