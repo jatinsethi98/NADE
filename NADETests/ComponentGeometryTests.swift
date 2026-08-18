@@ -219,6 +219,48 @@ final class ComponentGeometryTests: XCTestCase {
         }
     }
 
+    /// EDGE (E23), the half `testIconButtonBoxDoesNotGrowAtAX5` does not reach.
+    /// That test measures a bare `NIcon` with the ceiling applied by hand, and
+    /// the box's own `.frame` pins its size whatever the glyph does — so with
+    /// `NButton.clampsGlyph` returning `false`, every rendered assertion in it
+    /// still passed and only the pure-function check failed.
+    ///
+    /// What F23 actually claims is that the glyph does not overrun its circle.
+    /// A `.frame` does not clip, so the button is rendered inside a canvas three
+    /// times its size: an overflowing glyph then paints *outside* the circle and
+    /// the accent ink's bounding box says so.
+    func testTheIconButtonsGlyphStaysInsideItsCircleAtAX5() throws {
+        let accent = RenderMeasure.components(of: Theme.Color.accent)
+        let canvas: CGFloat = 132
+
+        // DESIGN.md §2's four circles, each with its screen's glyph size.
+        for (glyph, box) in [(CGFloat(16), CGFloat(38)), (17, 40), (18, 44), (17, NButton.iconBox)] {
+            let bitmap = try XCTUnwrap(
+                RenderMeasure.bitmap(
+                    of: NButton(systemImage: "arrow.up", label: "Ask", glyph: glyph, corner: .pill, box: box) {}
+                        .frame(width: canvas, height: canvas),
+                    dynamicTypeSize: .accessibility5
+                ),
+                "the \(glyph)/\(box) button rendered nothing"
+            )
+            let ink = try XCTUnwrap(
+                bitmap.bounds(matching: accent),
+                "nothing accent-coloured rendered for glyph \(glyph) in a \(box) box"
+            )
+
+            let circle = CGRect(
+                x: (canvas - box) / 2, y: (canvas - box) / 2, width: box, height: box
+            ).insetBy(dx: -pixels, dy: -pixels)
+            XCTAssertTrue(
+                circle.contains(ink),
+                """
+                a \(glyph) pt glyph at AX5 paints \(ink), which runs outside its \(box) pt circle \
+                \(circle) — the icon button's Dynamic Type ceiling is not holding.
+                """
+            )
+        }
+    }
+
     // MARK: - Ask fields (F2)
 
     /// DESIGN.md §2's table, one row per screen. Before this they were all
@@ -426,5 +468,264 @@ final class ComponentGeometryTests: XCTestCase {
             let bar = RenderMeasure.size(of: NTabBar(selection: .constant(.calendar)), proposedWidth: screen)
             XCTAssertMeasures(bar.width, screen, accuracy: 0.5, "tab bar width at \(screen)")
         }
+    }
+
+    /// F13. `ThemeTests.testTabBarMetricsMatchTheDesign` compares
+    /// `Theme.Metrics.TabBar` with itself; every one of these numbers stayed
+    /// green with the bar rendering `padding(.top, 4)`, `padding(.bottom, 40)`,
+    /// `VStack(spacing: 15)` and an **28 pt** glyph. The bar's height is the
+    /// only place four of them are observable at once, so it is taken apart
+    /// here: `1 + 9 + icon + 5 + label + 26`, every term a `Theme` constant and
+    /// the two variable ones rendered rather than assumed.
+    func testTabBarHeightIsBuiltFromItsOwnMetrics() {
+        typealias M = Theme.Metrics.TabBar
+        let bar = RenderMeasure.size(of: NTabBar(selection: .constant(.ask)), proposedWidth: 402)
+
+        let icon = RenderMeasure.size(
+            of: NIcon(NTab.ask.symbol, size: M.iconSize, weight: .light, relativeTo: .caption2)
+        )
+        let label = RenderMeasure.size(
+            of: Text(NTab.ask.title)
+                .textCase(.uppercase)
+                .font(Theme.Font.body(M.labelSize))
+                .nadeTracking(M.labelTracking, at: M.labelSize)
+                .lineLimit(1)
+        )
+
+        XCTAssertMeasures(
+            bar.height,
+            Theme.Stroke.border + M.paddingTop + icon.height + M.iconLabelGap + label.height + M.paddingBottom,
+            accuracy: grid,
+            "tab bar height = hairline + \(M.paddingTop) + glyph + \(M.iconLabelGap) + label + \(M.paddingBottom)"
+        )
+    }
+
+    // MARK: - Padding that only a width can see (F13)
+
+    /// F13. `NTag.paddingH` and `NChip.paddingH` were compared with themselves
+    /// and with nothing else — both stayed green at a rendered 30 pt. The inner
+    /// width is *rendered* through the face the component is supposed to use,
+    /// so a component that quietly swapped Lora for Cormorant fails here too.
+    func testTagAndChipHorizontalPaddingIsTheDesignsPadding() {
+        let tagLabel = "Draft"
+        let tagInner = RenderMeasure.width(
+            of: Text(tagLabel)
+                .font(Theme.Font.body(NTag.fontSize))
+                .nadeTracking(NTag.tracking, at: NTag.fontSize)
+                .lineLimit(1)
+        )
+        XCTAssertMeasures(
+            RenderMeasure.size(of: NTag(tagLabel)).width,
+            tagInner + 2 * NTag.paddingH,
+            accuracy: grid, "tag width = label + 2 × \(NTag.paddingH)"
+        )
+
+        let chipLabel = "Recruiters"
+        let chipInner = RenderMeasure.width(
+            of: Text(chipLabel).font(Theme.Font.body(NChip.fontSize)).lineLimit(1)
+        )
+        XCTAssertMeasures(
+            RenderMeasure.size(of: NChip(chipLabel, isSelected: false) {}).width,
+            chipInner + 2 * NChip.paddingH,
+            accuracy: grid, "chip width = label + 2 × \(NChip.paddingH)"
+        )
+    }
+
+    /// F13. DS `.btn { gap: 6px }`. The constant was asserted; the `HStack`
+    /// carrying it was not, and a rendered gap of 26 passed.
+    func testTheButtonsLabelGapIsWhatSeparatesGlyphFromLabel() {
+        let bare = RenderMeasure.size(of: NButton("Approve") {}).width
+        let withGlyph = RenderMeasure.size(of: NButton("Approve", systemImage: "plus") {}).width
+        // A glyph beside a label sits at the label's 14 pt, not the icon-only 17.
+        let glyph = RenderMeasure.width(
+            of: NIcon("plus", size: NButton.fontSize, weight: .light, relativeTo: .subheadline)
+        )
+        XCTAssertMeasures(
+            withGlyph - bare, glyph + NButton.labelGap,
+            accuracy: grid, "glyph + \(NButton.labelGap) pt gap"
+        )
+    }
+
+    // MARK: - Geometry only the pixels can see (F13)
+
+    /// One rendered device pixel at `RenderMeasure.bitmapScale`. Antialiasing on
+    /// a curved edge blends the outermost ring, so a colour-matched bounding box
+    /// is up to a pixel short on each side; two is the honest floor, and it is
+    /// fixed by the renderer's scale rather than by the device's.
+    private var pixels: CGFloat { 2 / RenderMeasure.bitmapScale }
+
+    /// F13. `NToggle.knobDiameter` (20) and `knobInset` (3) are the last two
+    /// numbers in the design that `sizeThatFits` cannot see — the knob lives
+    /// *inside* a 46 × 26 track, so the component measures the same whatever it
+    /// draws. Both stayed green at a rendered 8 pt knob with a 9 pt inset.
+    /// This finds the knob in the render and measures it.
+    func testTheToggleKnobIsTwentyPointsThreeIn() throws {
+        let knobOff = RenderMeasure.components(of: Theme.Color.neutral400)
+        let knobOn = RenderMeasure.components(of: Theme.Color.accent)
+
+        for (isOn, knobColor) in [(false, knobOff), (true, knobOn)] {
+            let bitmap = try XCTUnwrap(
+                RenderMeasure.bitmap(of: NToggle("Ask before it acts", isOn: .constant(isOn))),
+                "the toggle rendered nothing"
+            )
+            XCTAssertMeasures(bitmap.pointSize.width, NToggle.trackWidth, accuracy: pixels, "toggle bitmap width")
+            XCTAssertMeasures(bitmap.pointSize.height, NToggle.trackHeight, accuracy: pixels, "toggle bitmap height")
+
+            // On, the knob and the track's border are the *same* accent, so the
+            // knob is picked out as the longest run across the track's middle —
+            // 20 pt against the ring's 1.
+            let across = try XCTUnwrap(
+                bitmap.longestRun(matching: knobColor, onRowAt: NToggle.trackHeight / 2),
+                "no knob on the centre row with isOn = \(isOn)"
+            )
+            let width = across.upperBound - across.lowerBound
+            XCTAssertMeasures(width, NToggle.knobDiameter, accuracy: pixels, "knob diameter (isOn = \(isOn))")
+
+            let down = try XCTUnwrap(
+                bitmap.longestRun(matching: knobColor, onColumnAt: (across.lowerBound + across.upperBound) / 2),
+                "no knob down the centre column with isOn = \(isOn)"
+            )
+            XCTAssertMeasures(
+                down.upperBound - down.lowerBound, NToggle.knobDiameter,
+                accuracy: pixels, "knob is a circle, not an oval (isOn = \(isOn))"
+            )
+            XCTAssertMeasures(
+                down.lowerBound, (NToggle.trackHeight - NToggle.knobDiameter) / 2,
+                accuracy: pixels, "knob is vertically centred (isOn = \(isOn))"
+            )
+
+            // The mockup's `left: 2px / 22px` are measured inside the 1 pt
+            // border, so the knob sits `knobInset` from the outer edge at both
+            // ends and the two gaps are symmetric.
+            let leading = across.lowerBound
+            let trailing = NToggle.trackWidth - across.upperBound
+            XCTAssertMeasures(
+                isOn ? trailing : leading, NToggle.knobInset,
+                accuracy: pixels, "knob inset on its own side (isOn = \(isOn))"
+            )
+            XCTAssertMeasures(
+                isOn ? leading : trailing,
+                NToggle.trackWidth - NToggle.knobDiameter - NToggle.knobInset,
+                accuracy: pixels, "knob travel (isOn = \(isOn))"
+            )
+        }
+    }
+
+    /// F13. A **shape** is not a size: `.pill` and `.rounded` measure identically,
+    /// so `NTextField.Metrics.shape` and `NButton`'s `corner` were asserted only
+    /// against themselves.
+    ///
+    /// The top row of the render tells them apart. A `RoundedRectangle` of
+    /// radius `r` has a flat top edge inset by `r` at each end, so the ink on
+    /// row 0 spans `r … width − r`; a pill's radius is half its height. On a
+    /// 38–44 pt control that is a 15–18 pt difference per side.
+    func testPillAndRoundedControlsActuallyDrawDifferentCorners() throws {
+        // `divider` is `ink` at 16 %; on the page it is that blend over `bg`.
+        let ink = RenderMeasure.components(of: Theme.Color.ink)
+        let bg = RenderMeasure.components(of: Theme.Color.bg)
+        let hairline = (
+            r: bg.r + 0.16 * (ink.r - bg.r),
+            g: bg.g + 0.16 * (ink.g - bg.g),
+            b: bg.b + 0.16 * (ink.b - bg.b)
+        )
+
+        var insets: [NTextField.Shape: [CGFloat]] = [:]
+        for metrics in [NTextField.Metrics.input, .askPinned, .askDocked, .askCentred, .searchPill] {
+            let bitmap = try XCTUnwrap(
+                RenderMeasure.bitmap(
+                    of: NTextField("Ask, search, or describe an agent", text: .constant(""), metrics: metrics)
+                        .frame(width: 300)
+                ),
+                "the \(metrics.shape) field rendered nothing"
+            )
+            let top = try XCTUnwrap(
+                bitmap.longestRun(matching: hairline, onRowAt: 0, tolerance: 0.05),
+                "no border on the top row of a \(metrics.shape) field"
+            )
+
+            let radius = metrics.shape == .pill ? bitmap.pointSize.height / 2 : Theme.Radius.md
+            // On the outermost row the arc is still within one device pixel of
+            // the flat edge for `d = sqrt(2r/scale)` either side of the tangent
+            // point, so the measured run starts up to that much early. Derived
+            // from the geometry, not chosen to fit.
+            let arc = (2 * radius / RenderMeasure.bitmapScale).squareRoot()
+            XCTAssertLessThanOrEqual(
+                top.lowerBound, radius + pixels,
+                "\(metrics.shape) field's top edge starts \(top.lowerBound) in, past its \(radius) pt corner"
+            )
+            XCTAssertGreaterThanOrEqual(
+                top.lowerBound, radius - arc - pixels,
+                "\(metrics.shape) field's top edge starts \(top.lowerBound) in — too flat for a \(radius) pt corner"
+            )
+            insets[metrics.shape, default: []].append(top.lowerBound)
+        }
+
+        // …and the two shapes are not quietly the same thing.
+        let rounded = try XCTUnwrap(insets[.rounded]?.max())
+        let pill = try XCTUnwrap(insets[.pill]?.min())
+        XCTAssertGreaterThan(
+            pill - rounded, 8,
+            "a pill's corner (\(pill)) is barely deeper than radius-md's (\(rounded)) — the shapes have collapsed"
+        )
+    }
+
+    /// F13. `NStepper.countSize` (15) is invisible to `sizeThatFits`: the
+    /// count's `min-width: 22` swallows any digit narrower than the box, so the
+    /// row measures identically at 9 pt. The digits are the only `ink` in the
+    /// row — the boxes are `divider`, the glyphs `accent` — so they can be found
+    /// in the render and compared with the same text rendered on its own.
+    func testTheStepperCountIsRenderedAtItsDesignSize() throws {
+        let ink = RenderMeasure.components(of: Theme.Color.ink)
+
+        let row = try XCTUnwrap(RenderMeasure.bitmap(of: NStepper("Repeat every", value: .constant(8))))
+        let digits = try XCTUnwrap(row.bounds(matching: ink), "no ink-coloured count in the stepper")
+
+        let reference = try XCTUnwrap(RenderMeasure.bitmap(
+            of: Text(8, format: .number)
+                .font(Theme.Font.body(NStepper.countSize))
+                .foregroundStyle(Theme.Color.ink)
+                .tabularNumerals()
+        ))
+        let expected = try XCTUnwrap(reference.bounds(matching: ink), "the reference digit drew no ink")
+
+        XCTAssertMeasures(digits.height, expected.height, accuracy: pixels, "count digit height")
+        XCTAssertMeasures(digits.width, expected.width, accuracy: pixels, "count digit width")
+    }
+
+    /// F13. DS `.btn:disabled { opacity: 0.45 }` is not a size, so no
+    /// `sizeThatFits` can reach it — it was asserted only against itself.
+    ///
+    /// It is solved here from one fully covered pixel of the accent border,
+    /// halfway along the button's straight top edge: `out = bg + α · (accent −
+    /// bg)`. One pixel rather than an average over the render, because text is
+    /// smoothed with a contrast-dependent gamma and a whole-button ink total is
+    /// therefore *not* linear in the opacity.
+    func testTheDisabledButtonIsRenderedAtTheDesignsOpacity() throws {
+        let bg = RenderMeasure.components(of: Theme.Color.bg)
+        let accent = RenderMeasure.components(of: Theme.Color.accent)
+
+        let enabled = try XCTUnwrap(RenderMeasure.bitmap(of: NButton("Approve") {}))
+        let disabled = try XCTUnwrap(RenderMeasure.bitmap(of: NButton("Approve") {}.disabled(true)))
+        XCTAssertEqual(enabled.width, disabled.width, "disabling changed the button's size")
+        XCTAssertEqual(enabled.height, disabled.height, "disabling changed the button's size")
+
+        // The middle of the 1 pt border's three device rows, on the flat part of
+        // the top edge — fully covered, so no antialiasing is in the sample.
+        let probeX = enabled.pointSize.width / 2
+        let probeY = Theme.Stroke.border / 2
+
+        let full = try XCTUnwrap(
+            enabled.alpha(atX: probeX, y: probeY, foreground: accent, over: bg, linearised: false),
+            "the enabled button drew no border to sample"
+        )
+        XCTAssertEqual(full, 1, accuracy: 0.02, "the enabled button's border is not solid accent")
+
+        let faded = try XCTUnwrap(
+            disabled.alpha(atX: probeX, y: probeY, foreground: accent, over: bg, linearised: false)
+        )
+        XCTAssertEqual(
+            faded, NButton.disabledOpacity, accuracy: 0.01,
+            "the disabled button's border composites at α = \(faded), not \(NButton.disabledOpacity)"
+        )
     }
 }

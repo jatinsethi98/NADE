@@ -312,14 +312,24 @@ which the UI test relies on to launch the shipping shell.
 | File | What it shows |
 |---|---|
 | `p1-shell.png` | `RootTabView` on iPhone 17 Pro — the shipping shell |
-| `p1-gallery-01-color.png` … `-12-motion.png` | one per gallery section, iPhone 17 Pro |
+| `p1-gallery-01-color.png` … `-13-motion.png` | one per gallery section (13 of them), iPhone 17 Pro |
 | `p1-se-shell.png`, `p1-gallery-se-*.png` | the same on **iPhone SE (3rd gen), 375 × 667** — narrowest and shortest device the 18.0 target supports (E2) |
 
 On SE the four tab labels still fit without truncation, no row overflows, and
-nothing clips. The scratch SE simulator is deleted after the run; the script
-that produced these lives in the session scratchpad, not the repo (it is
-three `simctl` calls in a loop and would rot as a checked-in artefact —
-regenerate with `simctl launch … -NADEGallery 1 -NADEGallerySection <id>`).
+nothing clips. The acceptance command names the device literally
+(`-destination 'platform=iOS Simulator,name=iPhone SE (3rd generation)'`), so a
+simulator with exactly that name has to exist:
+
+```
+xcrun simctl create "iPhone SE (3rd generation)" \
+  com.apple.CoreSimulator.SimDeviceType.iPhone-SE-3rd-generation \
+  com.apple.CoreSimulator.SimRuntime.iOS-26-5
+```
+
+The script that produced the screenshots lives in the session scratchpad,
+not the repo (it is three `simctl` calls in a loop and would rot as a
+checked-in artefact — regenerate with `simctl launch …  -NADEGallery 1
+-NADEGallerySection <id>`).
 
 Reading the screenshots back against the DS CSS and the mockup renders turned
 up two real mismatches, both fixed before this was reported: the leading glyph
@@ -385,7 +395,11 @@ Fixed two ways, both now matching the mockup:
   behaviour P2's lists would otherwise inherit for free.
 
 `ThemeTests` was updated to assert 26; verified by screenshot at
-`docs/screens/p1-shell-safearea-fixed.png`. All 37 tests still green.
+`docs/screens/p1-shell.png`, which is the shipped shell. (A separate
+`p1-shell-safearea-fixed.png` recorded the same frame under a name that only
+made sense during the fix; it was byte-for-byte the shell shot and has been
+removed rather than kept as a second copy — see D41.) All 37 tests still green
+at the time.
 
 ---
 
@@ -636,3 +650,180 @@ there is not.
 different reason: `VHairline` is a `Rectangle`, which has no ideal height and
 will fill whatever it is offered, so a container proposing a tall box stretched
 the whole control.
+
+---
+
+## P1 — the second review pass (2026-08-18)
+
+Ten findings, nine of them about **whether the tests prove anything**. Every one
+was checked the same way: plant the regression the test claims to catch, watch
+what happens, then fix and watch it fail. Three of the ten turned out to be
+already closed by the first pass and are recorded as verified rather than
+re-fixed; three were closed but *not by the assertion that claimed to close
+them*; the rest were real.
+
+### D39. A test nobody has seen fail is not evidence
+
+Every claim below has a recorded red. Three findings survived a first
+mutation and died to a second, which is the reason the discipline exists:
+
+- **F14.** `testBothFamiliesOfferTheMonospacedNumbersSelector` looked live. It
+  is — but the first probe (expect selector **4**) passed, because both
+  families genuinely list selector 4 ("Default") under number-spacing type 6.
+  Cormorant offers `[0 Monospaced, 4 Default]`; Lora offers
+  `[0 Monospaced, 1 Proportional, 4 Default]`. A probe has to name a selector
+  the faces do *not* have (7) before the assertion goes red. The test now also
+  asserts the selector's **name** is "Monospaced Numbers", so an index alone
+  cannot satisfy it.
+- **F23.** With `NButton.clampsGlyph` forced to `false`, only the pure-function
+  assertion failed. Every *rendered* assertion in
+  `testIconButtonBoxDoesNotGrowAtAX5` still passed, because the box's own
+  `.frame` pins its size no matter what the glyph does, and the test measured a
+  bare `NIcon` with the ceiling applied by hand rather than the button's. See
+  D42.
+- **F16.** The stream validator rejected all eleven planted shapes — and
+  accepted three more that `docs/contract/validate.py` rejects. See D43.
+
+### D40. Ten geometry values were decoupled from their constants, and 78 tests stayed green
+
+The first pass built `ComponentGeometryTests` and said geometry was now
+measured. It is, for the values it measures. To find the ones it did not, ten
+components were edited to keep their `static let` and render something else:
+
+| Constant | Rendered instead | Caught before |
+|---|---|---|
+| `TabBar.paddingTop` 9 | 4 | no |
+| `TabBar.paddingBottom` 26 | 40 | no |
+| `TabBar.iconLabelGap` 5 | 15 | no |
+| `TabBar.iconSize` 18 | 28 | no |
+| `TabBar.paddingHorizontal` 10 | 34 | no |
+| `NTag.paddingH` 10 | 30 | no |
+| `NChip.paddingH` 12 | 30 | no |
+| `NButton.labelGap` 6 | 26 | no |
+| `NToggle.knobDiameter` 20 | 8 | no |
+| `NToggle.knobInset` 3 | 9 | no |
+| `NStepper.countSize` 15 | 9 | no |
+| `NButton.disabledOpacity` 0.45 | 0.6 | no |
+| `NTextField.Metrics.shape` | `.pill` ⇄ `.rounded` | no |
+
+All thirteen now fail. The tab bar's four vertical numbers come out of one
+equation — `1 + 9 + glyph + 5 + label + 26` — with the two variable terms
+rendered rather than assumed. `paddingHorizontal` changes nothing a unit test
+can see (the four columns are `maxWidth: .infinity` and absorb it), so it is
+measured in `TabBarUITests` as the gap between the screen edge and the first
+column. Tag and chip widths are measured against their **rendered** label, so
+the same assertion also catches a component that swapped Lora for Cormorant.
+
+### D41. Some geometry is only visible in pixels
+
+Three of those twelve are invisible to `sizeThatFits` in principle, not by
+oversight:
+
+- the toggle's knob lives *inside* a 46 × 26 track, so the component measures
+  the same whatever it draws;
+- the stepper's count has `min-width: 22`, which swallows any digit narrower
+  than the box;
+- an opacity is not a size at all;
+- and a *shape* is not a size either — `.pill` and `.rounded` measure
+  identically. They are told apart on the outermost row of the render, where a
+  corner of radius `r` insets the flat edge by `r`: 4 pt for `radius-md`, 19–22
+  for a pill. The allowance is `sqrt(2r / scale)` — how far the arc stays within
+  one device pixel of the tangent — derived from the geometry rather than chosen
+  to fit.
+
+`RenderMeasure.bitmap(of:)` renders through `ImageRenderer` at a **fixed** 3 px
+per point — fixed, so a bitmap expectation means the same thing on an @2x SE as
+on an @3x 17 Pro — and hands back the pixels. Three readers sit on top:
+
+- `bounds(matching:)` — the bounding box of a colour.
+- `longestRun(matching:onRowAt:)` — needed because an "on" toggle's knob and its
+  track border are the *same* accent. A rectangular inset cannot separate them:
+  a capsule's ring curves inward at the top and bottom, so any inset deep enough
+  to miss the ring also clips the knob. The knob is instead the longest run
+  across the track's middle — 20 pt against the ring's 1.
+- `alpha(atX:y:foreground:over:)` — solves `out = bg + α·(fg − bg)` from **one
+  fully covered pixel** of the accent border. Deliberately not an average over
+  the render: text is smoothed with a contrast-dependent gamma, so a whole-button
+  ink total is *not* linear in the opacity. Measured, a sum over the button reads
+  0.486 in sRGB and 0.588 in linear light for a true 0.45; the single-pixel solve
+  reads 0.45 in sRGB, which also settles that SwiftUI composites `.opacity` on
+  the encoded values rather than in linear light.
+
+Tolerances are `2 / bitmapScale` — two rendered device pixels, which is what
+antialiasing on a curved edge costs — and are stated as that rather than as a
+number chosen to make the test pass.
+
+### D42. The icon button's ceiling is checked by where the glyph lands
+
+`testIconButtonBoxDoesNotGrowAtAX5` measures the box (which cannot grow, `.frame`
+pins it) and a hand-clamped `NIcon` (which is not the button). Neither is F23's
+claim. What F23 claims is that the glyph does not overrun its circle, and a
+`.frame` does not clip, so the button is now rendered inside a canvas three times
+its size: an overflowing glyph paints *outside* the circle and the accent ink's
+bounding box says so. With the ceiling removed, an 18 pt glyph at AX5 paints
+47.7 pt tall inside a 44 pt circle, and all four design pairs (16/38, 17/40,
+18/44, 17/36) fail.
+
+### D43. The SSE validator parses blocks, because a line reader cannot see framing
+
+`docs/contract/README.md` says the wire bytes are `event: <name>\ndata: <json>\n`
+with **a blank line between events**. A line-by-line reader pairs each `event:`
+with the next `data:` and skips blank lines, so it cannot see the framing at all.
+Three streams that `docs/contract/validate.py` rejects passed here:
+
+- two events with no blank line between them,
+- a blank line *inside* an event,
+- two blank lines between events.
+
+`problems(inStream:)` now splits on the blank line and requires each block to be
+exactly two lines, which is `validate.py`'s `parse_sse` move for the same reason.
+Fourteen malformed shapes are planted, and the validator has to reject all of
+them.
+
+**Not claimed:** the payloads. `validate.py` checks every frame against API.md's
+shapes; P1 has no models, so this checks only that each payload is valid JSON.
+P2 decodes them.
+
+### D44. The deployment-target count is derived, not guessed
+
+D36 says eight settings and is right. The test said `>= 6`, and two of the eight
+could be deleted with it still green — verified. Xcode gives every
+`XCConfigurationList` one `XCBuildConfiguration` per configuration, so the test
+now requires `settings == lists × 2`: a new target cannot arrive without its own
+pin, and an existing one cannot drop it.
+
+A second hole: the sweep reads the *literal* values in `project.pbxproj`, and an
+`.xcconfig` attached to any configuration would override them invisibly. A test
+runs inside the simulator and cannot shell out to `xcodebuild
+-showBuildSettings`, so the honest close is to require that no configuration has
+one — `testNoConfigurationDefersToAnXcconfig`. Still not claimed:
+`xcodebuild -xcconfig …` passed on the command line. Nothing readable from
+inside the simulator can see that.
+
+### D45. Every gallery anchor can reach the top of the screen
+
+`-NADEGallerySection motion` produced a screenshot **byte-identical** to
+`-NADEGallerySection ax5b`: `motion` is the last section, so
+`scrollTo(_:anchor: .top)` clamped at the end of the content and both landed on
+the same frame. `docs/screens/` therefore claimed a Reduce Motion shot that was a
+second copy of AX5 under a different name — the same defect class F25 was about.
+
+The gallery now ends with one screen of `Color.clear`
+(`.containerRelativeFrame(.vertical)`), so the last section can actually be
+scrolled to the top. The whole set was re-shot and checked for duplicates by
+hash; 22 files, 22 distinct.
+
+Reading the images back also caught a system notification banner
+("Ready for Apple Intelligence") sitting over `p1-se-shell.png`, because it was
+the first shot taken after that simulator booted. Re-shot.
+
+### F11's second `Theme.swift`: not reachable in this target
+
+The lint's exemption is by path, not by `lastPathComponent`, and
+`testTheExemptionIsAPathNotAFilename` fails if that is reversed — verified. The
+scenario it guards against cannot actually occur here, though: adding
+`NADE/Gallery/Theme.swift` fails the *build* with "Multiple commands produce
+Theme.stringsdata", because `NADE/` is a synchronized file group and two files
+of that name cannot coexist in one target. The path exemption is still the right
+call — it costs nothing and does not depend on that staying true — but the
+finding's premise is weaker than it reads.

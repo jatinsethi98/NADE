@@ -167,6 +167,25 @@ final class TabBarUITests: XCTestCase {
         for (a, b) in zip(frames, frames.dropFirst()) {
             XCTAssertLessThanOrEqual(a.maxX, b.minX + 0.5, "two tab columns overlap: \(a) and \(b)")
         }
+
+        // F13. The mockup's tab bar is `padding: 9px 10px 26px`. The 9 and the
+        // 26 change the bar's own height and are measured in
+        // `ComponentGeometryTests.testTabBarHeightIsBuiltFromItsOwnMetrics`; the
+        // **10** changes nothing a unit test can see, because the four columns
+        // are `maxWidth: .infinity` and absorb it. It is only observable as the
+        // gap between the screen edge and the first column, here, in the
+        // running app. (The number is repeated rather than imported: a UI test
+        // target cannot `@testable import NADE`. `ThemeTests` pins the constant
+        // against the design; this pins the render against the same number.)
+        let screen = app.windows.element(boundBy: 0).frame
+        XCTAssertEqual(
+            Double(frames[0].minX - screen.minX), 10, accuracy: 1,
+            "the tab bar's leading padding renders at \(frames[0].minX - screen.minX), not the mockup's 10"
+        )
+        XCTAssertEqual(
+            Double(screen.maxX - frames[3].maxX), 10, accuracy: 1,
+            "the tab bar's trailing padding renders at \(screen.maxX - frames[3].maxX), not the mockup's 10"
+        )
     }
 
     /// The bottom row of the bar — the 26 pt band the design puts under the

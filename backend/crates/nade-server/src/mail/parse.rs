@@ -132,7 +132,24 @@ pub fn parse(raw: &[u8], gmail_id: &str) -> Result<ParsedMessage, ParseError> {
         // Capped *after* the rewrite, not before: rewriting a `cid:` URL into
         // `/v1/messages/{id}/attachments/{att}` makes the document longer, so
         // capping first would let it back over the limit.
-        cap_body_html(html::rewrite_cid_urls(&html, gmail_id, &by_content_id))
+        //
+        // EDGE (control characters): scrubbed here as well as on the text path.
+        // The first live sync died on a `NUL` in a body, and the fix at the time
+        // only covered `body_text` — because that is where the extractor
+        // normalises. `body_html` is a *sibling* output that never passes
+        // through the extractor at all, so it kept its NUL, kept reaching
+        // `insert into messages`, and PostgreSQL kept rejecting the whole
+        // statement with `invalid byte sequence for encoding "UTF8": 0x00`. Of
+        // 247 real messages exactly one carries it, which is precisely often
+        // enough to stop a sync and rare enough to miss.
+        //
+        // `\r` is kept here though the text path drops it: it is legal in HTML
+        // source and the web view is entitled to the bytes the sender wrote.
+        cap_body_html(scrub_html_controls(&html::rewrite_cid_urls(
+            &html,
+            gmail_id,
+            &by_content_id,
+        )))
     });
 
     let body_text = cap_body_text(body_text(&message, body_html.as_deref()));
@@ -569,6 +586,24 @@ fn cap_body_text(text: String) -> String {
 /// would otherwise be walked codepoint by codepoint on every single message to
 /// answer a question about bytes. At most three steps back, because UTF-8
 /// sequences are at most four bytes long.
+/// Remove control characters that PostgreSQL will not accept in a `text`
+/// column, while leaving HTML's own whitespace alone.
+///
+/// Deliberately narrower than the text path's [`html::normalise`]: this output
+/// goes to a locked `WKWebView`, not to a model, so bidi marks and the tag
+/// block are the *renderer's* problem and stripping them would change what the
+/// sender's document says. What cannot survive is a `NUL`, which PostgreSQL
+/// rejects outright, taking the whole `insert` — and therefore the whole sync —
+/// with it.
+fn scrub_html_controls(html: &str) -> String {
+    if !html.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) {
+        return html.to_owned(); // the overwhelming majority; no allocation
+    }
+    html.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
+        .collect()
+}
+
 fn cap_body_html(html: String) -> String {
     if html.len() <= MAX_BODY_HTML_BYTES {
         return html;
@@ -1178,6 +1213,79 @@ mod tests {
     /// characters from one message. Its sibling had **none**: `body_html` went
     /// into an unbounded `text` column and straight out to a `WKWebView`, so a
     /// hostile 500 KB body sailed through untouched.
+    #[test]
+    /// Regression, found by the *second* live sync — after the first fix for
+    /// the same symptom.
+    ///
+    /// A `NUL` in a body killed the first live sync. That fix scrubbed the text
+    /// path, where the extractor normalises. `body_html` is a sibling output
+    /// that never goes through the extractor, so it kept its `NUL`, kept
+    /// reaching `insert into messages`, and PostgreSQL kept rejecting the whole
+    /// statement. The sync failed four more times on the same byte.
+    ///
+    /// The lesson is the shape, not the character: a scrubber attached to *one*
+    /// derived value does not protect a *sibling* derived from the same source.
+    #[test]
+    fn a_control_character_never_reaches_body_html() {
+        let raw = b"From: a@b.com\r\nTo: c@d.com\r\nSubject: nul\r\n\
+Content-Type: text/html; charset=\"utf-8\"\r\n\r\n\
+<p>before\x00after</p>\r\n<p>tab\there</p>\r\n"
+            .to_vec();
+        let parsed = parse(&raw, "nul-test").expect("parses");
+        let html = parsed.body_html.expect("a genuine text/html part");
+
+        assert!(!html.contains('\u{0}'), "a NUL survived into body_html: {html:?}");
+        assert!(
+            html.contains("beforeafter"),
+            "the surrounding text must survive: {html:?}"
+        );
+        // HTML's own whitespace is content, not a control character to strip.
+        assert!(html.contains('\t'), "a tab is legal in HTML source: {html:?}");
+        assert!(
+            !html.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')),
+            "some other control character survived: {html:?}"
+        );
+    }
+
+    /// Every real message in the live sample, through the storage guarantee the
+    /// database actually enforces. Skips cleanly when the sample is absent.
+    #[test]
+    fn no_live_message_yields_a_control_character_postgres_would_reject() {
+        let dir = live_dir();
+        if !dir.is_dir() {
+            println!("live control-character check: skipped, {} is absent", dir.display());
+            return;
+        }
+        let mut checked = 0usize;
+        let mut offenders = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("reading the live sample").flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "eml") {
+                continue;
+            }
+            let raw = std::fs::read(&path).expect("reading a message");
+            let Ok(parsed) = parse(&raw, "live") else { continue };
+            checked += 1;
+            let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            for (field, value) in [
+                ("subject", Some(parsed.subject.as_str())),
+                ("body_text", Some(parsed.body_text.as_str())),
+                ("body_html", parsed.body_html.as_deref()),
+            ] {
+                if let Some(v) = value {
+                    if v.contains('\u{0}') {
+                        offenders.push(format!("{name}.{field}"));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "PostgreSQL rejects a NUL in a text column, failing the whole sync: {offenders:?}"
+        );
+        println!("live control-character check: {checked} messages, 0 NULs reach storage");
+    }
+
     #[test]
     fn body_html_is_capped_in_bytes() {
         let padding = "<span>x</span>".repeat(MAX_BODY_HTML_BYTES / 4);

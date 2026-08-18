@@ -99,34 +99,54 @@ final class ContractFixturesTests: XCTestCase {
     /// first, exactly one terminal `done` **or** `error`, and a trailing blank
     /// line." That is what gets checked — not `contains("event: route")`, which
     /// any file holding the three substrings in any order satisfies.
+    ///
+    /// The framing half mirrors `docs/contract/validate.py`'s `parse_sse`
+    /// block-for-block, so the two validators cannot disagree about what a
+    /// well-formed stream is.
+    ///
+    /// **Not claimed:** the *payloads*. `validate.py` checks every frame against
+    /// the shapes in API.md; P1 has no models yet, so this checks only that each
+    /// payload is valid JSON. P2 decodes them.
     static func problems(inStream text: String) -> [String] {
         var problems: [String] = []
         var events: [(name: String, data: String)] = []
-        var pendingName: String?
 
-        for (index, line) in text.components(separatedBy: "\n").enumerated() {
-            let number = index + 1
-            if line.isEmpty { continue }
-
-            if let value = line.dropPrefixIfPresent("event: ") {
-                if pendingName != nil { problems.append("line \(number): two `event:` lines with no `data:` between them") }
-                if value.isEmpty { problems.append("line \(number): empty event name") }
-                pendingName = value
-            } else if let value = line.dropPrefixIfPresent("data: ") {
-                guard let name = pendingName else {
-                    problems.append("line \(number): `data:` with no preceding `event:`")
-                    continue
-                }
-                if (try? JSONSerialization.jsonObject(with: Data(value.utf8))) == nil {
-                    problems.append("line \(number): `\(name)` payload is not valid JSON: \(value)")
-                }
-                events.append((name, value))
-                pendingName = nil
-            } else {
-                problems.append("line \(number): neither `event: ` nor `data: `: \(line)")
-            }
+        // The framing is parsed in **blocks split on the blank line**, exactly
+        // as `docs/contract/validate.py` does, not line by line.
+        //
+        // A line-by-line reader pairs each `event:` with the next `data:` and
+        // skips blank lines, so it silently accepts three streams the contract
+        // forbids and `validate.py` rejects: two events with no blank line
+        // between them, a blank line *inside* an event, and a doubled blank
+        // line. All three passed here before.
+        guard text.hasSuffix("\n\n") else {
+            return ["does not end with the blank line that terminates the last event"]
         }
-        if pendingName != nil { problems.append("ends on an `event:` with no `data:`") }
+
+        for (index, block) in text.components(separatedBy: "\n\n").enumerated() {
+            // The trailing blank line leaves one empty component at the end.
+            if block.isEmpty { continue }
+
+            let lines = block.components(separatedBy: "\n")
+            guard lines.count == 2 else {
+                problems.append(
+                    "event \(index) is not an `event:`/`data:` pair separated from its "
+                        + "neighbours by exactly one blank line: \(String(reflecting: block))"
+                )
+                continue
+            }
+            guard let name = lines[0].dropPrefixIfPresent("event: "),
+                  let payload = lines[1].dropPrefixIfPresent("data: ")
+            else {
+                problems.append("event \(index) is malformed: \(String(reflecting: block))")
+                continue
+            }
+            if name.isEmpty { problems.append("event \(index) has an empty event name") }
+            if (try? JSONSerialization.jsonObject(with: Data(payload.utf8))) == nil {
+                problems.append("event \(index): `\(name)` payload is not valid JSON: \(payload)")
+            }
+            events.append((name, payload))
+        }
 
         if events.isEmpty {
             problems.append("no events at all")
@@ -146,7 +166,6 @@ final class ContractFixturesTests: XCTestCase {
             problems.append("the terminal `\(terminals[0].element.name)` is not the last event")
         }
 
-        if !text.hasSuffix("\n\n") { problems.append("does not end with a blank line") }
         return problems
     }
 
@@ -197,6 +216,14 @@ final class ContractFixturesTests: XCTestCase {
              "event: route\ndata: {\"kind\":\"answer\"}\n\nevent: done\ndata: {}\n"),
             ("repeated route",
              "event: route\ndata: {\"kind\":\"answer\"}\n\nevent: route\ndata: {\"kind\":\"results\"}\n\nevent: done\ndata: {}\n\n"),
+            // The three the line-by-line reader could not see. `validate.py`
+            // rejects all three; this validator used to accept all three.
+            ("no blank line between events",
+             "event: route\ndata: {\"kind\":\"answer\"}\nevent: done\ndata: {}\n\n"),
+            ("a blank line inside an event",
+             "event: route\n\ndata: {\"kind\":\"answer\"}\n\nevent: done\ndata: {}\n\n"),
+            ("two blank lines between events",
+             "event: route\ndata: {\"kind\":\"answer\"}\n\n\nevent: done\ndata: {}\n\n"),
         ]
 
         for case_ in malformed {

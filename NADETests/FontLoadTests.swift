@@ -170,6 +170,18 @@ final class FontLoadTests: XCTestCase {
                 \(monospacedNumbersSelector) (monospaced) — .tabularNumerals() would be a no-op.
                 """
             )
+
+            // …and selector 0 of type 6 is genuinely *Monospaced Numbers*, not
+            // whatever else a re-cut face happened to put at that index. Both
+            // families also list selector 4 ("Default"), so "some selector
+            // exists" is not the check either.
+            let named = selectors.first {
+                ($0[kCTFontFeatureSelectorIdentifierKey as String] as? Int) == monospacedNumbersSelector
+            }
+            XCTAssertEqual(
+                named?[kCTFontFeatureSelectorNameKey as String] as? String, "Monospaced Numbers",
+                "\(expected.psName)'s number-spacing selector \(monospacedNumbersSelector) is not the monospaced one"
+            )
         }
     }
 
@@ -269,6 +281,47 @@ final class RenderedFaceTests: XCTestCase {
             abs(heading.width - body.width), 5,
             "heading \(heading) and body \(body) render the same width — both are resolving to one face"
         )
+    }
+
+    /// F14 / EDGE (E10). The feature-table check above proves the faces *can*
+    /// do tabular figures. This proves `.tabularNumerals()` does — and that it
+    /// is not a no-op because the faces were already monospaced.
+    ///
+    /// Both families ship **proportional** figures by default: ten `1`s are
+    /// 43 pt narrower than ten `0`s in Lora at 17 pt, 25 pt narrower in
+    /// Cormorant. With the substitution on, every digit string is the same
+    /// width — which is the whole point at a timestamp, a count or the OTP.
+    func testTabularNumeralsActuallySubstitutesInBothFamilies() {
+        let samples = ["0000000000", "1111111111", "8888888888", "4444444444"]
+
+        for (name, font) in [
+            ("body", Theme.Font.body(Self.size)),
+            ("heading", Theme.Font.heading(Self.size)),
+        ] {
+            func width(_ digits: String, tabular: Bool) -> CGFloat {
+                let text = Text(digits).font(font).lineLimit(1)
+                return tabular
+                    ? RenderMeasure.width(of: text.tabularNumerals())
+                    : RenderMeasure.width(of: text)
+            }
+
+            let tabular = samples.map { width($0, tabular: true) }
+            for (digits, measured) in zip(samples, tabular) {
+                XCTAssertMeasures(
+                    measured, tabular[0], accuracy: RenderMeasure.snap,
+                    "\(name): \"\(digits)\" is not the same width as \"\(samples[0])\" under .tabularNumerals()"
+                )
+            }
+
+            // The negative half: without it the same strings differ, so the
+            // assertion above is not passing because the face was already
+            // monospaced.
+            let proportional = samples.map { width($0, tabular: false) }
+            XCTAssertGreaterThan(
+                proportional.max()! - proportional.min()!, 5,
+                "\(name): digits are the same width without .tabularNumerals() (\(proportional)) — the test proves nothing"
+            )
+        }
     }
 
     /// Every Theme style is `relativeTo:`, so it must actually grow with

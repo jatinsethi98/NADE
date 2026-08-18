@@ -55,25 +55,37 @@ final class InfoPlistTests: XCTestCase {
     /// to be built. Release could drift to 26.5 — the exact bug D1 records —
     /// and every test would stay green because tests never run against Release.
     ///
-    /// So this reads the project file itself and requires **every**
-    /// `IPHONEOS_DEPLOYMENT_TARGET` in it to be 18.0: project Debug/Release
-    /// plus three targets × two configurations.
+    /// So this reads the project file itself. A test runs inside the simulator
+    /// and cannot shell out to `xcodebuild -showBuildSettings`, so the literal
+    /// values in `project.pbxproj` are the only view of Release available from
+    /// here; `testNoConfigurationDefersToAnXcconfig` is what makes those
+    /// literals also the *effective* values.
+    ///
+    /// **The count is derived, not guessed.** Every `XCConfigurationList` in an
+    /// Xcode project holds one `XCBuildConfiguration` per configuration, and
+    /// this project has two (Debug, Release). Requiring
+    /// `settings == lists × 2` means a new target cannot arrive without
+    /// bringing its own pin, and an existing one cannot quietly drop it. The
+    /// previous floor of "at least 6" was arithmetically wrong — the project
+    /// plus three targets is four lists, so **eight** settings — and two of
+    /// them could be deleted with the test still green.
     func testEveryBuildConfigurationTargets18() throws {
-        let repoRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let pbxproj = repoRoot.appendingPathComponent("NADE.xcodeproj/project.pbxproj")
-        guard FileManager.default.fileExists(atPath: pbxproj.path) else {
-            throw XCTSkip("NADE.xcodeproj is not next to \(#filePath) — skipping the configuration sweep")
-        }
+        let text = try projectFile()
 
-        let text = try String(contentsOf: pbxproj, encoding: .utf8)
+        let lists = try NSRegularExpression(pattern: #"isa = XCConfigurationList;"#)
+            .numberOfMatches(in: text, range: NSRange(text.startIndex..., in: text))
+        XCTAssertGreaterThanOrEqual(lists, 4, "expected a configuration list for the project and each of the three targets")
+
         let regex = try NSRegularExpression(pattern: #"IPHONEOS_DEPLOYMENT_TARGET\s*=\s*([^;]+);"#)
         let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
 
-        XCTAssertGreaterThanOrEqual(
-            matches.count, 6,
-            "found only \(matches.count) IPHONEOS_DEPLOYMENT_TARGET settings — expected at least 6 (project + 3 targets, Debug and Release)"
+        XCTAssertEqual(
+            matches.count, lists * 2,
+            """
+            \(matches.count) IPHONEOS_DEPLOYMENT_TARGET settings for \(lists) configuration lists — \
+            expected \(lists * 2) (Debug and Release for the project and each target). \
+            A configuration with no pin inherits, which is exactly how Release drifts unnoticed.
+            """
         )
 
         var values: [String] = []
@@ -85,5 +97,37 @@ final class InfoPlistTests: XCTestCase {
             Set(values), ["18.0"],
             "IPHONEOS_DEPLOYMENT_TARGET is not 18.0 in every configuration: \(values)"
         )
+    }
+
+    /// The sweep above reads the values written *in* the project file. An
+    /// `.xcconfig` attached to any configuration would override them and the
+    /// sweep would never know, so the honest way to make the literals the
+    /// effective settings is to require that no configuration has one.
+    ///
+    /// (Still not claimed: `xcodebuild -xcconfig …` passed on the command line.
+    /// Nothing readable from inside the simulator can see that.)
+    func testNoConfigurationDefersToAnXcconfig() throws {
+        let text = try projectFile()
+        let references = try NSRegularExpression(pattern: #"baseConfigurationReference"#)
+            .numberOfMatches(in: text, range: NSRange(text.startIndex..., in: text))
+        XCTAssertEqual(
+            references, 0,
+            """
+            \(references) build configuration(s) point at an .xcconfig. The deployment-target sweep \
+            reads the project file's own values and cannot see through one.
+            """
+        )
+    }
+
+    /// EDGE (E16): an artefact-only run has no source tree.
+    private func projectFile() throws -> String {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let pbxproj = repoRoot.appendingPathComponent("NADE.xcodeproj/project.pbxproj")
+        guard FileManager.default.fileExists(atPath: pbxproj.path) else {
+            throw XCTSkip("NADE.xcodeproj is not next to \(#filePath) — skipping the configuration sweep")
+        }
+        return try String(contentsOf: pbxproj, encoding: .utf8)
     }
 }

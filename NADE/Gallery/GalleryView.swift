@@ -81,6 +81,19 @@ struct GalleryView: View {
                     accessibilitySizeSection
                     accessibilitySizeSectionContinued
                     motionSection
+
+                    // One screen of tail, so `scrollTo(_:anchor: .top)` can put
+                    // the **last** section at the top rather than clamping at
+                    // the bottom of the content.
+                    //
+                    // Without it, `-NADEGallerySection motion` landed on the
+                    // same frame as `ax5b` — the two screenshots came out
+                    // byte-identical, and `docs/screens/` claimed a Reduce
+                    // Motion shot that was really a second copy of AX5.
+                    Color.clear
+                        .frame(maxWidth: .infinity)
+                        .containerRelativeFrame(.vertical)
+                        .accessibilityHidden(true)
                 }
                 .padding(.bottom, Theme.Space.s8)
             }
