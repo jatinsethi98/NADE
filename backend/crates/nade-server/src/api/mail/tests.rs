@@ -1043,7 +1043,9 @@ async fn two_attachments_with_one_name_and_size_stay_distinct() {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK, "{att_id}");
-        let body = axum::body::to_bytes(response.into_body(), 1024).await.unwrap();
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap();
         assert_eq!(
             body.as_ref(),
             expected,

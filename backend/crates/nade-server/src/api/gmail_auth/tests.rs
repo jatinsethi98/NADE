@@ -265,7 +265,10 @@ async fn link_returns_a_start_url_and_audits_the_request() {
     assert!(expires_at.ends_with('Z'), "{expires_at}");
     let parsed = chrono::DateTime::parse_from_rfc3339(expires_at).expect("a real timestamp");
     let seconds = (parsed.to_utc() - chrono::Utc::now()).num_seconds();
-    assert!((595..=600).contains(&seconds), "ten minutes, got {seconds}s");
+    assert!(
+        (595..=600).contains(&seconds),
+        "ten minutes, got {seconds}s"
+    );
 
     // Two calls never collide, and the paper trail names the device.
     let second = capability_for(&app, &token).await;
@@ -318,7 +321,10 @@ async fn start_redirects_with_pkce_and_state() {
 
     // The browser is bound as well as the flow.
     let set_cookie = header_value(&response, header::SET_COOKIE);
-    assert!(set_cookie.starts_with(&format!("{BINDING_COOKIE}=")), "{set_cookie}");
+    assert!(
+        set_cookie.starts_with(&format!("{BINDING_COOKIE}=")),
+        "{set_cookie}"
+    );
     assert!(set_cookie.contains("HttpOnly"), "{set_cookie}");
     assert!(set_cookie.contains("SameSite=Lax"), "{set_cookie}");
     assert!(set_cookie.contains("Max-Age=600"), "{set_cookie}");
@@ -364,7 +370,9 @@ async fn start_without_a_capability_refuses() {
             "a refusal binds no browser: start{query:?}"
         );
         assert!(
-            body_text(response).await.contains("Start from the NADE app"),
+            body_text(response)
+                .await
+                .contains("Start from the NADE app"),
             "start{query:?}"
         );
     }
@@ -500,7 +508,9 @@ async fn the_oauth_routes_are_public_and_the_rest_are_not() {
 
     // ...including the route that authorises them.
     assert_eq!(
-        post_authed(&app, "/v1/auth/gmail/link", None).await.status(),
+        post_authed(&app, "/v1/auth/gmail/link", None)
+            .await
+            .status(),
         StatusCode::UNAUTHORIZED
     );
 
@@ -980,7 +990,9 @@ async fn an_unconfigured_server_explains_itself() {
     // The capability gate comes first, so an unauthorised caller cannot even
     // fingerprint the server's configuration.
     assert_eq!(
-        authed_get(&app, "/v1/auth/gmail/start", None).await.status(),
+        authed_get(&app, "/v1/auth/gmail/start", None)
+            .await
+            .status(),
         StatusCode::FORBIDDEN
     );
 
@@ -1014,10 +1026,7 @@ async fn a_failed_exchange_is_a_readable_page() {
     let started = start_flow(&app).await;
     let response = get_with(
         &app,
-        &format!(
-            "/v1/auth/gmail/callback?state={}&code=stale",
-            started.state
-        ),
+        &format!("/v1/auth/gmail/callback?state={}&code=stale", started.state),
         &[(header::COOKIE.as_str(), started.cookie.as_bytes())],
     )
     .await;
@@ -1046,7 +1055,10 @@ fn the_start_url_and_cookie_are_derived_from_the_registered_redirect() {
 
     // Behind a path-rewriting proxy.
     assert_eq!(
-        start_url("https://nade.example.com/api/v1/auth/gmail/callback", "beef"),
+        start_url(
+            "https://nade.example.com/api/v1/auth/gmail/callback",
+            "beef"
+        ),
         "https://nade.example.com/api/v1/auth/gmail/start?cap=beef"
     );
     assert_eq!(

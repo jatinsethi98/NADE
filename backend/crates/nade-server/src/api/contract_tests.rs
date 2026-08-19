@@ -280,7 +280,11 @@ fn thread_detail(name: &str) -> ThreadDetail {
 
 #[test]
 fn every_thread_detail_fixture_matches() {
-    for name in ["thread.json", "thread_html_only.json", "thread_partial.json"] {
+    for name in [
+        "thread.json",
+        "thread_html_only.json",
+        "thread_partial.json",
+    ] {
         assert_matches(&thread_detail(name), name);
     }
 }
@@ -319,7 +323,11 @@ fn the_partial_fixture_is_partial_and_shorter_than_its_row() {
 /// rather than against our own opinion.
 #[test]
 fn a_message_has_no_id_and_body_html_is_genuinely_nullable() {
-    for name in ["thread.json", "thread_html_only.json", "thread_partial.json"] {
+    for name in [
+        "thread.json",
+        "thread_html_only.json",
+        "thread_partial.json",
+    ] {
         for message in fixture(name)["messages"].as_array().unwrap() {
             assert!(
                 message.get("id").is_none(),

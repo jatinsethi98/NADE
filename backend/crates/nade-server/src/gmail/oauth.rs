@@ -997,7 +997,9 @@ mod tests {
         pending.remember_expiring_at(
             "fresh".into(),
             entry,
-            Instant::now().checked_sub(Duration::from_secs(540)).unwrap(),
+            Instant::now()
+                .checked_sub(Duration::from_secs(540))
+                .unwrap(),
         );
         assert!(pending.take("fresh").is_some());
     }
@@ -1029,7 +1031,10 @@ mod tests {
         assert_eq!(query_param("capacity=x", "cap"), None);
         // EDGE (unicode): decodable and undecodable bytes both come back as a
         // string rather than a panic.
-        assert_eq!(query_param("cap=%F0%9F%94%90", "cap").as_deref(), Some("🔐"));
+        assert_eq!(
+            query_param("cap=%F0%9F%94%90", "cap").as_deref(),
+            Some("🔐")
+        );
         assert!(query_param("cap=%FF%FE", "cap").is_some());
     }
 
@@ -1502,7 +1507,8 @@ mod tests {
         let db = crate::test_support::test_db().await;
         let store = std::sync::Arc::new(bare_store(db.pool.clone()));
 
-        let outcomes = race_consents(&store, ["jatinsethi98@gmail.com", "impostor@gmail.com"]).await;
+        let outcomes =
+            race_consents(&store, ["jatinsethi98@gmail.com", "impostor@gmail.com"]).await;
 
         let mut winner = None;
         let mut refusals = Vec::new();
@@ -1518,7 +1524,11 @@ mod tests {
         }
 
         let winner = winner.expect("one of the two consents has to succeed");
-        assert_eq!(refusals, vec![winner.to_owned()], "the 409 names the winner");
+        assert_eq!(
+            refusals,
+            vec![winner.to_owned()],
+            "the 409 names the winner"
+        );
 
         let emails: Vec<String> =
             sqlx::query_scalar("select email from accounts order by created_at, id")
@@ -1556,11 +1566,8 @@ mod tests {
         let db = crate::test_support::test_db().await;
         let store = std::sync::Arc::new(bare_store(db.pool.clone()));
 
-        let outcomes = race_consents(
-            &store,
-            ["jatinsethi98@gmail.com", "JatinSethi98@Gmail.com"],
-        )
-        .await;
+        let outcomes =
+            race_consents(&store, ["jatinsethi98@gmail.com", "JatinSethi98@Gmail.com"]).await;
 
         let ids: Vec<Uuid> = outcomes
             .into_iter()

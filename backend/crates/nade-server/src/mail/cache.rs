@@ -162,13 +162,12 @@ pub async fn ensure_thread_complete(
     account_id: Uuid,
     thread_id: &str,
 ) -> ApiResult<Completeness> {
-    let already: Option<bool> = sqlx::query_scalar(
-        "select complete from threads where account_id = $1 and thread_id = $2",
-    )
-    .bind(account_id)
-    .bind(thread_id)
-    .fetch_optional(&state.pool)
-    .await?;
+    let already: Option<bool> =
+        sqlx::query_scalar("select complete from threads where account_id = $1 and thread_id = $2")
+            .bind(account_id)
+            .bind(thread_id)
+            .fetch_optional(&state.pool)
+            .await?;
     if already == Some(true) {
         return Ok(Completeness::Complete);
     }

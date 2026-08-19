@@ -601,7 +601,10 @@ fn cap_body_text(text: String) -> String {
 /// rejects outright, taking the whole `insert` — and therefore the whole sync —
 /// with it.
 fn scrub_html_controls(html: &str) -> String {
-    if !html.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')) {
+    if !html
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    {
         return html.to_owned(); // the overwhelming majority; no allocation
     }
     html.chars()
@@ -1235,15 +1238,23 @@ Content-Type: text/html; charset=\"utf-8\"\r\n\r\n\
         let parsed = parse(&raw, "nul-test").expect("parses");
         let html = parsed.body_html.expect("a genuine text/html part");
 
-        assert!(!html.contains('\u{0}'), "a NUL survived into body_html: {html:?}");
+        assert!(
+            !html.contains('\u{0}'),
+            "a NUL survived into body_html: {html:?}"
+        );
         assert!(
             html.contains("beforeafter"),
             "the surrounding text must survive: {html:?}"
         );
         // HTML's own whitespace is content, not a control character to strip.
-        assert!(html.contains('\t'), "a tab is legal in HTML source: {html:?}");
         assert!(
-            !html.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')),
+            html.contains('\t'),
+            "a tab is legal in HTML source: {html:?}"
+        );
+        assert!(
+            !html
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')),
             "some other control character survived: {html:?}"
         );
     }
@@ -1254,20 +1265,32 @@ Content-Type: text/html; charset=\"utf-8\"\r\n\r\n\
     fn no_live_message_yields_a_control_character_postgres_would_reject() {
         let dir = live_dir();
         if !dir.is_dir() {
-            println!("live control-character check: skipped, {} is absent", dir.display());
+            println!(
+                "live control-character check: skipped, {} is absent",
+                dir.display()
+            );
             return;
         }
         let mut checked = 0usize;
         let mut offenders = Vec::new();
-        for entry in std::fs::read_dir(&dir).expect("reading the live sample").flatten() {
+        for entry in std::fs::read_dir(&dir)
+            .expect("reading the live sample")
+            .flatten()
+        {
             let path = entry.path();
             if path.extension().is_none_or(|e| e != "eml") {
                 continue;
             }
             let raw = std::fs::read(&path).expect("reading a message");
-            let Ok(parsed) = parse(&raw, "live") else { continue };
+            let Ok(parsed) = parse(&raw, "live") else {
+                continue;
+            };
             checked += 1;
-            let name = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            let name = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             for (field, value) in [
                 ("subject", Some(parsed.subject.as_str())),
                 ("body_text", Some(parsed.body_text.as_str())),

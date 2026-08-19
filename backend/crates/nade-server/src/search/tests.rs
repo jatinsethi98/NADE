@@ -893,7 +893,11 @@ async fn a_thread_found_by_search_is_completed_when_it_is_opened() {
         .collect();
     assert_eq!(
         subjects,
-        vec!["the original terms", "the sublet clause", "signing this week"]
+        vec![
+            "the original terms",
+            "the sublet clause",
+            "signing this week"
+        ]
     );
 }
 
