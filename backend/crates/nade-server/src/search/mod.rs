@@ -184,7 +184,27 @@ async fn hydrate(
     refs: &[MessageRef],
 ) -> ApiResult<()> {
     let ids: Vec<String> = refs.iter().map(|entry| entry.id.clone()).collect();
-    cache::fetch_missing(state, account_id, client, &ids).await
+    let unresolved = cache::fetch_missing(state, account_id, client, &ids).await?;
+
+    // A result Gmail matched but we could not fetch is dropped from the page by
+    // `rows_in_gmail_order`, and a short page is indistinguishable from "there
+    // were fewer matches". `ThreadsResponse` has nowhere to say so yet, so at
+    // minimum the loss is recorded rather than silent.
+    if !unresolved.is_empty() {
+        tracing::warn!(
+            count = unresolved.len(),
+            "search results Gmail matched but we could not hydrate"
+        );
+        store::audit(
+            &state.pool,
+            account_id,
+            "search_hydration_incomplete",
+            serde_json::json!({ "unresolved": unresolved }),
+        )
+        .await
+        .ok();
+    }
+    Ok(())
 }
 
 /// The thread rows for `order`, **in `order`** - Gmail's relevance ranking,

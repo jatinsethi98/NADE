@@ -386,68 +386,68 @@ impl Simulator {
     }
 
     /// Answer one request that arrived inside a batch.
+    ///
+    /// Latency is stamped on **one** line, at the end. It used to be assigned at
+    /// each of the eight exit paths, which made a new early return silently drop
+    /// the `Delay` fault's delay - and that delay is the only thing the HTTP
+    /// transport sleeps on, so a client-timeout test would have gone green
+    /// against a server that never waited.
     fn dispatch(&self, request: &SimRequest, in_batch: bool) -> SimResponse {
-        let now = self.clock.now_ms();
-
         // 1. Faults, before anything else: they stand in for the network and the
         //    front end, which do not care whether the token is any good.
         let verdict = self.lock().faults.verdict(request, in_batch);
-        if let Some(fault) = verdict.fault {
-            let mut response = self.apply_fault(&fault);
-            response.latency = verdict.delay;
-            return response;
-        }
+        let mut response = match verdict.fault {
+            Some(fault) => self.apply_fault(&fault),
+            None => self.route_and_run(request, in_batch),
+        };
+        response.latency = verdict.delay;
+        response
+    }
+
+    /// Everything after the fault check: auth, routing, quota, and the work.
+    fn route_and_run(&self, request: &SimRequest, in_batch: bool) -> SimResponse {
+        let now = self.clock.now_ms();
 
         // 2. The OAuth token endpoint is not a Gmail API call: no bearer, no
         //    quota.
         if is_token_endpoint(&request.path) {
-            let mut response = self.handle_token(request);
-            response.latency = verdict.delay;
-            return response;
+            return self.handle_token(request);
         }
 
         // 3. Authorization.
         if let Some(error) = self.check_auth(request) {
-            let mut response = error_response(&error);
-            response.latency = verdict.delay;
-            return response;
+            return error_response(&error);
         }
 
         // 4. Route, so the quota cost is known…
         let Some((user, route)) = Route::of(request) else {
-            let mut response = error_response(&ApiError::NotFound);
-            response.latency = verdict.delay;
-            return response;
+            return error_response(&ApiError::NotFound);
         };
         // …and a request addressed to somebody else's mailbox is a 404, not a
         // silent redirect to this one. Gmail accepts `me` or the authenticated
         // address and nothing else.
         if user != "me" && user != self.config.email_address {
-            let mut response = error_response(&ApiError::NotFound);
-            response.latency = verdict.delay;
-            return response;
+            return error_response(&ApiError::NotFound);
         }
         // …and a batch inside a batch is refused before it can recurse.
         if matches!(route, Route::Batch) && in_batch {
-            let mut response = error_response(&ApiError::InvalidArgument(
+            return error_response(&ApiError::InvalidArgument(
                 "Batch requests cannot be nested.".to_owned(),
             ));
-            response.latency = verdict.delay;
-            return response;
         }
 
         // 5. Quota.
         if let Some(error) = self.lock().quota.charge(route.cost(), now) {
-            let mut response = error_response(&error);
-            if error == ApiError::TooManyRequests {
-                response = response.with_header("Retry-After", "1");
-            }
-            response.latency = verdict.delay;
-            return response;
+            let response = error_response(&error);
+            return if error == ApiError::TooManyRequests {
+                response.with_header("Retry-After", "1")
+            } else {
+                response
+            };
         }
 
         // 6. The work.
-        let mut response = match route {
+        match route {
             Route::Profile => self.handle_profile(),
             Route::LabelsList => self.handle_labels_list(),
             Route::LabelGet(id) => self.handle_label_get(&id),
@@ -462,9 +462,7 @@ impl Simulator {
             Route::Watch => self.handle_watch(request, now),
             Route::Stop => self.handle_stop(),
             Route::Batch => self.handle_batch(request),
-        };
-        response.latency = verdict.delay;
-        response
+        }
     }
 
     fn apply_fault(&self, fault: &Fault) -> SimResponse {

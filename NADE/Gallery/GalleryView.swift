@@ -49,7 +49,9 @@ struct GalleryView: View {
     /// UIKit scope's `underlineColor` all lose to the run's foreground, so the
     /// rule renders in ink. The faithful accent rule needs per-span layout,
     /// which P3 has to build anyway because the spans are separately tappable.
-    private static var draftSentence: AttributedString {
+    // `let`, not `var`: as a computed property this rebuilt five attributed runs
+    // and four concatenations on every render of the card section.
+    private static let draftSentence: AttributedString = {
         func run(_ text: String, underlined: Bool = false) -> AttributedString {
             var s = AttributedString(text)
             s.foregroundColor = Theme.Color.ink
@@ -61,7 +63,7 @@ struct GalleryView: View {
             + run(", ")
             + run("write a note with the next steps", underlined: true)
             + run(".")
-    }
+    }()
 
     var body: some View {
         ScrollViewReader { proxy in

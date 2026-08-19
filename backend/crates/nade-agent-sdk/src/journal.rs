@@ -68,8 +68,13 @@ impl Entry {
     }
 
     /// Read the payload back as one of this module's payload types.
+    ///
+    /// Borrows rather than cloning: this used to be `from_value(payload.clone())`,
+    /// a full tree copy per entry, dropped the instant `from_value` consumed it.
+    /// Replay runs on every `run`, `resume` and `cancel`, so an agent that parks
+    /// on three approvals paid it four times over the whole journal.
     pub fn payload_as<P: DeserializeOwned>(&self, run: RunId) -> Result<P> {
-        serde_json::from_value(self.payload.clone()).map_err(|err| Error::CorruptJournal {
+        P::deserialize(&self.payload).map_err(|err| Error::CorruptJournal {
             run,
             message: format!(
                 "entry {} ({}) has an unreadable payload: {err}",

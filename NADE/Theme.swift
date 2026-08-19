@@ -15,6 +15,7 @@
 //  claim).
 //
 
+import os
 import SwiftUI
 
 // MARK: - Namespace
@@ -494,11 +495,27 @@ struct NLineHeightModifier: ViewModifier {
     /// Dynamic Type size. Exposed so `NLineHeightTests` can assert the
     /// arithmetic against a measured render rather than re-deriving it.
     static func delta(multiple: CGFloat, size: CGFloat, face: String) -> CGFloat {
+        size * multiple - naturalLineHeight(face: face, size: size)
+    }
+
+    /// The face's own line box, memoised.
+    ///
+    /// `UIFont(name:size:)` is a Core Text descriptor lookup, and this is called
+    /// from `body` — so it ran again for every label, tag, card title and button
+    /// on every re-evaluation. A mail row is ~7 lookups; the gallery is 100+.
+    /// The answer depends only on `(face, size)`, and both come from the fixed
+    /// DESIGN.md type table.
+    private static func naturalLineHeight(face: String, size: CGFloat) -> CGFloat {
+        let key = "\(face)|\(size)"
+        if let known = naturalLineHeights.withLock({ $0[key] }) { return known }
         // EDGE (E8): if the face is missing this falls back to a nominal 1.2
         // rather than crashing — the font-load test is what fails loudly.
         let natural = UIFont(name: face, size: size)?.lineHeight ?? size * 1.2
-        return size * multiple - natural
+        naturalLineHeights.withLock { $0[key] = natural }
+        return natural
     }
+
+    private static let naturalLineHeights = OSAllocatedUnfairLock(initialState: [String: CGFloat]())
 
     func body(content: Content) -> some View {
         let delta = Self.delta(multiple: multiple, size: size, face: face)

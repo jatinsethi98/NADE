@@ -28,6 +28,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     rc::Rc,
+    sync::LazyLock,
 };
 
 use lol_html::{
@@ -742,8 +743,6 @@ pub fn decode_entities(text: &str) -> String {
     if !text.contains('&') {
         return text.to_owned();
     }
-    let table: HashMap<&str, char> = NAMED.iter().copied().collect();
-
     let mut out = String::with_capacity(text.len());
     let bytes = text.as_bytes();
     let mut index = 0usize;
@@ -769,7 +768,7 @@ pub fn decode_entities(text: &str) -> String {
         match text[index..limit].find(';') {
             Some(offset) if offset > 1 => {
                 let body = &text[index + 1..index + offset];
-                if let Some(character) = decode_one(body, &table) {
+                if let Some(character) = decode_one(body) {
                     out.push(character);
                     index += offset + 1;
                     continue;
@@ -786,7 +785,15 @@ pub fn decode_entities(text: &str) -> String {
     out
 }
 
-fn decode_one(body: &str, table: &HashMap<&str, char>) -> Option<char> {
+/// [`NAMED`] as a lookup, built once.
+///
+/// It used to be `NAMED.iter().collect()` inside `decode_entities`, which meant
+/// rebuilding 163 entries on every call - and the call is per text chunk during
+/// extraction, per message during parse, and per row during ingest. A full sync
+/// paid for the table thousands of times to answer a handful of lookups.
+static TABLE: LazyLock<HashMap<&str, char>> = LazyLock::new(|| NAMED.iter().copied().collect());
+
+fn decode_one(body: &str) -> Option<char> {
     if let Some(digits) = body.strip_prefix('#') {
         let code = if let Some(hex) = digits
             .strip_prefix('x')
@@ -799,7 +806,7 @@ fn decode_one(body: &str, table: &HashMap<&str, char>) -> Option<char> {
         // EDGE (unicode): surrogates and out-of-range values are not chars.
         return char::from_u32(code);
     }
-    table.get(body).copied()
+    TABLE.get(body).copied()
 }
 
 #[cfg(test)]

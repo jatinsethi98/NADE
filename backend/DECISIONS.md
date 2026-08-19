@@ -467,3 +467,44 @@ Two smaller things fell out of the same transaction:
   `AppState::account`, `oauth::existing_account_email`,
   `api::auth::singleton_account` — now orders by `created_at, id`, so two calls
   inside one request cannot disagree.
+
+## D29 — The control-character scrub moved to the writer, after a third instance.
+
+`storable()` in `sync/store.rs` now sits on every text column `upsert_message`
+binds. The three instances, in order:
+
+1. `body_text` — a `NUL` in a body killed the first live sync. Fixed beside the
+   extractor, which normalises text.
+2. `body_html` — a *sibling* derived from the same source that never passes
+   through the extractor. Killed the sync again, four attempts each.
+3. `snippet` — found by review, not by an outage. `IngestRow::metadata_only`
+   runs Gmail's own snippet through `html::decode_entities`, and `&#0;` decodes
+   to a literal `NUL` via `char::from_u32`. `parse::snippet` only collapses
+   whitespace, and `NUL` is not `White_Space`. So a message whose MIME failed to
+   parse — the path that exists so a parse failure is survivable — could take
+   the whole insert down.
+
+Three fixes at the value, three escapes. The rule belongs at the **writer**: one
+function writes a `messages` row, so putting it there makes the guarantee true
+for every column, including the ones P4 adds, without anyone remembering.
+
+The general shape, stated once: **a guarantee attached to a value protects that
+value. Attach it to the chokepoint the values pass through.**
+
+## D30 — Search hydration reports what it could not fetch.
+
+`cache::fetch_missing` matched on `BatchOutcome::Failed { .. }`, logged, and
+returned `Ok(())`. The client has already decided which failures are worth
+retrying (`gmail::types::is_transient`) — the sync consumes that field and fails
+the job rather than advancing its cursor, which is what stopped the first live
+sync losing 77 messages to a transient 429. The search path threw the same
+answer away.
+
+The visible symptom: a throttle mid-search drops the message,
+`rows_in_gmail_order` filters the thread out, and the user gets a short page
+indistinguishable from "there were fewer matches".
+
+`fetch_missing` now returns the ids it could not resolve, and search records an
+audit row. **This is not the whole fix.** `ThreadsResponse` has no `partial`
+field, so the response still cannot say so — `ThreadDetail` gained one (D26) and
+the threads list should too. Recorded rather than half-done quietly.

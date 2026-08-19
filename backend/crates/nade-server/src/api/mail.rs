@@ -386,7 +386,7 @@ pub async fn attachment(
     // can share a name and a size, so identifying the requested one against
     // Gmail needs to know how many siblings look exactly like it.
     let siblings: Vec<StoredAttachment> = sqlx::query_as(
-        "select a.att_id, a.name, a.mime, a.size_bytes, a.content_id, a.ordinal \
+        "select a.att_id, a.name, a.mime, a.size_bytes, a.content_id \
            from attachments a \
            join messages m on m.id = a.message_id \
           where m.account_id = $1 and m.gmail_id = $2 \
@@ -625,9 +625,10 @@ async fn mailbox_name_for(
 /// The two sides are produced by different parsers, so the part *tree* cannot
 /// be walked position-for-position. What survives that mismatch is identity:
 /// a `Content-ID` is unique within a message and settles it outright, and
-/// failing that, a name and a size narrow it to a candidate list whose order
-/// both parsers agree on - leaving `ordinal` to say which of the identical
-/// twins was asked for.
+/// failing that, a name and a size narrow it to a candidate list. Which of the
+/// identical twins was asked for is then its **position** among the stored
+/// look-alikes - `siblings` arrives ordered by `attachments.ordinal`, the
+/// part-tree order, which is the one thing both parsers agree on.
 async fn fetch_attachment_bytes(
     state: &AppState,
     account_id: Uuid,
@@ -862,17 +863,13 @@ struct AttachmentRow {
     inline: bool,
 }
 
-#[derive(Debug, sqlx::FromRow)]
-#[derive(Clone)]
+#[derive(Debug, Clone, sqlx::FromRow)]
 struct StoredAttachment {
     att_id: String,
     name: String,
     mime: String,
     size_bytes: i64,
     content_id: Option<String>,
-    /// Position among the message's attachments, in part-tree order.
-    #[allow(dead_code)]
-    ordinal: i32,
 }
 
 #[cfg(test)]

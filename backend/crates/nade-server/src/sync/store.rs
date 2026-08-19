@@ -5,6 +5,8 @@
 //! makes a crashed sync safe to re-run and a duplicate job delivery a no-op
 //! rather than a second copy of the mailbox (edge cases 3 and 4).
 
+use std::borrow::Cow;
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
@@ -125,6 +127,36 @@ impl IngestRow {
     }
 }
 
+/// Anything on its way into a `text` column, with the bytes PostgreSQL refuses
+/// removed.
+///
+/// **This is the third time this bug has been written.** A `NUL` in a body
+/// killed the first live sync; the fix scrubbed `body_text`, and `body_html` -
+/// a sibling derived from the same source - killed it again. The third was
+/// `snippet`: `metadata_only` runs Gmail's snippet through
+/// `html::decode_entities`, and `&#0;` decodes to a literal `NUL`, so a
+/// message whose MIME failed to parse could take the whole statement down.
+///
+/// So the rule now lives at the **writer** rather than beside each value. Every
+/// text column this function binds goes through here, including the ones a
+/// later phase adds, and no future constructor has to remember.
+///
+/// Borrowed for the overwhelming majority, which carry nothing to remove.
+fn storable(text: &str) -> Cow<'_, str> {
+    if text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+    {
+        Cow::Owned(
+            text.chars()
+                .filter(|c| !c.is_control() || matches!(c, '\n' | '\r' | '\t'))
+                .collect(),
+        )
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
 /// Write one message and its attachment metadata.
 ///
 /// # Errors
@@ -162,14 +194,14 @@ pub async fn upsert_message(
     .bind(&row.thread_id)
     .bind(row.history_id)
     .bind(row.internal_ts)
-    .bind(&row.from_name)
-    .bind(&row.from_email)
+    .bind(storable(&row.from_name))
+    .bind(storable(&row.from_email))
     .bind(serde_json::to_value(&row.to)?)
     .bind(serde_json::to_value(&row.cc)?)
-    .bind(&row.subject)
-    .bind(&row.snippet)
-    .bind(&row.body_text)
-    .bind(row.body_html.as_ref())
+    .bind(storable(&row.subject))
+    .bind(storable(&row.snippet))
+    .bind(storable(&row.body_text))
+    .bind(row.body_html.as_deref().map(storable))
     .bind(&row.label_ids)
     .bind(!row.attachments.is_empty())
     .fetch_one(&mut **tx)
@@ -341,4 +373,70 @@ pub async fn audit(
     .execute(pool)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gmail::types::GmailMessage;
+
+    /// The third instance of the bug that killed the live sync twice.
+    ///
+    /// `metadata_only` runs Gmail's own snippet through `decode_entities`, and
+    /// `&#0;` decodes to a literal `NUL`. `parse::snippet` only collapses
+    /// whitespace, and a `NUL` is not `White_Space`, so it survived into the
+    /// insert and PostgreSQL rejected the whole statement — failing the job on
+    /// every attempt, exactly as before.
+    ///
+    /// The guarantee now lives at the writer, so this asserts the writer's
+    /// helper rather than one field's constructor.
+    #[test]
+    fn a_gmail_snippet_cannot_carry_a_nul_into_a_text_column() {
+        let mut message = GmailMessage {
+            id: "18f2a1b3c4d5e6f7".to_owned(),
+            ..GmailMessage::default()
+        };
+        message.snippet = Some("Invoice&#0; attached&#1;".to_owned());
+
+        let row = IngestRow::metadata_only(&message);
+        assert!(
+            row.snippet.contains('\u{0}'),
+            "the entity decoder really does produce the byte Postgres refuses; \
+             without that this test proves nothing"
+        );
+
+        let stored = storable(&row.snippet);
+        assert!(
+            !stored.chars().any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t'),
+            "a control character reached a text column: {stored:?}"
+        );
+        assert_eq!(stored, "Invoice attached");
+    }
+
+    /// Every text column the writer binds, not just the one that broke last.
+    #[test]
+    fn the_scrub_is_the_writers_rule_and_covers_every_field() {
+        for hostile in [
+            "sub\u{0}ject",
+            "na\u{1}me",
+            "bo\u{7}dy",
+            "\u{0}",
+            "html\u{0}body",
+        ] {
+            let clean = storable(hostile);
+            assert!(
+                !clean.chars().any(char::is_control),
+                "{hostile:?} survived as {clean:?}"
+            );
+        }
+
+        // EDGE (the common case): nothing to remove means nothing allocated.
+        assert!(matches!(storable("ordinary text\nwith a newline"), Cow::Borrowed(_)));
+        // Newline, carriage return and tab are legal in a text column and are
+        // real content in a mail body.
+        assert_eq!(storable("a\nb\tc\rd"), "a\nb\tc\rd");
+        // EDGE (empty input / unicode).
+        assert_eq!(storable(""), "");
+        assert_eq!(storable("配送のお知らせ 🚀"), "配送のお知らせ 🚀");
+    }
 }

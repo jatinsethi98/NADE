@@ -28,18 +28,23 @@ use crate::{
 /// the rollups of every thread touched.
 ///
 /// A whole batch failing is an error - a page missing ten of its results is not
-/// a result. A *single* sub-request failing is logged and skipped, because
-/// losing one row is better than losing the other forty-nine.
+/// a result. A *single* sub-request failing does not sink the rest, but it is
+/// **returned** rather than only logged: the caller is the only one that knows
+/// whether an absent message is survivable, and an id that quietly disappears
+/// here becomes a short page the reader cannot tell from "no more results".
+///
+/// Returns the ids it could not resolve.
 pub async fn fetch_missing(
     state: &AppState,
     account_id: Uuid,
     client: &GmailClient,
     ids: &[String],
-) -> ApiResult<()> {
+) -> ApiResult<Vec<String>> {
     // EDGE (empty input): nothing matched, so nothing is fetched.
     if ids.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
+    let mut unresolved: Vec<String> = Vec::new();
 
     // EDGE (duplicate delivery): Gmail can list one id twice across a thread and
     // a query; fetching it twice would be waste, not corruption, but the `any()`
@@ -66,7 +71,7 @@ pub async fn fetch_missing(
         .filter(|id| !cached.contains(id))
         .collect();
     if misses.is_empty() {
-        return Ok(());
+        return Ok(unresolved);
     }
 
     for chunk in misses.chunks(MAX_BATCH) {
@@ -102,13 +107,18 @@ pub async fn fetch_missing(
                 BatchOutcome::Gone { gmail_id } => {
                     tracing::debug!(%gmail_id, "message vanished between list and get");
                 }
+                // A throttle or a 5xx. The client already decided which
+                // failures are worth asking about again (`gmail::types::
+                // is_transient`), and throwing that answer away is how the
+                // first live sync lost 77 messages to a transient 429.
                 BatchOutcome::Failed {
                     gmail_id,
                     status,
                     detail,
-                    ..
+                    transient,
                 } => {
-                    tracing::warn!(%gmail_id, status, %detail, "could not hydrate a message");
+                    tracing::warn!(%gmail_id, status, %detail, transient, "could not hydrate a message");
+                    unresolved.push(gmail_id);
                 }
             }
         }
@@ -120,7 +130,7 @@ pub async fn fetch_missing(
         }
     }
 
-    Ok(())
+    Ok(unresolved)
 }
 
 /// What a thread read got: the whole conversation, or as much of it as we hold.

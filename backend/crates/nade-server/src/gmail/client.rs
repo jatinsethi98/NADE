@@ -256,8 +256,14 @@ impl GmailClient {
     /// # Errors
     /// [`GmailError::NotFound`] when the message vanished between list and get.
     pub async fn get_message_raw(&self, id: &str) -> Result<GmailMessage, GmailError> {
+        self.get_message(id, "raw").await
+    }
+
+    /// One `users.messages.get`, in whichever format the caller needs. The three
+    /// wrappers exist for their doc comments, not their bodies.
+    async fn get_message(&self, id: &str, format: &str) -> Result<GmailMessage, GmailError> {
         self.get_json(
-            &format!("/gmail/v1/users/me/messages/{}?format=raw", encode(id)),
+            &format!("/gmail/v1/users/me/messages/{}?format={format}", encode(id)),
             quota::cost::MESSAGES_GET,
         )
         .await
@@ -268,11 +274,7 @@ impl GmailClient {
     /// # Errors
     /// [`GmailError::NotFound`] when the message is gone.
     pub async fn get_message_metadata(&self, id: &str) -> Result<GmailMessage, GmailError> {
-        self.get_json(
-            &format!("/gmail/v1/users/me/messages/{}?format=metadata", encode(id)),
-            quota::cost::MESSAGES_GET,
-        )
-        .await
+        self.get_message(id, "metadata").await
     }
 
     /// `users.messages.get?format=full` - the part tree, which is the only place
@@ -281,11 +283,7 @@ impl GmailClient {
     /// # Errors
     /// [`GmailError::NotFound`] when the message is gone.
     pub async fn get_message_full(&self, id: &str) -> Result<GmailMessage, GmailError> {
-        self.get_json(
-            &format!("/gmail/v1/users/me/messages/{}?format=full", encode(id)),
-            quota::cost::MESSAGES_GET,
-        )
-        .await
+        self.get_message(id, "full").await
     }
 
     /// `users.threads.get?format=minimal` - the thread's whole message list,

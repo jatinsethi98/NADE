@@ -122,7 +122,10 @@ impl SyncOptions {
 }
 
 /// What one sync did. Written to `audit_log` and returned for the tests.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// `Serialize` is what puts it in the audit trail: both audit sites used to
+/// transcribe the fields by hand, and a field added here reached neither.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct SyncReport {
     pub labels: usize,
     pub listed: usize,
@@ -403,16 +406,18 @@ async fn sync_window(
             pool,
             account_id,
             "gmail_sync_incomplete",
-            json!({
-                "listed": report.listed,
-                "ingested": report.ingested,
-                "unresolved": report.unresolved,
-                "retry_rounds": report.retry_rounds,
-                "threads": report.threads,
-                "batches": report.batches,
-                "history_id_withheld": report.history_id,
-                "unresolved_sample": sample,
-            }),
+            {
+                let mut entry = serde_json::to_value(&report)
+                    .unwrap_or_else(|_| json!({"listed": report.listed}));
+                if let Some(fields) = entry.as_object_mut() {
+                    fields.insert("unresolved_sample".to_owned(), json!(sample));
+                    // The history id was computed and deliberately *not* stored:
+                    // the cursor stays where it was so the next sync re-lists
+                    // what this one could not fetch.
+                    fields.insert("history_id_recorded".to_owned(), json!(false));
+                }
+                entry
+            },
         )
         .await?;
         tracing::error!(
@@ -435,18 +440,7 @@ async fn sync_window(
         pool,
         account_id,
         "gmail_sync_completed",
-        json!({
-            "listed": report.listed,
-            "ingested": report.ingested,
-            "vanished": report.vanished,
-            "parse_failures": report.parse_failures,
-            "fetch_failures": report.fetch_failures,
-            "retried": report.retried,
-            "retry_rounds": report.retry_rounds,
-            "threads": report.threads,
-            "batches": report.batches,
-            "history_id": report.history_id,
-        }),
+        serde_json::to_value(&report).unwrap_or_else(|_| json!({"listed": report.listed})),
     )
     .await?;
 
