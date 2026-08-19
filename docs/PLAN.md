@@ -59,7 +59,11 @@ v1 takes **no outbound actions**. Agents observe, search, take notes, and prepar
 
 ### Ask routing (one field, three intents)
 
-Everything from the unified field goes to `POST /v1/ask`. Server classifies (heuristics first: quoted strings / `from:` → search; imperative "when…"/"every…" → agent; else cheap model) and streams a typed SSE session: first event `route {"kind":"answer"|"results"|"agent_draft"}`, then `token`/`done` for answers, `results {threads:[…]}` + `done` for searches, or `draft {name, nl_definition, spec_preview}` + `done` for agent drafts — client renders the 1a states accordingly; saving the draft POSTs `/v1/agents`. `GET /v1/search` remains for the Mail tab's plain search box.
+Everything from the unified field goes to `POST /v1/ask`. Server classifies (heuristics first: quoted strings / `from:` → search; imperative "when…"/"every…" → agent; else cheap model) and streams a typed SSE session: first event `route {"kind":"answer"|"results"|"agent_draft"}`, then `token`/`done` for answers, `results {threads:[…]}` + `done` for searches, or `draft {name, nl_definition, spec_preview}` + `done` for agent drafts — client renders the 1a states accordingly; saving the draft POSTs `/v1/agents`. `GET /v1/search` remains as the whole-mailbox search endpoint. **It has no
+screen in v1**: `DESIGN.md` §1e draws no search field on the mail list, and the
+mockup's only search pill is 1h Notes'. The sentence that used to promise "the
+Mail tab's plain search box" described a screen that does not exist in the
+design; the endpoint is reached through Ask and by the agents' `search_mail`.
 
 ### Recorded deviations
 
@@ -243,11 +247,71 @@ HTML mail: `body_text` native; "View original" = locked WKWebView (JS off, remot
 
 **P2 — Mail lands. [backend] ∥ [ios]**
 - [backend] OAuth PKCE flow, token rotation persistence, `needs_reauth` path, quota-bucket client with real multipart batch, **30-day sync (≤2000 msgs)**, mailboxes/threads/thread/search/me. ✓ wiremock suite green (list/get/batch/history/429/rotation); live: search returns a DB-derived subject's id; fixtures byte-match.
-- [ios] Mail list + chips, thread + agent card, mailboxes on fixtures; GRDB store + ValueObservation. ✓ build test green; decode tests; screenshots saved.
+- [ios] Mailboxes (1g, the tab root), mail list + chips (1e), thread + agent
+  card (1f); GRDB store + ValueObservation; **live HTTP client, pairing, and
+  1k's CONNECTION + ACCOUNT sections** — see the scope note below.
+  **205 unit + 37 UI tests green**, twice consecutively on iPhone 17 Pro and on
+  iPhone SE (3rd gen), no warnings; 22 screenshots in `docs/screens/p2-*`, all
+  distinct by hash; the Release build carries no fixture mail. An adversarial
+  Codex review of the finished lane returned 19 findings — a dead server-URL
+  field, an empty `mailboxes: []` destroying the cache, `needs_reauth` handled
+  on only one of three request paths, and sixteen more — all resolved.
+
+**Scope moved into P2 (decided 2026-08-19).** The lane was specified "on
+fixtures", with networking at the P5 gate and Settings at P3. It shipped live
+instead: a `URLSession` client over the six read endpoints, `POST /auth/pair`
+with an origin-bound Keychain credential, and the two sections of 1k whose
+backing already existed. What moved, and what deliberately did **not**:
+
+| Moved into P2 | Stayed where it was |
+|---|---|
+| HTTP client, error envelope, `Retry-After`, `409 needs_reauth` | Feed, approve/skip round-trip, outbox (**P5**) |
+| Pairing + Keychain + server URL | Home feed, Ask states, agents, schedule sheet (**P3**) |
+| 1k **CONNECTION** and **ACCOUNT** only | 1k **AGENTS**, **READING**, `disclosure` footer (**P7** — no `/settings` or `/runs` route exists) |
+| The Gmail link flow (`POST /auth/gmail/link`) | Attachments proxy, "View original" WKWebView (**P3**) |
+| Offline degradation + the unreachable-host XCUITest | Push, SSE, `/ask` — including 1f's ask bar (**P6**) |
+
+The fixture world did not go away: it is DEBUG-only, launch-argument selected,
+and backed by its own database file, because the live P2 backend serves
+`agent_cards: []` and `agent_note: null` until P4/P5, so the agent card can only
+be *seen* against fixtures.
+
+**Work that P2 pulled out of other phases, so nobody looks for it twice:**
+
+| Now done | Was going to be |
+|---|---|
+| `Lora-Italic.ttf`, `Theme.Font.bodyItalic`, `UIAppFonts` 4 → 5 | P1's design system. `Font.italic()` on a family with no italic member renders the roman silently, and 1e's caption, 1f's footer and every state caption are italic |
+| `docs/contract/thread_partial.json`, wired into `validate.py` **and** `api/contract_tests.rs` | never existed. `API.md` §2 has always said clients must surface `partial`; nothing on either lane had ever serialised it. It also corrected `validate.py`, which required `msg_count == len(messages)` — right for a complete thread, wrong for a partial one |
+| `TARGETED_DEVICE_FAMILY = 1`, portrait only | never decided. The target advertised iPad and landscape, which `DESIGN.md`'s single 402 × 874 frame has no layout for and no criterion covered |
+| `scripts/screenshots.sh`, checked in | P1 kept its shot script in a scratchpad (D25). This one pins a clock, a time zone and a status bar, and none of that survives being retyped |
+| `scripts/assert-release-has-no-fixtures.sh` | new. A Release build must not ship the DEBUG fixture mail, and no test can check a configuration tests never run in |
+
+**Things a later phase should expect to find already true:**
+
+- 1g is the Mail tab's **root**; 1e and 1f are pushed from it, and 1k is pushed
+  from 1g. `AppNavigation` (hoisted above `RootTabView`) owns the selection, the
+  mail path and the selected mailbox — that is where P6's push deep link lands.
+- The tab bar is conditional. Visibility is a property of the **active tab's top
+  route**, not of stack depth: 1e, 1g and 1k all keep it and only 1f hides it.
+- `import GRDB` lives only in `NADE/Store/`, `URLSession` only in `NADE/API/`,
+  and `ModuleBoundaryTests` enforces both.
+- Time crosses the wire, the database and the screen through **one** formatter.
+  `-NADENow` pins it for a screenshot or a test.
+- There is **no local read-marker**, and no column for one. `API.md` §2 forbids
+  it and the schema makes it unwritable.
+
+**Still not done in P2, and deliberately:** mail search has no screen —
+`DESIGN.md` §1e draws no search field and the mockup has none — the agent card
+has no buttons (they need `GET /feed/{id}`'s `action_label`, P5), attachments
+are not tappable (proxy at P3), and 1f's ask bar is **chrome**: the mockup's own
+field and circle are `<span>`s, so it renders without being a control until P6
+gives it one.
 
 **P3 — Mail stays current. [backend] ∥ [ios]**
 - [backend] cloudflared (self-downloaded binary), webhook + full OIDC, incremental history (all 4 types), 404 sweep, daily watch renewal + 30-min poll fallback, attachments proxy + cid rewrite. ✓ H8 email visible ≤60 s no restart; forged JWT → 401; `cargo test sync::` green.
-- [ios] Home feed + focus, ask states, agents list/builder/schedule sheet, settings (incl. pairing entry) on fixtures; outbox 409-semantics; offline XCUITest. ✓ green.
+- [ios] Home feed + focus, ask states, agents list/builder/schedule sheet;
+  settings **beyond** the CONNECTION + ACCOUNT sections P2 shipped; outbox
+  409-semantics. ✓ green. (Pairing entry and the offline XCUITest moved to P2.)
 
 **P4 — First runs. [sdk] → [backend] (gate: P1 [sdk] green)**
 - [sdk] Postgres journal driver; kill-mid-run resume test; deterministic-id upsert test (kill between execute and step_done → no duplicate note). ✓ `cargo test --features postgres` green.
@@ -255,7 +319,9 @@ HTML mail: `body_text` native; "View original" = locked WKWebView (JS off, remot
 
 **P5 — The loop closes. [backend] then GATE then [ios] live.**
 - [backend] Mail triggers + capped triage, approval pause (server token, 7-day expiry cron), feed producer, **atomic approve tx**, GET /feed/{id}, audit, 10 injection red-team fixtures in CI. ✓ H8 email → feed item with token; approve resumes to done in ONE tx (test asserts all four writes or none); replayed webhook → no second run; replay approve → 409; expiry flips; red-team fixtures all end pending_approval or no-op.
-- **GATE** then [ios] live against local backend: mailboxes/threads/feed live, approve/skip round-trip, outbox replay. ✓ XCUITest e2e green.
+- **GATE** then [ios] live against local backend: **feed** live, approve/skip
+  round-trip, outbox replay. ✓ XCUITest e2e green. (Mailboxes and threads went
+  live at P2; this gate is now about the approval loop, not first contact.)
 
 **P6 — Ask + push. [backend] ∥ [ios], join.**
 - [backend] /ask with route classification + retrieval spec; APNs sender (slim payload; feature-flagged without H9); push on new approval items. ✓ `curl -N /ask` streams route→…→done for all three intents (fixture queries); `cargo test ask::` green.

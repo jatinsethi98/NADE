@@ -542,6 +542,13 @@ row carries it): the selected chip's name Cormorant 600 23 pt + right a 7 pt
 accent dot + "2 accounts" 11 pt uppercase `ink60` `0.06em`, gap 7.
 `v1 →` **single account — the dot + count are replaced by the account's
 address** at the same 11 pt uppercase `ink60` (parity map).
+`+ Added` **a leading `‹` in accent, at the title's own 23 pt**, as the first
+item of the same baseline row. The mockup draws 1e as an artboard with no way
+in or out; v1 makes 1g the tab's root and pushes 1e from it, so the screen needs
+a way back. Putting the chevron inside the existing row costs no height and
+keeps the header's "no bottom divider" rule intact. Swiping from the edge pops
+too — UIKit disables that gesture whenever the navigation bar is hidden, and
+every screen here hides it, so it is restored explicitly.
 
 Chip row: horizontal scroll, gap 8, padding `6 / 22 / 12`, bottom divider;
 chip = `flex: none`, padding `5 / 12`, radius 999, 12.5 pt.
@@ -578,9 +585,25 @@ Gmail mutation, so Archive has nothing to call and the "⋯" menu would be empty
 Body scroll padding `20 / 22 / 8`:
 `subject` Cormorant 600 24 pt line-height 1.2; meta row top 10, gap 9, 13 pt:
 `from_name` in ink + "· to me" `ink60` + right `listTime(ts)` tabular; `hr`
-(1 pt divider) with margin `14 / 0`; message bodies from `body_text`, 14.5 pt
-line-height 1.75, 12 pt gaps between messages; attachment row top 14, gap 9:
+(1 pt divider) with margin `14 / 0`; message body from `body_text`, 14.5 pt
+line-height 1.75, **12 pt between paragraphs**; attachment row top 14, gap 9:
 `tag-neutral` with `name` + 11 pt `ink62` tabular size.
+
+**Corrected at P2.** This used to read "12 pt gaps between messages". It is not:
+in the mockup that `margin-top: 12` sits between two `<div>`s of *one* message —
+both halves of Priya's first mail — so it is a paragraph gap. The mockup draws
+one message and has no separator between two.
+
+`+ Added` **messages 2…n repeat the whole `meta → hr → body` unit**, at a 20 pt
+top gap (the design's own "new block" gap, from the agent card's `margin-top`).
+No new visual vocabulary; the design's, applied again.
+
+The meta row binds to **`messages.first`**, not the newest. The mockup's `9:12`
+is `thread.json`'s `messages[0].ts` (`09:12:04Z`) and its body is message one's
+text, so the row is the thread's opening line — which is what reading from the
+top means. "· to me" renders only when `to` contains the account's address;
+`thread_html_only.json` has `to: []` and inventing a recipient there would be
+the server's job, which it declined.
 
 `v1 →` the mockup justifies the body with hyphenation
 (`text-align: justify; hyphens: auto`). SwiftUI has no justified text without a
@@ -867,3 +890,12 @@ an addition the mockup does not contain; the rest are substitutions.
 | 38 | 1k | **+** CONNECTION section | pairing has to live somewhere |
 | 39 | 1k | footer = served `disclosure` | the mockup's sentence is false for v1 |
 | 40 | 1a/2a | all three prompt suggestions replaced | the mockup's three are outbound actions |
+| 41 | 1e | **+** leading `‹` in the header, and edge-swipe to pop | 1g is the tab root; the mockup gives 1e no way back |
+| 42 | 1f | **+** per-message `meta → hr → body` unit at a 20 pt gap | the mockup draws one message; a thread has many |
+| 43 | 1f | **+** `partial` caption under the subject, italic 12 pt `ink62` | `API.md` §2: clients must surface a thread with gaps |
+| 44 | 1e/1g | **+** empty, unpaired, syncing and offline captions, italic 12 pt | the design draws none, and `mailboxes: []` is a two-minute state on first run |
+| 45 | 1e/1g | **+** no spinner in any state | the design has none; the store's first value is synchronous |
+| 46 | 1f | ask bar renders as **chrome**, not a control | the mockup's field and circle are `<span>`s; `POST /ask` is P6 |
+| 47 | 1f | inline (`cid:`) parts are listed as attachments | P2 does not render `body_html`, so hiding them would lose them entirely; revisit with P3's "View original" |
+| 48 | 1k | **+** `PairingView`, assembled from DS parts | §1k gives the row and no pixels beyond it |
+| 49 | all | iPhone portrait only (`TARGETED_DEVICE_FAMILY = 1`) | the design defines one 402 × 874 frame; iPad and landscape had no render and no criterion |

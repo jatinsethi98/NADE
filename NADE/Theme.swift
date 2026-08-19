@@ -121,8 +121,15 @@ extension Theme {
             static let headingSemibold = "CormorantGaramond-SemiBold"
             static let bodyRegular = "Lora-Regular"
             static let bodySemibold = "Lora-SemiBold"
+            /// Added at P2. DESIGN.md sets 1e's smart-rule caption, 1f's
+            /// "Filed in …" footer and every state caption in italic, and
+            /// `Font.italic()` on a family with no italic member renders the
+            /// roman without complaining — the silent-fallback class D48 is
+            /// about. The face is a real one, cut from the same upstream
+            /// `Lora-Italic[wght].ttf` at 400.
+            static let bodyItalic = "Lora-Italic"
 
-            static let all = [headingRegular, headingSemibold, bodyRegular, bodySemibold]
+            static let all = [headingRegular, headingSemibold, bodyRegular, bodySemibold, bodyItalic]
         }
 
         /// The DS retired bold: 600 is the ceiling.
@@ -152,6 +159,19 @@ extension Theme {
                 ? PostScriptName.bodySemibold
                 : PostScriptName.bodyRegular
             return .custom(name, size: size, relativeTo: style ?? textStyle(for: size))
+        }
+
+        /// Lora Italic, the design's caption voice. A separate entry point
+        /// rather than `.italic()` on `body(_:)`, because that modifier would
+        /// silently synthesise nothing when the face is missing, and because
+        /// `nadeLineHeight` has to be handed the *same* face it is measuring
+        /// (`face: Theme.Font.PostScriptName.bodyItalic`) or the line box comes
+        /// out of the roman.
+        static func bodyItalic(
+            _ size: CGFloat,
+            relativeTo style: SwiftUI.Font.TextStyle? = nil
+        ) -> SwiftUI.Font {
+            .custom(PostScriptName.bodyItalic, size: size, relativeTo: style ?? textStyle(for: size))
         }
 
         /// SF Symbols. DESIGN.md §2 pins the tab-bar glyphs at

@@ -131,3 +131,130 @@ review was right to say so.
     linear in its opacity. `NButton.disabledOpacity` is solved from a fully
     covered border pixel; other opacities in the design are token values pinned
     by `ThemeTests` and are not separately measured on a render.
+
+---
+
+# P2 [ios] — acceptance criteria + edge-case checklist
+
+Written **before** the code, per PLAN.md §Execution doctrine step 1. Same rules
+as P1 above: every criterion names the test that proves it, every edge case is
+a test or an `// EDGE:` comment beside the code, and §D says plainly what is
+*not* claimed.
+
+**Scope note.** PLAN.md specified this lane "on fixtures", with networking at
+the P5 gate and Settings at P3. It ships **live** instead — a URLSession client,
+pairing with an origin-bound Keychain credential, and 1k's CONNECTION + ACCOUNT
+sections. `docs/PLAN.md` §P2 carries the full moved/not-moved table; this file
+carries the criteria that expansion owes.
+
+## A. Acceptance criteria
+
+| # | Criterion | How it is checked |
+|---|---|---|
+| A1 | `clean build test` on iPhone 17 Pro ends `** TEST SUCCEEDED **`, **twice consecutively**, with no warning this lane introduced. | acceptance cmd 1 |
+| A2 | The same on `iPhone SE (3rd generation)`. | acceptance cmd 2 |
+| A3 | Every mail and auth fixture in `docs/contract/` decodes into the wire models with **non-optional** properties wherever `API.md` says non-null. A missing key throws; a `null` in a non-null field throws; an unknown *extra* key does not. | `WireDecodeTests` — values asserted, not "no throw"; the two planted-payload tests are what make "non-optional" mean something |
+| A4 | The wire time formatter accepts `2026-08-16T09:12:04Z` and **rejects** `…04.123Z`, `…04+00:00` and `…04`. | `WireTimeTests` |
+| A5 | The fixtures the app bundles are byte-identical to `docs/contract/`, and the set is complete. | `FixtureParityTests` — asserts the *manifest*, then compares repo→repo and repo→`Bundle.main` bytes. A per-file loop alone is vacuous over an empty directory. (Ten, not nine: `search.json` joined because it is the only page in the contract carrying the partial thread's row, and a detail cannot be stored without one) |
+| A6 | A **Release** `.app` contains no mail fixture. | `scripts/assert-release-has-no-fixtures.sh` — resolves `BUILT_PRODUCTS_DIR` from `xcodebuild -showBuildSettings` and **exits non-zero**. Not a test: tests only ever run Debug (§D2 of P1 restated) |
+| A7 | The schema enforces `NOT NULL` on every column the wire marks non-null, plus its foreign keys and cascades; a throw mid-write leaves the store unchanged. | `MailStoreTests` — behaviour, not `sqlite_master` introspection |
+| A8 | Re-applying a page is a no-op; the last page sets `reached_end`; **a list refresh preserves detail columns and a detail write preserves list columns**. | `MailStoreTests` — both directions. One direction alone is how an opened thread silently becomes "never loaded" again |
+| A9 | `ValueObservation` delivers on the main actor, and a write **inside the tracked region that leaves the fetched value equal** does not re-emit. | `MailObservationTests`. Stated narrowly on purpose: GRDB's region tracking already suppresses unrelated-table writes, so "an unrelated write does not emit" would stay green with `.removeDuplicates()` deleted |
+| A10 | 1e/1f/1g/1k geometry is the design's, measured on a **render** against design constants, in **points** throughout. | `MailGeometryTests` (D33/D40/D49) |
+| A11 | Pushing a thread hides the tab bar; pushing 1e or 1k does **not**; a launch-argument-restored thread survives a tab rotation. | `ThreadNavigationUITests` |
+| A12 | No `import GRDB` outside `NADE/Store/`; no `URLSession` outside `NADE/API/`. | `ModuleBoundaryTests` |
+| A13 | Five OFL faces register; `Theme.Font.bodyItalic` renders in `Lora-Italic`, is not the system face, and is not the roman. | `FontLoadTests` (the driving list gained a fifth row) + `RenderedFaceTests.testItalicIsTheItalicFaceAndNotTheRoman` |
+| A14 | `docs/screens/p2-*.png` — 11 per device × {iPhone 17 Pro, iPhone SE (3rd gen)} = 22: 1g, 1g needs-Gmail, 1e inbox, 1e user label, 1e empty, 1e offline, 1f, 1f partial, 1k, and AX5 for 1e and 1f. All distinct by hash, and every state in the set is also asserted by a UI test. | `scripts/screenshots.sh` (which pins the clock, the time zone and the status bar) + its hash check + `MailUITests`/`OfflineUITests`/`ThreadNavigationUITests`. Distinct hashes alone prove only that images differ — a broken seed showing eleven different error screens passes that check |
+| A15 | Opening a thread performs **no** write to `thread.unread`. | `MailStoreTests.testDetailWriteNeverTouchesUnread` |
+| A16 | Relaunched against an **unreachable base URL**, the app shows its cached rows and says the connection failed. It never presents an empty list as "no mail" and never clears the store. | `OfflineUITests` — an XCUITest, as PLAN.md §iOS app requires. An `APIClient` test can only prove the network failed, never what the model did about it |
+| A17 | The first-run state machine reaches "mail ready" **without a relaunch**. | `AppStateTests` — `mailboxes: []` then a populated response drives `syncPending → mailReady` |
+| A18 | Changing the server URL **clears the stored token**. A bearer minted by server A is never sent to server B. | `CredentialTests` |
+| A19 | `TARGETED_DEVICE_FAMILY = 1` and portrait-only, in **every** configuration. | `InfoPlistTests.testEveryBuildConfigurationTargetsIPhoneOnly` + `testNoConfigurationAdvertisesLandscape`, derived from the configuration-list count the same way A4 of P1 is |
+
+## B. Edge-case checklist (doctrine minimum + this lane's own)
+
+| # | Edge case | Handling | Where |
+|---|---|---|---|
+| P1 | **Empty input** — `mailboxes: []`, `threads: []`, `to: []`, `attachments: []`, `agent_cards: []`, `subject: ""`, `from_name: ""` | Rows keep their box and still show a time. **`from_name == ""` falls back to `from_email`** — `API.md` §2 leaves that call to the UI, so the UI makes it here rather than shipping a blank sender | `threads_last_page.json`; `MailRow`; `WireDecodeTests`, `MailGeometryTests` |
+| P2 | **Unicode** — `Föhn … 📦`, combining marks, RTL, a 200-char unbroken token, an embedded **NUL** | Round-tripped byte-exact through SQLite. The backend lane lost time to a NUL twice; this is the same hazard one layer up | `MailStoreTests.testHostileTextRoundTripsByteExact` |
+| P3 | **Crash mid-step** | One transaction per page and per detail; a throw leaves zero rows rather than half a page | `MailStore`; `MailStoreTests` |
+| P4 | **Duplicate delivery / replay** | Upsert on the wire's own primary key, and **column-scoped** so a list write cannot erase detail | `MailStore`; `MailStoreTests` (A8) |
+| P5 | **Pagination boundary** | `reached_end` is its own column — `next_cursor IS NULL` conflates "never fetched" with "last page". A **generation counter** discards a page that lands after the mailbox changed. One page request in flight at a time | `mailbox_sync`; `MailStoreTests`, `MailListModel` |
+| P6 | **Clock skew** — `ts` after `now` | DESIGN.md's `listTime` table has no future branch, so one is defined: clamp to today's `H:mm`. Never "in 3 hours", never a crash | `ListTime`; `ListTimeTests` |
+| P7 | **Expiry** | The pairing code is single-use with a 10-minute TTL; wrong, spent and expired are all `401` and the UI says so **without** distinguishing them, because the server deliberately does not | `PairingView`; `APIClientTests` |
+| P8 | **429 / timeout / 502 / offline** | `Retry-After` honoured, 30 s timeout, failures rendered **over cached rows** | `APIClient`; `APIClientTests`, `OfflineUITests` (A16) |
+| P9 | **`409 needs_reauth`** | Writes `account.status`, which is what makes 1g's sub-label and 1k's "Sign in again" row appear. Surfacing it only as an API error would leave the recovery action invisible | `MailSync`; `AppStateTests` |
+| P10 | **Store unopenable or corrupt** | Delete `.sqlite`/`-wal`/`-shm`, retry once, then an error caption. It is a cache; erasing it is always safe | `StoreLocation`; `MailStoreTests` |
+| P11 | **Stale local DB across launches** | Any `-NADESeed` launch resets its store first, so UI tests and screenshots are hermetic | `FixtureSeed` |
+| P12 | **`partial: true`** | Its own caption under the subject, in its own slot | `ThreadView`; `thread_partial.json`, `WireDecodeTests` |
+| P13 | **Coexisting truths** | `partial` and a network failure can both be true — `API.md` says `partial` is *produced by* an upstream failure. Two independent slots, never one overwritten string | `ThreadModel` |
+| P14 | **AX5 Dynamic Type** | Rows and bodies are content and scale to AX5; the chip row is chrome and clamps at `Theme.Metrics.chromeTypeCeiling` (already inside `NChip`) | screenshots + `MailGeometryTests` |
+| P15 | **375 pt width** | The chip row scrolls; the mail row's 14/22 asymmetric inset holds; nothing clips | acceptance cmd 2 + the SE screenshot set |
+| P16 | **Unread stays unread after opening** | `API.md` bans a local read-marker: it would disagree with Gmail within minutes and give the user two contradictory inboxes. There is **no column** to write | A15 |
+| P17 | **Keychain write fails after the code is consumed** | The code is spent and the token exists exactly once. Surfaced as token loss requiring a fresh code — never swallowed | `CredentialTests` |
+| P18 | **Unknown enum value from a future server** | The wire model falls back to `.unknown(String)` **and the column stores the raw string**. A `CHECK` pinned to today's values would turn a forward-compatible decode into a failed transaction — the exact screen-blanking the fallback exists to prevent | `WireMail`, `Schema`; `MailStoreTests` |
+| P19 | **`msg_count` ≠ `messages.count`** | Both stored verbatim, neither derived from the other. `thread_partial.json` is the fixture that makes the difference real | `MailStore`; `WireDecodeTests` |
+
+## C. Out of scope for P2 (explicitly not built)
+
+- **1f's bottom ask bar is chrome, not a control.** `POST /ask` lands at P6.
+  The mockup's own field is a `<span>` and its circle is a `<span>`, so P2
+  renders a non-focusable, non-editable, `accessibilityHidden` band — a picture
+  of a bar, which is what the mockup is. The agent card's three buttons *are*
+  real `<button>`s in the mockup, which is why those are cut instead.
+- **The agent card has no buttons.** They need `GET /feed/{id}` for `actions`
+  and `action_label` (P5). Rendering a literal "Approve" would break DESIGN §4
+  and PLAN C1/C2.
+- **"View original"** (`body_html != null` → locked WKWebView) — P3, with the
+  attachments proxy whose `cid:` URLs give it meaning. `body_html` is decoded
+  and stored now so P3 is a UI-only change.
+- **Attachments are not tappable.** No proxy until P3, and the mockup draws no
+  `onClick`. **Inline (`cid:`) parts are still listed**, which a mail client
+  would normally suppress: P2 does not render `body_html`, so hiding them would
+  make them invisible everywhere rather than merely redundant. Revisit with P3's
+  "View original", not before.
+- **1k's AGENTS, READING and `disclosure` footer** — no `GET/PATCH /settings`
+  and no `GET /runs` route exists until P7.
+- **Mail search.** `GET /search` is modelled and decoded; DESIGN.md draws no
+  search field on 1e and the mockup has none.
+- **Push, SSE, feed, notes, calendar, agents** — P3/P5/P6/P7.
+
+## D. What is *not* claimed
+
+1. **The Release fixture exclusion is a build script, not a test.** Tests run
+   only in Debug, so nothing inside the simulator can see a Release bundle.
+2. **The interactive pop gesture under a hidden navigation bar does not survive
+   on its own.** Measured, not assumed: it is put back by
+   `nadeInteractivePopGesture()`, and `testTheSwipeBackGestureStillPops` fails
+   without it. What is *not* claimed is that a future iOS will keep needing
+   that; the test is what would say so either way.
+3. **`EXCLUDED_SOURCE_FILE_NAMES` against a `PBXFileSystemSynchronizedRootGroup`**
+   was unverified when this lane was planned. It works: a Release build carries
+   `calendar.json` and nothing else. A6 is what keeps that true, and it
+   cross-checks that Debug carries ten — otherwise "excluded from Release" and
+   "never built at all" look identical.
+4. **1f's per-message meta row is a design addition.** The mockup draws one
+   message. The repeat reuses the mockup's own components at its own numbers,
+   but no render exists to check it against.
+5. **`PairingView` has no mockup at all.** DESIGN.md §1k gives the row that
+   pushes it and nothing beyond. It is assembled from DS parts and is the one
+   screen in this lane a reviewer cannot read off a render.
+6. **The agent card cannot be seen against the live backend.** P2 serves
+   `agent_cards: []`; its screenshot comes from the fixture world. The same is
+   true of `agent_note` on the mail row.
+7. **No snapshot-diffing harness.** P1's §D4 stands: screenshots are read by
+   eye against the mockup, and only individual measurements are automated.
+8. **`msg_count` is the server's number, not a count of what we hold.** The
+   client never reconciles them; `partial` is how the difference is explained.
+9. **A visible timestamp does not re-render when the day turns.** `clock.now()`
+   is captured when SwiftUI builds a screen, so a row left on screen across
+   midnight keeps saying "23:59" until something else invalidates it. A timer
+   that fires at the day boundary is the fix and is not built here — P3 brings
+   push, which invalidates these screens far more often than a clock would.
+10. **`Retry-After` is honoured by refusing to ask again before it elapses**,
+    not by scheduling a retry for that moment. Nothing re-runs on its own when
+    the window passes; the next foreground or screen appearance does.
+11. **Two servers' mail cannot mix, but only because changing the origin wipes
+    the store.** The database is one file per mode, not one per origin. If a
+    later phase adds a way to change the server that does not go through
+    `MailSync.pair(origin:…)`, that guarantee is gone.

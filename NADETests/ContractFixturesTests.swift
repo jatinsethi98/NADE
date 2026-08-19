@@ -24,32 +24,12 @@ final class ContractFixturesTests: XCTestCase {
 
     private var bundle: Bundle { Bundle(for: ContractFixturesTests.self) }
 
-    /// Not fixtures: the generator, the validator and the prose.
-    private static let nonFixtures: Set<String> = ["generate.py", "validate.py", "README.md"]
-
-    /// The fixture directory in the repo, from `#filePath`. EDGE (E16): an
-    /// artefact-only run has no source tree, and skipping loudly beats
-    /// pretending to have checked.
-    private func contractDirectory() throws -> URL {
-        let repoRoot = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let dir = repoRoot.appendingPathComponent("docs/contract", isDirectory: true)
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDirectory),
-              isDirectory.boolValue
-        else { throw XCTSkip("docs/contract is not next to \(#filePath) — skipping the fixture sweep") }
-        return dir
-    }
-
+    /// P2 moved the locating and loading to `ContractFixture` so the decode
+    /// suite could share it. The rules did not change — the set is still
+    /// enumerated from the directory, and a missing source tree still skips
+    /// loudly (EDGE E16).
     private func fixtureNames(extension ext: String) throws -> [String] {
-        let dir = try contractDirectory()
-        return try FileManager.default
-            .contentsOfDirectory(atPath: dir.path)
-            .filter { !Self.nonFixtures.contains($0) }
-            .filter { ($0 as NSString).pathExtension == ext }
-            .map { ($0 as NSString).deletingPathExtension }
-            .sorted()
+        try ContractFixture.names(extension: ext)
     }
 
     // MARK: - Every file in the directory reaches the bundle

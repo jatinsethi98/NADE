@@ -96,6 +96,7 @@ recomputes the id rather than trusting it.
 | `threads_empty.json` | same, empty |
 | `thread.json` | `GET /threads/{id}` — 3 messages, one with no `text/html` part, inline + regular attachments, 3 agent cards incl. one with `feed_item_id: null` |
 | `thread_html_only.json` | same, message with no `text/plain` part; `to: []`, `agent_cards: []` |
+| `thread_partial.json` | `partial: true` — the detail could not be completed, so it carries **one** message where the list row counts two, and an `expired` agent card (the only fixture that renders that status). Added at P2: API.md has always said clients must surface this state and nothing had ever serialised it |
 | `search.json`, `search_empty.json` | `GET /search` |
 | `notes.json` | `GET /notes` — one agent note (v5) and one written outside a run (v4, `agent_name: null`) |
 | `notes_empty.json` | same, empty |

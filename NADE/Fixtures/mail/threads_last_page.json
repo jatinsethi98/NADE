@@ -1,0 +1,16 @@
+{
+  "threads": [
+    {
+      "id": "18f1f0a2b3c4d5e6",
+      "subject": "",
+      "snippet": "",
+      "from_name": "",
+      "from_email": "hello@nade.local",
+      "ts": "2026-07-18T00:00:00Z",
+      "unread": false,
+      "msg_count": 1,
+      "agent_note": null
+    }
+  ],
+  "next_cursor": null
+}

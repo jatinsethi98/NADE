@@ -23,11 +23,8 @@ final class TabBarUITests: XCTestCase {
     }
 
     private func launchApp() -> XCUIApplication {
-        let app = XCUIApplication()
         // Explicitly *not* the gallery — this exercises the shipping shell.
-        app.launchArguments = ["-NADEGallery", "0"]
-        app.launch()
-        return app
+        XCUIApplication.nade(seed: nil, now: nil)
     }
 
     func testTabBarHasAllFourTabs() {
@@ -73,12 +70,19 @@ final class TabBarUITests: XCTestCase {
         let app = launchApp()
         XCTAssertTrue(app.buttons["tab.ask"].waitForExistence(timeout: 10))
 
+        // P2 replaced the Mail placeholder with 1g, so the Mail tab is
+        // identified by its real screen rather than by a note. The other three
+        // are still placeholders and are still checked by their copy.
         let notes: [String: String] = [
             "ask": "Ask, search, or describe an agent.",
-            "mail": "Your mail, filtered by label.",
             "notes": "Notes your agents write.",
             "calendar": "Six days, each a compressed timeline.",
         ]
+
+        app.buttons["tab.mail"].tap()
+        let mailboxes = app.staticTexts["mailboxes.title"]
+        XCTAssertTrue(mailboxes.waitForExistence(timeout: 5), "the mail screen did not appear")
+        XCTAssertTrue(mailboxes.isHittable)
 
         for (id, note) in notes {
             app.buttons["tab.\(id)"].tap()
@@ -87,8 +91,11 @@ final class TabBarUITests: XCTestCase {
             XCTAssertEqual(visible.label, note)
             XCTAssertTrue(visible.isHittable, "the \(id) screen is not the one on screen")
 
-            // The other three are still in the view tree — that is F21, and
-            // what keeps their state — but none of them is reachable.
+            XCTAssertFalse(app.staticTexts["mailboxes.title"].isHittable,
+                           "the mail screen is still reachable while \(id) is showing")
+
+            // The others are still in the view tree — that is what keeps their
+            // state — but none of them is reachable.
             for otherID in notes.keys where otherID != id {
                 XCTAssertFalse(
                     app.staticTexts["screen.\(otherID).note"].isHittable,

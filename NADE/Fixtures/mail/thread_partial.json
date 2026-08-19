@@ -1,0 +1,36 @@
+{
+  "id": "18f1d8e7c6b5a409",
+  "subject": "Design Lead — Vale Robotics",
+  "mailbox_name": "To Reply",
+  "account_email": "jatinsethi98@gmail.com",
+  "messages": [
+    {
+      "gmail_id": "18f1d8e7c6b5a409",
+      "from_name": "Nadia Okonkwo",
+      "from_email": "nadia@valerobotics.com",
+      "to": [
+        "jatinsethi98@gmail.com"
+      ],
+      "cc": [],
+      "ts": "2026-08-09T11:04:10Z",
+      "body_text": "Following up on the systems interview and the paid trial week we discussed — are either of those still of interest?",
+      "body_html": null,
+      "label_ids": [
+        "INBOX",
+        "CATEGORY_PERSONAL",
+        "Label_12"
+      ],
+      "attachments": []
+    }
+  ],
+  "agent_cards": [
+    {
+      "run_id": "b0000006-0000-4000-8000-000000000006",
+      "agent_name": "Job Search Tracker",
+      "status": "expired",
+      "summary": "Two next steps found, but the approval was never answered.",
+      "feed_item_id": "c0000004-0000-4000-8000-000000000004"
+    }
+  ],
+  "partial": true
+}

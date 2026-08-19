@@ -24,14 +24,14 @@ final class ComponentGeometryTests: XCTestCase {
     /// @2x SE. Everything below is stated as a multiple of the real grid rather
     /// than as a fixed fudge, so the expectation tightens on the denser screen
     /// instead of a phone-specific number being baked in.
-    private var grid: CGFloat { 2 * RenderMeasure.snap }
+    private var grid: CGFloat { RenderMeasure.grid }
 
     /// Grid snapping **plus** the SwiftUI/CSS box-model residual recorded in
     /// IOS_DECISIONS.md D32 (`strokeBorder` draws inside the frame where CSS's
     /// `border` adds; `TextField` reserves a slightly taller line box). ~1.9 pt
     /// at @3x, ~2.2 on the SE — still far below the 3–6 pt that separates any
     /// two of these components, which is what the mutation checks confirmed.
-    private var cssBox: CGFloat { 1.2 + 2 * RenderMeasure.snap }
+    private var cssBox: CGFloat { RenderMeasure.cssBox }
 
     /// A `Theme` colour as it lands **on the page**. `RenderMeasure.components`
     /// drops alpha, and half this palette is a translucent ink — `divider` is

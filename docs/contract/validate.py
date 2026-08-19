@@ -566,6 +566,7 @@ FIXTURE_SHAPES = {
                                "next_cursor": NUL("cursor")}),
     "thread.json": THREAD_DETAIL,
     "thread_html_only.json": THREAD_DETAIL,
+    "thread_partial.json": THREAD_DETAIL,
     "search.json": OBJ({"threads": ARR(THREAD_ROW), "next_cursor": NUL("cursor")}),
     "search_empty.json": OBJ({"threads": ARR(THREAD_ROW),
                               "next_cursor": NUL("cursor")}),
@@ -896,7 +897,7 @@ class World(object):
         for name in ("threads.json", "threads_last_page.json", "search.json"):
             for row in docs.get(name, {}).get("threads", []):
                 self.threads.setdefault(row["id"], row)
-        for name in ("thread.json", "thread_html_only.json"):
+        for name in ("thread.json", "thread_html_only.json", "thread_partial.json"):
             detail = docs.get(name)
             if isinstance(detail, dict) and "id" in detail:
                 self.threads.setdefault(detail["id"], None)
@@ -1015,7 +1016,7 @@ def check_references(world):
     # `cid:` URLs are rewritten server-side before the response is built, so
     # every attachment URL inside body_html must resolve.
     url_re = re.compile(r"/v1/messages/([0-9a-f]{16})/attachments/([A-Za-z0-9_-]+)")
-    for name in ("thread.json", "thread_html_only.json"):
+    for name in ("thread.json", "thread_html_only.json", "thread_partial.json"):
         detail = docs.get(name)
         if not isinstance(detail, dict):
             continue
@@ -1720,7 +1721,7 @@ def collapse(text):
 
 def check_mail(world):
     docs = world.docs
-    for name in ("thread.json", "thread_html_only.json"):
+    for name in ("thread.json", "thread_html_only.json", "thread_partial.json"):
         detail = docs.get(name)
         if not isinstance(detail, dict):
             continue
@@ -1757,16 +1758,33 @@ def check_mail(world):
         row = world.threads.get(detail["id"])
         if row:
             newest = messages[-1]
-            if row["ts"] != newest["ts"]:
-                fail(name, "list ts %s but the newest message is %s"
-                     % (row["ts"], newest["ts"]))
-            if row["msg_count"] != len(messages):
-                fail(name, "list msg_count %d but the detail has %d messages"
-                     % (row["msg_count"], len(messages)))
-            for field in ("from_name", "from_email"):
-                if row[field] != newest[field]:
-                    fail(name, "list %s %r is not the newest message's %r"
-                         % (field, row[field], newest[field]))
+            # `partial` means the detail could not be completed, so the rows a
+            # client is reading have gaps (API.md §2). The list row is still the
+            # truth about the *thread*; the detail is a subset of it. Equality
+            # is therefore the wrong assertion in that state, and asserting it
+            # anyway is how a validator quietly forbids the one case the
+            # contract says clients must handle. Both relations still bind in
+            # the only direction that can catch a real defect.
+            if detail["partial"]:
+                if len(messages) > row["msg_count"]:
+                    fail(name, "partial detail carries %d messages but the list "
+                               "row counts only %d"
+                         % (len(messages), row["msg_count"]))
+                if newest["ts"] > row["ts"]:
+                    fail(name, "partial detail's newest message %s is later than "
+                               "the list row's ts %s"
+                         % (newest["ts"], row["ts"]))
+            else:
+                if row["ts"] != newest["ts"]:
+                    fail(name, "list ts %s but the newest message is %s"
+                         % (row["ts"], newest["ts"]))
+                if row["msg_count"] != len(messages):
+                    fail(name, "list msg_count %d but the detail has %d messages"
+                         % (row["msg_count"], len(messages)))
+                for field in ("from_name", "from_email"):
+                    if row[field] != newest[field]:
+                        fail(name, "list %s %r is not the newest message's %r"
+                             % (field, row[field], newest[field]))
             if row["subject"] != detail["subject"]:
                 fail(name, "list subject %r != detail subject %r"
                      % (row["subject"], detail["subject"]))

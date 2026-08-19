@@ -32,10 +32,7 @@ final class HitTargetUITests: XCTestCase {
     }
 
     private func launchGallery(section: String) -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchArguments = ["-NADEGallery", "1", "-NADEGallerySection", section]
-        app.launch()
-        return app
+        XCUIApplication.nade(seed: nil, now: nil, gallerySection: section)
     }
 
     private func assertTarget(

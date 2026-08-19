@@ -279,17 +279,47 @@ fn thread_detail(name: &str) -> ThreadDetail {
 }
 
 #[test]
-fn both_thread_detail_fixtures_match() {
-    for name in ["thread.json", "thread_html_only.json"] {
+fn every_thread_detail_fixture_matches() {
+    for name in ["thread.json", "thread_html_only.json", "thread_partial.json"] {
         assert_matches(&thread_detail(name), name);
     }
+}
+
+/// `thread_partial.json` is the only fixture where `partial` is true, and it
+/// exists because `API.md` §2 has always said clients must surface that state
+/// while nothing on either lane had ever serialised it. The shape has to
+/// round-trip through our real response type like any other — otherwise the
+/// case the iOS lane renders is one this server has never produced.
+#[test]
+fn the_partial_fixture_is_partial_and_shorter_than_its_row() {
+    let value = fixture("thread_partial.json");
+    assert!(
+        value["partial"].as_bool().unwrap(),
+        "thread_partial.json is the partial-thread fixture and must say so"
+    );
+
+    // The point of the fixture: the detail is a *subset*. A client that derives
+    // one number from the other gets this thread wrong.
+    let detail_messages = value["messages"].as_array().unwrap().len();
+    let row = fixture("search.json")["threads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == value["id"])
+        .expect("the partial thread reached the cache through a search hit")
+        .clone();
+    let counted = row["msg_count"].as_u64().unwrap() as usize;
+    assert!(
+        detail_messages < counted,
+        "a partial detail must carry fewer messages ({detail_messages}) than the row counts ({counted})"
+    );
 }
 
 /// `API.md` §2's two hard rules about a message, checked against the fixtures
 /// rather than against our own opinion.
 #[test]
 fn a_message_has_no_id_and_body_html_is_genuinely_nullable() {
-    for name in ["thread.json", "thread_html_only.json"] {
+    for name in ["thread.json", "thread_html_only.json", "thread_partial.json"] {
         for message in fixture(name)["messages"].as_array().unwrap() {
             assert!(
                 message.get("id").is_none(),

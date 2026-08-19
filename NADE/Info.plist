@@ -6,15 +6,27 @@
 	     are merged in at build time because GENERATE_INFOPLIST_FILE stays YES.
 	     Only the keys Xcode cannot generate live here. -->
 
-	<!-- The four OFL faces in NADE/Resources/Fonts. UIAppFonts takes the file
-	     name; Font.custom() takes the PostScript name (see Theme.Font). -->
+	<!-- The five OFL faces in NADE/Resources/Fonts. UIAppFonts takes the file
+	     name; Font.custom() takes the PostScript name (see Theme.Font).
+	     Lora-Italic joined at P2: DESIGN.md sets 1e's caption, 1f's footer and
+	     every state caption in italic, and Font.italic() on a family with no
+	     italic member renders roman without complaining. -->
 	<key>UIAppFonts</key>
 	<array>
 		<string>Lora-Regular.ttf</string>
 		<string>Lora-SemiBold.ttf</string>
+		<string>Lora-Italic.ttf</string>
 		<string>CormorantGaramond-Regular.ttf</string>
 		<string>CormorantGaramond-SemiBold.ttf</string>
 	</array>
+
+	<!-- P2 talks to the dev backend over the LAN. ATS permission is not the
+	     same as local-network authorisation: on a device, a connection to a
+	     LAN host raises the system prompt this string explains. The simulator
+	     reaching localhost never sees it, which is exactly why it is easy to
+	     ship without and only discover on hardware. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>NADE connects to your own NADE server on this network to show your mail.</string>
 
 	<!-- Dev backend runs plain HTTP on the LAN (http://<mac>.local:8080).
 	     NSAllowsLocalNetworking permits *only* local/link-local hosts; it does

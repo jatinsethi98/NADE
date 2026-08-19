@@ -1255,6 +1255,54 @@ THREAD_DETAIL_T1["agent_cards"] = [
 ]
 
 
+# The one thread whose detail is *incomplete*. `docs/API.md` §2 says `partial`
+# is true when the windowed cache could not finish completing a thread — Gmail
+# unreachable, throttled, or a credential that needs re-auth — and that clients
+# "must surface it rather than render the rows as a complete thread". Until P2
+# there was no fixture for it at all, so neither side had ever serialised or
+# decoded the case, on either lane.
+#
+# T6 is the honest carrier: it is the old thread that reached the cache through
+# a *search* hit, which is exactly the cause API.md describes ("a search that
+# matched one message of a ten-message conversation cached exactly that one").
+# Its row says `msg_count: 2`; this detail carries one message and says why.
+# The pair is the point — a client that derives one from the other gets it
+# wrong, and `msg_count` is deliberately not `len(messages)` here.
+THREAD_DETAIL_T6_PARTIAL = {
+    "id": T6,
+    "subject": ROW_T6["subject"],
+    "mailbox_name": "To Reply",
+    "account_email": ACCOUNT_EMAIL,
+    "messages": [
+        {
+            "gmail_id": M_T6,
+            "from_name": ROW_T6["from_name"],
+            "from_email": ROW_T6["from_email"],
+            "to": [ACCOUNT_EMAIL],
+            "cc": [],
+            "ts": TS["t6_mail"],
+            "body_text": ROW_T6["snippet"],
+            "body_html": None,
+            "label_ids": ["INBOX", "CATEGORY_PERSONAL", LABEL_TO_REPLY],
+            "attachments": [],
+        }
+    ],
+    # The expired approval's own run. It is the only fixture anywhere that
+    # renders DESIGN.md's `expired` status string on an agent card.
+    "agent_cards": [
+        {
+            "run_id": RUN_EXPIRED,
+            "agent_name": AGENT_BY_ID[AGENT_A]["name"],
+            "status": "expired",
+            "summary": "Two next steps found, but the approval was never answered.",
+            "feed_item_id": FEED_EXPIRED,
+        }
+    ],
+    "partial": True,
+}
+
+
+
 # --------------------------------------------------------------------------
 # Notes and drafts
 #
@@ -1625,6 +1673,7 @@ def build_fixtures():
     add("threads_empty.json", {"threads": [], "next_cursor": None})
     add("thread.json", THREAD_DETAIL_T1)
     add("thread_html_only.json", THREAD_DETAIL_T2)
+    add("thread_partial.json", THREAD_DETAIL_T6_PARTIAL)
     add("search.json", {
         "threads": [ROW_T1, ROW_T3, ROW_T4, ROW_T6],
         "next_cursor": None,

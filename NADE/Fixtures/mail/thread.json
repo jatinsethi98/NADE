@@ -1,0 +1,104 @@
+{
+  "id": "18f2a1b3c4d5e6f7",
+  "subject": "Staff Product Designer at Kettle",
+  "mailbox_name": "To Reply",
+  "account_email": "jatinsethi98@gmail.com",
+  "messages": [
+    {
+      "gmail_id": "18f2a1b3c4d5e6f7",
+      "from_name": "Priya Raghavan",
+      "from_email": "priya@kettle.com",
+      "to": [
+        "jatinsethi98@gmail.com"
+      ],
+      "cc": [],
+      "ts": "2026-08-16T09:12:04Z",
+      "body_text": "Hi Jatin — I came across your work on the Northbound reader and wanted to check whether you're open to a conversation. We're hiring a staff designer to own the composer end to end.\n\nThe role outline is attached.\n\nPriya",
+      "body_html": "<div><p>Hi Jatin — I came across your work on the Northbound reader and wanted to check whether you're open to a conversation. We're hiring a staff designer to own the composer end to end.</p><p>The role outline is attached.</p><p><img src=\"/v1/messages/18f2a1b3c4d5e6f7/attachments/ANGjdJ_7hTqE0wRm2YvC9nLpX4sBd6KfJ1aUgZoQ3iMtNbHxVeSwPyDrClkFuOjG-8zAtIeRnWq5MvXcYbLdKsHfTgJpNaUoEiZrQwBmSxVyCk\" alt=\"Kettle\" width=\"96\"></p><p>Priya</p></div>",
+      "label_ids": [
+        "INBOX",
+        "CATEGORY_PERSONAL",
+        "Label_12"
+      ],
+      "attachments": [
+        {
+          "id": "ANGjdJ_qk9mR0xT2wPmC5nQ8vYbH3sLzF1eKp7uXcRtN6gWdA0iJlOoYzSxVhBmU-4fEc2QaTrPnKvDgIyLwZjXsMeHbNqUfCkRt9pB1oS5dGvA",
+          "name": "Kettle — Staff Designer.pdf",
+          "mime": "application/pdf",
+          "size": 245760,
+          "inline": false
+        },
+        {
+          "id": "ANGjdJ_7hTqE0wRm2YvC9nLpX4sBd6KfJ1aUgZoQ3iMtNbHxVeSwPyDrClkFuOjG-8zAtIeRnWq5MvXcYbLdKsHfTgJpNaUoEiZrQwBmSxVyCk",
+          "name": "kettle-logo.png",
+          "mime": "image/png",
+          "size": 8194,
+          "inline": true
+        }
+      ]
+    },
+    {
+      "gmail_id": "18f2b0c1d2e3f405",
+      "from_name": "Priya Raghavan",
+      "from_email": "priya@kettle.com",
+      "to": [
+        "jatinsethi98@gmail.com"
+      ],
+      "cc": [
+        "dan@kettle.com"
+      ],
+      "ts": "2026-08-16T14:31:09Z",
+      "body_text": "Adding Dan, who leads the composer team.\n\nJatin — when are you free for a 30-minute intro? Tuesday or Thursday afternoon both work on our side.\n\nPriya",
+      "body_html": null,
+      "label_ids": [
+        "INBOX",
+        "CATEGORY_PERSONAL",
+        "Label_12"
+      ],
+      "attachments": []
+    },
+    {
+      "gmail_id": "18f2c4d5e6f70819",
+      "from_name": "Priya Raghavan",
+      "from_email": "priya@kettle.com",
+      "to": [
+        "jatinsethi98@gmail.com"
+      ],
+      "cc": [],
+      "ts": "2026-08-17T08:22:40Z",
+      "body_text": "Two things to lock in: a 30-minute intro with our head of design, and a portfolio session the week after. Let me know which afternoon suits and I'll send the invites.\n\nPriya",
+      "body_html": "<div><p>Two things to lock in: a 30-minute intro with our head of design, and a portfolio session the week after. Let me know which afternoon suits and I'll send the invites.</p><p>Priya</p></div>",
+      "label_ids": [
+        "INBOX",
+        "UNREAD",
+        "CATEGORY_PERSONAL",
+        "Label_12"
+      ],
+      "attachments": []
+    }
+  ],
+  "agent_cards": [
+    {
+      "run_id": "b0000001-0000-4000-8000-000000000001",
+      "agent_name": "Job Search Tracker",
+      "status": "pending_approval",
+      "summary": "Two next steps found — a 30-minute intro and a portfolio session.",
+      "feed_item_id": "c0000001-0000-4000-8000-000000000001"
+    },
+    {
+      "run_id": "b0000002-0000-4000-8000-000000000002",
+      "agent_name": "Reply Drafter",
+      "status": "done",
+      "summary": "Drafted a reply to Priya proposing Tuesday or Thursday afternoon.",
+      "feed_item_id": "c0000002-0000-4000-8000-000000000002"
+    },
+    {
+      "run_id": "b0000005-0000-4000-8000-000000000005",
+      "agent_name": "Job Search Tracker",
+      "status": "failed",
+      "summary": "Couldn't finish — Gmail was unavailable.",
+      "feed_item_id": null
+    }
+  ],
+  "partial": false
+}

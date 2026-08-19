@@ -908,3 +908,528 @@ itself. The fix is that the expectation contains no term read back off the view:
 `1 + 9 + 18 + 5 + 10.5 × 1.55 + 26`, every term a `Theme` constant, cross-checked
 against the literal 75.275. `testEveryTabGlyphOccupiesTheSameDesignBox` pins the
 box that D46 was about.
+
+---
+
+## P2 — mail, live
+
+### D50. The Mail tab's root is 1g, and 1e is pushed from it
+
+The mockup draws 1e and 1g as independent artboards and never says how you reach
+one from the other. 1e's header is `{{ filter }}` plus a non-interactive account
+chip; its rows have no `onClick` either. Both edges were inferred.
+
+v1 makes **1g the root**. Its ACCOUNTS row is the mockup's own "All inboxes"
+entry, so tapping it opens the inbox; every LABELS row opens its own mailbox;
+the STANDARD "Sent" cell opens `SENT`. 1e then has somewhere to go back to, and
+1g — which is the only entry point to Settings — is somewhere you land rather
+than somewhere you have to find.
+
+1e gains a leading `‹` at the title's own 23 pt, inside the existing baseline
+row. Registered as deviation 41.
+
+### D51. Tab-bar visibility is a property of the top route, not of stack depth
+
+`docs/DESIGN.md` §2's navigation map keeps the bar on 1e, 1g **and** 1k, all of
+which are pushes, and removes it only on 1f. So "deeper than the root hides it"
+is wrong on the very first push, and three assertions in
+`ThreadNavigationUITests` fail under any depth-based rule.
+
+`AppNavigation` is hoisted above `RootTabView` and owns the selection, the mail
+path and the selected mailbox. `showsTabBar` switches on the **active tab**
+first, so a thread pushed on Mail cannot hide the bar while Notes is on screen —
+which matters because D29 keeps all four stacks alive underneath.
+
+A `PreferenceKey` was considered and rejected twice over: every inactive screen
+would emit one, and preferences propagate as a layout side effect, which
+flickers for a frame.
+
+**The obvious restoration test is impossible.** "Push a thread, tap Notes, come
+back" cannot be written: while 1f is on screen the tab bar is gone, so
+`tab.notes` does not exist to tap. The thread is restored by launch argument
+instead, popped, rotated through the tabs, and re-pushed.
+
+### D52. The edge-swipe had to be put back by hand
+
+Every screen draws its own nav bar, so the system one is hidden throughout.
+UIKit disables `interactivePopGestureRecognizer` whenever the bar is hidden, on
+the reasonable assumption that a screen with no visible back button has no back.
+Here that assumption is wrong.
+
+`nadeInteractivePopGesture()` restores it with **our** delegate rather than
+`nil`: clearing the delegate re-enables the gesture at the root too, where there
+is nothing to pop, and UIKit has historically deadlocked the stack when that
+completes. `viewControllers.count > 1` is the whole guard.
+
+Measured, not assumed — `testTheSwipeBackGestureStillPops` failed before this
+existed and fails again if it is removed. (It also needed a real
+`UIScreenEdgePanGestureRecognizer` gesture: `app.swipeRight()` starts in the
+centre of the screen and the edge recogniser ignores it by design, so that form
+of the test would have failed whether or not the app worked.)
+
+### D53. Two database files, not one data source
+
+P2 ships a DEBUG fixture world alongside the live client, and "swap the
+`MailSource`" is **not** provenance. Both sources would write the same rows; a
+live launch deliberately does not reset, because it has to keep cached mail for
+offline; so fixture rows that no live id happened to overwrite would sit beside
+real mail indefinitely. `mail.sqlite` and `mail-fixtures.sqlite` make the
+separation structural.
+
+### D54. Every write is column-scoped
+
+`thread` carries the list fields and the detail fields in one row, so that
+opening a thread cannot contradict the row behind it. That only works if the
+writes are scoped: a whole-record upsert built from a `WireThreadRow` writes nil
+into `detail_*`, and a routine list refresh after opening a thread would make it
+"never loaded" again — footer, `partial` caption and every message gone until
+the detail was fetched a second time.
+
+`MailStoreTests` asserts **both** directions. One alone does not see it.
+
+### D55. `msg_count` is the server's number and `partial` explains the gap
+
+`docs/contract/` had no `partial: true` fixture, so neither lane had ever
+serialised or decoded the state `API.md` §2 says clients must surface.
+`thread_partial.json` was added at P2, through `generate.py` and `validate.py`
+and into `api/contract_tests.rs` — a fixture only one side can produce is not a
+contract.
+
+It also corrected the validator: `msg_count == len(messages)` is the right
+assertion for a complete thread and the wrong one for a partial. Both relations
+still bind in the direction that can catch a defect (`len(messages) <=
+msg_count`, newest present message no later than the row's `ts`).
+
+### D56. A `CHECK` constraint would have undone the enum fallback
+
+`kind` and `status` decode to `.unknown(raw)` rather than throwing, so one new
+server value cannot blank a screen — a decode failure inside a
+`ValueObservation` ends the observation, it does not skip a row.
+
+`mailbox.kind` and `account.status` therefore carry **no** `CHECK`. Pinning them
+to today's values would move the same failure from the decoder to the write, and
+a forward-compatible decode that then fails the transaction is not forward
+compatible.
+
+### D57. A NUL is stripped, because SQLite truncates at one
+
+The wire cannot carry a `NUL` — PostgreSQL rejects `0x00` in a `text` column, so
+the server cannot store one, and the backend lane wrote three separate fixes to
+keep it that way. But SQLite silently **truncates** at a NUL, so a client that
+passed one through would turn `before␀after` into `before` and read as a parser
+bug for a week. The store drops the character and keeps everything after it.
+`testANulIsStrippedRatherThanTruncatingTheRestOfTheString` is what says so; the
+first version of that test asserted byte-exactness and failed, which is how the
+truncation was found.
+
+### D58. Cancellation is not a failure, and a race is not a network error
+
+Two defects the first live run surfaced, both of which had put
+"The server sent something unexpected." on screen:
+
+- A screen going away mid-request throws `CancellationError` from `await`, and a
+  generic `catch` turned that into a user-facing server error.
+- The mail list's `.task` and the shell's can start in either order, so a page
+  could be filed against a mailbox row that had not arrived. The store now
+  throws `MailStoreError.unknownMailbox` — naming the precondition instead of
+  surfacing SQLite's "FOREIGN KEY constraint failed" — and `MailSync` fetches
+  the mailboxes and retries once. The same shape applies to a thread detail,
+  which is why `loadThread` takes the mailbox it was opened from.
+
+### D59. An unreachable server must not make a paired device look unpaired
+
+Found by `OfflineUITests`, not by reading. A transport failure left `state` at
+its initial `.unpaired`, so 1g rendered "Not paired yet." over a full mailbox
+list — telling the user the setup they had completed had not happened, because
+the Wi-Fi was down. A transport failure with mailboxes in the store now means
+`.ready`: the rows are the truth and the banner carries the rest.
+
+The banner is a **second slot**, never a replacement for the state. `API.md` §2
+says a thread's `partial` flag is *produced by* an upstream failure, so a thread
+with gaps and a connection that is currently down are routinely true at once,
+and one string would have to overwrite one of them.
+
+### D60. The first run needs a state machine, because the server answers empty
+
+`docs/PLAN.md` puts the initial Gmail sync at ~1–2 minutes and `api/mail.rs`
+deliberately returns `mailboxes: []` until it finishes. "Fetch once at launch"
+therefore lands in an empty app, and with no poll, no refresh control and no
+completion event the finished sync never reaches the screen until the next
+launch.
+
+`AppState` is an explicit enum — `unpaired`, `needsGmail`, `syncPending`,
+`ready` — with one designed rendering each, and `syncPending` polls
+5 s → 30 s for five minutes and stops the moment a non-empty list lands. P3
+replaces it with the webhook.
+
+`409 needs_reauth` writes `account.status`, because that is what makes 1g's
+sub-label and 1k's "Sign in again" row appear. Surfacing it only as an error
+would tell the user something is wrong and give them no way out.
+
+### D61. The token is bound to the server that minted it
+
+One Keychain item holding `{baseURL, token}`, not two settings. Independently
+stored, they can be recombined: set only `NADE_BASE_URL`, or edit the URL in
+Settings, and the next request sends a bearer minted by server A to server B.
+Asking for a credential names an origin, and a mismatch clears the item rather
+than leaving it for a later edit to point back at.
+
+`NADE_BASE_URL` is read from the process environment and is deliberately **not**
+in the shared scheme: that file is committed, the scheme's launch settings are
+inherited by the test action, and a token there would point every unit test at a
+live server.
+
+The pairing code is single-use and the token exists exactly once, so a Keychain
+write that fails *after* the server has spent the code is reported as its own
+failure — the user needs a fresh code, not another attempt with the same one.
+
+### D62. The Release fixture exclusion works, and is proven by a script
+
+`EXCLUDED_SOURCE_FILE_NAMES` on the app target's Release configuration **does**
+filter a `PBXFileSystemSynchronizedRootGroup`; this was unverified when the lane
+was planned and is now measured — a Release build carries `calendar.json` and
+nothing else.
+
+The check is `scripts/assert-release-has-no-fixtures.sh` rather than a test,
+because XCTest only ever runs against Debug (the D36 limitation). The obvious
+form does not work: `find … -name '*.json'` exits 0 whether it finds none or
+ten, so a comment reading "→ calendar.json only" is documentation, not a gate.
+The script resolves `BUILT_PRODUCTS_DIR` from the build system, exits non-zero
+on any fixture, **and** cross-checks that the Debug build carries nine — without
+that, "excluded from Release" and "never built at all" look identical.
+
+### D63. `NADE/Fixtures/mail` is a manifest, not a directory listing
+
+Nine files, byte-identical to `docs/contract/`, named in `FixtureSeed.names` and
+asserted as a *set*. A per-file loop over whatever happens to be in the
+directory passes over an empty one, which is the failure most likely to arrive:
+a half-finished copy, or a rename on the contract side nobody mirrored.
+`.gitattributes` gained `*.json -text`, so a claim about bytes is about bytes.
+
+### D64. `import GRDB` and `URLSession` are each confined to one directory
+
+The store returns NADE's own value types and an opaque cancellable, so every
+test in this target reaches the database through `@testable import NADE` alone —
+`@testable` exposes NADE's internals but does not re-export a package module,
+and a record type leaking out of `Store/` would force GRDB into the test
+target's dependencies and a second copy into the link.
+
+`ModuleBoundaryTests` caught a real leak the first time it ran:
+`HTTPMailSource`'s convenience initialiser took a `URLSession`.
+
+### D65. The screenshot script is checked in, and pins three things
+
+D25 kept P1's in a scratchpad because it was three `simctl` calls in a loop.
+This one is not: `-NADENow` pins the clock (the fixture world is frozen but
+`listTime` is a function of *now*), `TZ=UTC` pins the day boundary ("today" is
+the device's calendar day), and `status_bar override` pins the clock glyph and
+removes the notification-banner class of failure D45 found. A shot set that
+cannot be regenerated identically twice is not evidence.
+
+It also hash-checks for duplicates, which is what caught D45.
+
+### D66. `ShellStateUITests`' mail leg was strengthened, not deleted
+
+It used to tap `screen.mail.taps`, a counter on the placeholder screen that
+existed only so the test had something to count. Replacing the placeholder
+deleted that element — and deleting the assertion with it would have been the
+wrong move, because the property D29 protects is now load-bearing rather than
+hypothetical. Mail asserts the state it actually has: a pushed mail list, on a
+mailbox that is not the default. No navigation stack could have lost a tap
+counter; this one can lose a stack.
+
+### D67. The copy sweep covers app-authored names only
+
+DESIGN.md §4 forbids a control that promises an outbound action. A sweep over
+every control trips on the fixture's own mail — `thread.json`'s body says "I'll
+send the invites", and a mail row's accessibility label is composed from the
+sender, subject and snippet, so the row *is* a button whose name is the server's
+words. A test that fails on legitimate content gets weakened or deleted rather
+than fixed.
+
+The sweep excludes elements whose identifier is content-derived, and elements
+with no identifier at all (XCUITest synthesises unnamed wrappers around rows).
+`testTheCopySweepWouldCatchAnAppNamedControl` proves it can still fire: the
+word is on screen, in the mail, right now.
+
+### D68. Lora Italic, because `Font.italic()` on a roman family is a silent no-op
+
+DESIGN.md sets 1e's caption, 1f's footer and every state caption in italic, and
+`UIAppFonts` listed four faces, none of them italic. `Font.italic()` on a family
+with no italic member renders the roman without complaining — the D48 failure
+class, invisible in a screenshot.
+
+The cut is pinned with `instantiateVariableFont(f, {"wght": 400},
+updateFontNames=False)`. **Not** `True`: it rewrites the PostScript name to
+`LoraItalic-Italic` and breaks the `Font.custom("Lora-Italic", …)` lookup. 400
+is the italic VF's own default instance, so no rename is needed.
+
+The test follows `RenderedFaceTests`' existing pattern — compared against Core
+Text in the exact expected face *and* against the system face — plus one more:
+a `bodyItalic` pointing at `Lora-Regular` would satisfy both of those at once.
+
+### D69. Geometry found two real defects, and neither was fixed by widening a tolerance
+
+`MailGeometryTests` derives every expectation from `Theme` constants and
+DESIGN.md's numbers, with no term read back off the view under test. Two missed:
+
+- the mail row was 2.17 pt short, because `agent_note` was the one label on 1e
+  without an explicit line box and was rendering at Lora's natural height rather
+  than the DS's inherited 1.55;
+- the agent-card expectation assumed a one-line summary while the fixture's
+  wraps to two, which made the expectation a fact about the text rather than
+  about the spec.
+
+The first was a bug in the view; the second was a bug in the test. Both were
+fixed at the source. Two planted regressions — a 22 pt left inset, and a
+`set unread = 0` in the detail write — were confirmed to go red.
+
+
+---
+
+## P2 — the post-implementation review pass (2026-08-19)
+
+An adversarial Codex review of the finished lane returned 19 findings — 5
+critical, 12 major, 2 minor — and essentially all of them were real. The ones
+that changed the design:
+
+### D70. The server field had nothing behind it
+
+`PairingView` showed a server URL and `pair()` never read it: pairing always
+went to a frozen `origin` defaulting to `http://localhost:8080`. On an installed
+phone `localhost` **is** the phone, so Settings could not do the one job
+DESIGN.md §1k gives it — connect a fresh install to the user's server — and a
+text field that accepts typing and changes nothing is exactly what §4 forbids.
+
+`HTTPMailSource.origin` is now computed from `ServerSetting`, which the pairing
+screen writes. A `NADE_BASE_URL` in the environment still outranks it, and the
+field says so rather than pretending otherwise.
+
+### D71. Changing the server has to throw the old server's mail away
+
+The Keychain item is origin-bound, so a token could never cross. The **database
+could**: it is one file, and `INBOX` and `SENT` are the same ids on every
+account, so server A's threads would sit under server B's mailboxes until each
+one happened to be refreshed. Two accounts' mail in one list is a data-isolation
+failure, not a stale cache. `MailSync.pair(origin:…)` unpairs and empties the
+store when the origin actually changes.
+
+### D72. An empty answer is not a deletion
+
+`refresh()` called `replaceMailboxes(boxes)` before noticing `boxes.isEmpty`,
+and replacement cascades every join row and every cursor away. So the two
+minutes during which the server legitimately answers `mailboxes: []` would
+destroy the cache that A16's offline behaviour depends on — on a device that
+already had mail, mid-sync, for no reason. An empty list now means "wait", not
+"delete".
+
+### D73. Consent finishing needs something to notice
+
+`.needsGmail` stops polling, and D29 keeps the Mail screens resident — so
+returning from Safari after a successful Gmail sign-in re-ran no `.task` and the
+app sat on "Needs sign-in" until the next launch. A `scenePhase` observer at the
+root refreshes on `.active`. It also gives the first-run poll a second chance:
+the interval table is ~5 minutes and exhausting it is no longer terminal.
+
+### D74. Every failure path handles recovery, not just the first one
+
+`409 needs_reauth` and `401` were handled inside `refresh()` alone. Hit while
+paging or opening a thread, they never wrote `account.status`, never surfaced
+"Sign in again" and never cleared a revoked token — so whether the user could
+recover depended on which request happened to fail first. One `handle(_:from:)`
+now carries the transitions, and the poll loop uses it too.
+
+The cache-over-failure promotion widened at the same time: a 502 or a rate limit
+on a cold launch is no more evidence that a device is unpaired than a dead Wi-Fi
+is, and only `isUnreachable` was being forgiven.
+
+### D75. One error slot was wrong in both directions
+
+A successful mailbox refresh cleared a *thread's* failure while the thread
+stayed blank, and a thread's failure appeared on the mail list, which was
+working. Problems are keyed by `ProblemKind` and cleared by the same operation
+succeeding. A mail list shows the account-level problem first, then its own; a
+thread shows its own first, then the account's — never another screen's.
+
+### D76. A failed `ValueObservation` is over
+
+GRDB does not resume one. Every `onError` discarded the error, so a fetch or
+decode failure froze the screen on its last value with no caption — and the
+token stayed set, so the guard in `start()` refused to build a replacement even
+after good rows were written.
+
+**Superseded by D84.** The first fix wrote the policy three times in three
+shapes and left it out of the fourth observation entirely.
+
+### D77. Paging was one flag for every mailbox
+
+`isLoadingMore` was shared, so a list still paging in mailbox A could swallow
+B's first load-more and never re-run it, because B's sentinel row had already
+appeared. Keyed by mailbox.
+
+### D78. The renderer does not edit the mail
+
+`ThreadMessageBlock` trimmed every paragraph and dropped the empty ones, which
+quietly rewrote `body_text`: indentation in pasted code, deliberate blank
+stanzas, trailing whitespace. The parser on the other side wrote three fixes to
+produce this text faithfully. Splitting on blank lines is now the only thing
+done to it.
+
+### D79. Two bands were short because they had no line box
+
+1k's header and 1f's nav, meta and footer omitted `nadeLineHeight`, so they
+rendered at the face's natural height rather than the DS's inherited 1.55 — 1k's
+divider visibly higher than 1g's for an identical `62 / 22 / 12`. Both bands
+were extracted into `SettingsHeader` and `ThreadNavBar` so the measurement is of
+a render rather than of a constant, which is the only reason the shortfall was
+provable at all.
+
+### D80. The pop-gesture delegate has to outlive the screen that installed it
+
+`UINavigationController` holds it weakly, and every destination was installing
+its own — so popping the top screen deallocated the delegate the *next* screen's
+gesture depended on, leaving the recogniser enabled with nothing guarding it at
+the root. One shared `PopGestureGuard`. The UI test now pops twice and then
+pushes again, because a test that stops after the first pop cannot see this.
+
+An edge swipe *at* the root is deliberately not asserted: with nothing to pop,
+what happens next belongs to iOS, and pinning it would be testing UIKit.
+
+### D81. `Character.isNumber` is not "an ASCII digit"
+
+It is true of Arabic-Indic digits, Devanagari digits, fullwidth numerals and a
+long tail more — none of which `POST /auth/pair` accepts. Enabling Pair for them
+sends a request that cannot succeed.
+
+### D82. Recovery has to cover the migration
+
+Delete-and-retry surrounded only the open, so a database that opened cleanly and
+then failed to migrate stayed on disk and failed again on every launch, with the
+error swallowed by a `try?` in the composition root. `openWriter(preparing:)`
+runs the migration inside the retry, and `MailStore.openingOrEmpty` is the one
+place that falls back to memory.
+
+### D83. `@State` with a default is not "assembled once"
+
+A `@State` default is a stored-property initialiser: it runs every time the view
+struct is constructed and SwiftUI keeps only the first result. `WindowGroup`'s
+content closure re-runs on scene changes, so `@State private var composition =
+Composition.live()` would open a second `DatabasePool` on the same file, and a
+third, each discarded but holding its descriptors. `CompositionRoot.shared`.
+
+
+---
+
+## P2 — the cleanup pass (2026-08-19)
+
+Four parallel reviews — reuse, simplification, efficiency, altitude — over the
+finished lane. The findings that changed the code rather than a comment:
+
+### D84. The observation policy is one object, not a habit
+
+D76 named the rule (*an observation that errored is over: drop every token so
+`start()` can rebuild, and put a caption up*) and then implemented it three
+times in three shapes — a method taking `Error`, an inline closure ignoring it,
+a method taking nothing — with two of the three strings byte-identical. The
+fourth observation, `SettingsModel`'s, had `onError: { _ in }`. The policy went
+missing from one of four call sites **inside the lane that wrote it down**.
+
+`StoreObservation` owns the tokens, the problem slot and the rule; a model
+declares what it watches and the copy is a parameter. P3's notes, P5's feed and
+P7's agents are all `ValueObservation`-backed lists, and each would have been a
+fifth, sixth and seventh copy.
+
+### D85. The prerequisite chain is named, not retried
+
+`loadThreads` and `loadThread` each carried a one-shot retry for the same rule —
+**mailboxes → list row → detail** — in two different shapes, with the
+termination counter exposed as an `allowingRetry` parameter on both public
+signatures. Every call site could see a flag it must never pass.
+
+Worse, the retry ran `refresh()`, the whole state machine, to satisfy a paging
+prerequisite; and with a `Retry-After` outstanding `refresh()` returns having
+done nothing, so the recursion failed silently and the screen stayed empty.
+
+`ensureMailboxes()` and `ensureListRow(for:in:)` are narrow and idempotent, and
+any future cold entry point — P5's feed→thread jump, P6's push deep link — gets
+them without knowing they exist.
+
+### D86. `MailRoute.thread` carries its mailbox
+
+It was `.thread(id:)`, and the screen got the rest by reaching around the route:
+`mailboxID` from app-global `selectedMailboxID`, and `backTitle` computed *in
+the parent* by scanning the mailbox list. Three costs: two threads opened from
+different mailboxes hashed identically, so `NavigationStack` could not tell them
+apart; naming a destination took two writes, and one of the two call sites of
+the method that keeps them in sync bypassed it; and a route constructed from
+outside the view tree — which is exactly what P5 and P6 do — would open against
+whichever mailbox happened to be selected.
+
+### D87. `@State private var model = Model(…)` is not "built once"
+
+`MailTabRoot` declared four models that way, and `screen(for:)` runs inside
+`ForEach(NTab.allCases)` — so every tab switch and every push re-ran the
+initialiser four times and discarded the results, one of which read the Keychain
+and the process environment on the way. The same trap as D83, one layer down.
+They live on the composition now, with the lifetime they always had.
+
+### D88. Three formatters were being rebuilt on hot paths
+
+Measured rather than assumed. `DateFormatter` construction is **145×** a reuse
+(55 µs against 0.4), and `ListTime` built one per call while `MailRow` called it
+twice per row — once to render and once inside the accessibility label — so a
+25-row screen spent ~2.8 ms per render compiling ICU patterns, against an 8.3 ms
+budget at 120 Hz. Memoised by `(format, time zone)`, which keeps the injected
+calendar in `ListTimeTests` working and survives a device changing zone.
+
+`ThreadMessageBlock` re-split the whole message body on every `body` evaluation,
+in a plain `VStack` — so every message in a thread paid it, not just the visible
+ones. Split once, at construction. `ProcessInfo.environment` materialises the
+whole environment per access to read one key that cannot change after launch.
+
+Three things the same review checked and cleared, with numbers:
+`WireTime.decoder()` (~0.15 µs, once per response), `ByteCountFormatter`
+(0.07 µs), and the Keychain query dictionary (0.21 µs against an XPC round
+trip). The cost there was *how often* the Keychain was reached — from
+`SettingsView.body` — which is fixed separately.
+
+### D89. Every wire string was typed twice
+
+Each `WireEnum` carried a `rawValue` switch and a mirror-image
+`init?(rawValue:)` switch: ~50 paired literals across four types, with nothing
+asserting the pairs agreed. `ErrorCode` happened to be covered because
+`WireDecodeTests` drives off the thirteen `error_*.json` fixtures; `RunStatus`
+has eight cases and fixtures for four, so `queued`, `running`, `waiting` and
+`skipped` had never had their two literals compared in either direction.
+
+`init?(rawValue:)` is derived from `allKnown`, and `WireEnumTests` asserts every
+known case round-trips and that no unknown value collides with one.
+
+### D90. The offline mode was a parallel composition root
+
+`-NADESeed offline` hand-built an `HTTPMailSource`, an `APIClient` and a test
+double inside the shipping composition, bypassing `Composition.live()` entirely.
+A16 — the criterion that proves the app degrades correctly — was proving a
+hand-built lookalike degrades correctly. `live()` now takes its three inputs and
+every DEBUG mode substitutes into it, so P3's device registration reaches the
+offline world too.
+
+### D91. Two coverage lists argued against themselves
+
+`FixtureParityTests` re-listed all ten fixtures by hand immediately after
+correctly iterating `FixtureSeed.names` — in the file whose own header argues a
+manifest must be asserted rather than a directory looped. `WireDecodeTests`'
+round-trip hand-listed ten `(type, fixture)` pairs, for the test whose stated
+purpose is that *a dropped field is invisible until something needs it*. Driving
+both off the directory found **twelve** shapes, not ten: `me_needs_reauth` and
+`search_empty` had been silently exempt.
+
+### D92. The fixture world's mapping is a table with a test
+
+`FixtureMailSource.threads` special-cased two mailbox ids in a `switch`, and the
+reason `Label_12` mattered — that `mailboxes.json` names it "To Reply" and both
+thread details carry that `mailbox_name` — lived only in a comment. Asserting
+the table found a real gap: `thread_html_only.json` is filed under
+"Subscriptions", which no page backed, so the one fixture exercising an emoji
+subject, a synthesised `body_text` and `to: []` had no list row and could not be
+opened at all.

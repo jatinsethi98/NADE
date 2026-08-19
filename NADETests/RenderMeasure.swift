@@ -95,6 +95,20 @@ enum RenderMeasure {
     /// an @2x SE and an @3x 17 Pro.
     nonisolated static let bitmapScale: CGFloat = 3
 
+    /// The design frame, from `docs/DESIGN.md`: "iPhone at **402 × 874 pt**".
+    nonisolated static let designWidth: CGFloat = 402
+
+    /// Two roundings onto the device pixel grid — ⅔ pt at @3x, 1 pt on the @2x
+    /// SE. The floor on how tightly any measured expectation can be stated.
+    nonisolated static var grid: CGFloat { 2 * snap }
+
+    /// The residual between SwiftUI's box model and CSS's: `strokeBorder` draws
+    /// inside the frame where CSS `border` adds to an auto height, and a
+    /// `TextField` reserves a slightly taller line box. IOS_DECISIONS D32
+    /// measures it at ≤ ~1.1 pt. Stated here once rather than copied into each
+    /// geometry suite.
+    nonisolated static var cssBox: CGFloat { 1.2 + grid }
+
     /// What a view actually paints, at `bitmapScale` pixels per point.
     ///
     /// `sizeThatFits` answers "how big is this component". It cannot answer

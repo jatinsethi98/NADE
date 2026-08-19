@@ -28,6 +28,7 @@ final class FontLoadTests: XCTestCase {
     private static let expected: [(psName: String, familyPrefix: String, file: String)] = [
         ("Lora-Regular", "Lora", "Lora-Regular.ttf"),
         ("Lora-SemiBold", "Lora", "Lora-SemiBold.ttf"),
+        ("Lora-Italic", "Lora", "Lora-Italic.ttf"),
         ("CormorantGaramond-Regular", "Cormorant Garamond", "CormorantGaramond-Regular.ttf"),
         ("CormorantGaramond-SemiBold", "Cormorant Garamond", "CormorantGaramond-SemiBold.ttf"),
     ]
@@ -222,6 +223,7 @@ final class RenderedFaceTests: XCTestCase {
         Case(name: "heading regular", font: Theme.Font.heading(size, weight: .regular), psName: Theme.Font.PostScriptName.headingRegular),
         Case(name: "body regular", font: Theme.Font.body(size), psName: Theme.Font.PostScriptName.bodyRegular),
         Case(name: "body semibold", font: Theme.Font.body(size, weight: .semibold), psName: Theme.Font.PostScriptName.bodySemibold),
+        Case(name: "body italic", font: Theme.Font.bodyItalic(size), psName: Theme.Font.PostScriptName.bodyItalic),
     ]
 
     private func rendered(_ font: SwiftUI.Font) -> CGSize {
@@ -270,6 +272,35 @@ final class RenderedFaceTests: XCTestCase {
                 """
             )
         }
+    }
+
+    /// Italic must be the italic *face*, not the roman and not a synthesised
+    /// oblique. The two tests above already pin it to Core Text in
+    /// `Lora-Italic` and away from the system face; this closes the last hole —
+    /// a `bodyItalic` that pointed at `Lora-Regular` would satisfy "renders in
+    /// a bundled face" and "is not the system face" simultaneously.
+    ///
+    /// Lora's italic is a drawn cut (`italicAngle` −3, its own outlines), so it
+    /// typesets this sample a measurable distance from the roman.
+    func testItalicIsTheItalicFaceAndNotTheRoman() throws {
+        let italic = try XCTUnwrap(UIFont(name: Theme.Font.PostScriptName.bodyItalic, size: Self.size))
+        let roman = try XCTUnwrap(UIFont(name: Theme.Font.PostScriptName.bodyRegular, size: Self.size))
+
+        // The faces themselves differ …
+        XCTAssertNotEqual(
+            RenderMeasure.typesetWidth(Self.sample, font: italic),
+            RenderMeasure.typesetWidth(Self.sample, font: roman),
+            accuracy: 0.01,
+            "Lora-Italic and Lora-Regular typeset identically — the italic file is not a real italic cut"
+        )
+
+        // … and the Theme entry point resolves to the italic one.
+        XCTAssertMeasures(
+            rendered(Theme.Font.bodyItalic(Self.size)).width,
+            RenderMeasure.typesetWidth(Self.sample, font: italic),
+            accuracy: 2 * RenderMeasure.snap,
+            "Theme.Font.bodyItalic width (expected Lora-Italic)"
+        )
     }
 
     /// Cormorant and Lora must not be the same face — a copy-paste in

@@ -17,10 +17,7 @@ final class AccessibilityUITests: XCTestCase {
     }
 
     private func launchGallery(section: String) -> XCUIApplication {
-        let app = XCUIApplication()
-        app.launchArguments = ["-NADEGallery", "1", "-NADEGallerySection", section]
-        app.launch()
-        return app
+        XCUIApplication.nade(seed: nil, now: nil, gallerySection: section)
     }
 
     /// F19. 1d's three "Ends" rows differ *only* in their trailing value. With

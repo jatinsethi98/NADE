@@ -11,6 +11,13 @@
 # SSE fixtures are the exact wire bytes of a stream, blank-line framing included.
 *.sse           -text
 
+# Contract fixtures are canonically formatted by docs/contract/validate.py
+# (2-space indent, real UTF-8, trailing newline, LF) and P2 ships byte-identical
+# copies of nine of them inside the app bundle, with a test asserting the two
+# sets are the same bytes. A claim about bytes should be about bytes, so no
+# normalisation gets to touch them on the way in or out.
+*.json          -text
+
 # Binaries, marked so git never inspects or rewrites them.
 *.ttf           binary
 *.png           binary

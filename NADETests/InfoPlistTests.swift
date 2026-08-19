@@ -9,6 +9,7 @@
 //
 
 import XCTest
+@testable import NADE
 
 final class InfoPlistTests: XCTestCase {
 
@@ -24,7 +25,11 @@ final class InfoPlistTests: XCTestCase {
         let fonts = try XCTUnwrap(
             Bundle.main.object(forInfoDictionaryKey: "UIAppFonts") as? [String]
         )
-        XCTAssertEqual(fonts.count, 4)
+        // Derived, not guessed — the same discipline as the deployment-target
+        // sweep below. A face added to `Theme.Font` without a `UIAppFonts`
+        // entry (or the reverse) fails here rather than rendering the system
+        // font at runtime.
+        XCTAssertEqual(fonts.count, Theme.Font.PostScriptName.all.count)
     }
 
     /// The dev backend is plain HTTP on the LAN. `NSAllowsLocalNetworking`
@@ -97,6 +102,64 @@ final class InfoPlistTests: XCTestCase {
             Set(values), ["18.0"],
             "IPHONEOS_DEPLOYMENT_TARGET is not 18.0 in every configuration: \(values)"
         )
+    }
+
+    /// P2 A19. `docs/DESIGN.md` defines exactly one frame — 402 × 874, an
+    /// iPhone in portrait — and every geometry expectation in the suite is
+    /// written against it. The target shipped as `TARGETED_DEVICE_FAMILY =
+    /// "1,2"` with landscape enabled on both, which advertises three surfaces
+    /// (iPad portrait, iPad landscape, iPhone landscape) that no criterion
+    /// covers and no render exists for. Narrowing is the honest move; this is
+    /// what stops it drifting back.
+    ///
+    /// Derived the same way as the deployment-target sweep: one setting per
+    /// configuration, not "at least one somewhere".
+    func testEveryBuildConfigurationTargetsIPhoneOnly() throws {
+        let text = try projectFile()
+
+        let lists = try NSRegularExpression(pattern: #"isa = XCConfigurationList;"#)
+            .numberOfMatches(in: text, range: NSRange(text.startIndex..., in: text))
+
+        let regex = try NSRegularExpression(pattern: #"TARGETED_DEVICE_FAMILY\s*=\s*([^;]+);"#)
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        XCTAssertEqual(
+            matches.count, lists * 2,
+            "\(matches.count) TARGETED_DEVICE_FAMILY settings for \(lists) configuration lists — expected \(lists * 2)"
+        )
+
+        var values: [String] = []
+        for match in matches {
+            guard let r = Range(match.range(at: 1), in: text) else { continue }
+            values.append(String(text[r]).trimmingCharacters(in: .whitespaces))
+        }
+        XCTAssertEqual(
+            Set(values), ["1"],
+            "TARGETED_DEVICE_FAMILY is not iPhone-only in every configuration: \(values)"
+        )
+    }
+
+    /// The other half of A19. `TARGETED_DEVICE_FAMILY = 1` removes iPad; this
+    /// removes landscape, which the design has no layout for either.
+    func testNoConfigurationAdvertisesLandscape() throws {
+        let text = try projectFile()
+
+        XCTAssertFalse(
+            text.contains("UISupportedInterfaceOrientations_iPad"),
+            "an iPad orientation list survives in a build that no longer ships to iPad"
+        )
+
+        let regex = try NSRegularExpression(pattern: #"INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone\s*=\s*([^;]+);"#)
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        XCTAssertFalse(matches.isEmpty, "no iPhone orientation setting at all — the default would re-enable landscape")
+
+        for match in matches {
+            guard let r = Range(match.range(at: 1), in: text) else { continue }
+            let value = String(text[r]).trimmingCharacters(in: CharacterSet(charactersIn: " \""))
+            XCTAssertEqual(
+                value, "UIInterfaceOrientationPortrait",
+                "the design has one frame and it is portrait; this configuration advertises \(value)"
+            )
+        }
     }
 
     /// The sweep above reads the values written *in* the project file. An
