@@ -180,7 +180,15 @@ inactive = `ink62`.
 | Calendar | `calendar` | `calendar` |
 
 Recorded deviation: SF Symbols stand in for Lucide (parity map, PLAN.md).
-Rendered at `.font(.system(size: 18, weight: .light))` to match stroke 1.8.
+Rendered at `.font(.system(size: 18, weight: .light))` to match stroke 1.8 —
+**and framed at 18 × 18**. The font size sets the stroke; it does not set the
+box. An SF Symbol reports its *font* line box instead (~24 pt at size 18, and a
+different number per symbol), where every glyph in the mockup is an
+`<svg width="18" height="18">`. Taken as a box, the bar measured 78.67 pt
+against the mockup's 75.28 and the four labels landed on baselines 2.33 pt
+apart. `NIcon` therefore carries the square frame, and the label's own box is
+the inherited `line-height: 1.55` — `10.5 × 1.55 = 16.275`, not Lora's ~13.4.
+Bar height is exactly `1 + 9 + 18 + 5 + 16.275 + 26 = 75.275`.
 
 Which screens carry the bar, and which tab is lit — this is the design's own
 navigation map, so follow it:

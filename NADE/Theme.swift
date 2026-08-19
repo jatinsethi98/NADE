@@ -390,6 +390,16 @@ extension View {
 ///
 /// `Font.system(size:)` is a frozen size, so it is wrapped in `@ScaledMetric`
 /// here. Everything in the app that draws a glyph goes through this.
+///
+/// **The box is square and it is the design's.** Every glyph in the mockup is
+/// an `<svg width="N" height="N">` — a fixed layout box that the paths draw
+/// inside. An SF Symbol sized by its font reports its *font* line box instead:
+/// ~24 pt at size 18, and a different number for every symbol. Left to that,
+/// the four tab columns measured 15–20 pt of glyph, so the bar came out 3.4 pt
+/// taller than the mockup and the four labels landed on four baselines 2.3 pt
+/// apart. The `.frame` restores the design's box. It does not clip — the ink
+/// still renders at the font's own size and is centred, which is exactly what
+/// a `viewBox` lets its paths do.
 struct NIcon: View {
     private let systemName: String
     private let weight: Font.Weight
@@ -409,6 +419,9 @@ struct NIcon: View {
     var body: some View {
         Image(systemName: systemName)
             .font(Theme.Font.icon(size, weight: weight))
+            // `size` is the `@ScaledMetric` value, so the box grows with the
+            // glyph rather than trapping it.
+            .frame(width: size, height: size)
     }
 }
 

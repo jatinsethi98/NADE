@@ -827,3 +827,84 @@ Theme.stringsdata", because `NADE/` is a synchronized file group and two files
 of that name cannot coexist in one target. The path exemption is still the right
 call — it costs nothing and does not depend on that staying true — but the
 finding's premise is weaker than it reads.
+
+---
+
+## P1 — the design-parity audit (2026-08-18)
+
+A pass comparing the shipped component layer against `Email App.dc.html`
+directly, by measuring rendered pixels rather than re-reading the source. Four
+findings, all closed here. 108 tests green.
+
+### D46. The glyph's box is the design's, not the font's
+
+`NIcon` sized itself by `Font.system(size:)`, so its layout box was the SF
+Symbol's **font line box** — ~24 pt at size 18, and a different number for every
+symbol. Every glyph in the mockup is an `<svg width="18" height="18">`.
+
+Measured off `docs/screens/p1-shell.png`: the tab bar stood at **78.67 pt**
+against the mockup's 75.28, and because each column is its own `VStack`, the
+four glyph boxes gave the four labels four baselines — ink tops at
+39.00 / 39.33 / 41.00 / 41.33 pt below the rule, a **2.33 pt spread**, with
+glyph ink running 15.0 / 16.0 / 18.67 / 20.0.
+
+`NIcon` now carries `.frame(width: size, height: size)`. It does not clip; the
+ink still renders at the font's own size and is centred, which is what a
+`viewBox` lets its paths do. Deviation #1 covered the Lucide→SF swap as a change
+of *shape*; it never covered the change of *box*, and DESIGN.md §2 now says so.
+
+Re-measured after the fix: bar **75.33 pt**, label spread **0.00 pt**.
+
+### D47. The tab label's box is set, not derived
+
+The label was the term that decided the rest of the bar's height and it had no
+line-height at all, so its box was Lora's own ~13.4 rather than the inherited
+`line-height: 1.55` (16.275).
+
+`nadeLineHeight` is the usual answer and it is wrong here: it derives its delta
+from `UIFont.lineHeight`, which holds at the 13–17 pt the modifier was measured
+against but not at 10.5, where Lora reports **13.44** and SwiftUI lays out
+**14.33**. The modifier therefore overshoots by **1.06 pt** at this size. A tab
+label is a fixed one-line box, so `NTabBar` sets it with a `@ScaledMetric`
+frame, which is exact and still scales.
+
+**This is a live crack in `nadeLineHeight`, not a closed one.** The same
+overshoot applies wherever it is used below ~13 pt — `NTag` at 11 and `NChip`
+at 12.5 — and their geometry assertions run at the `cssBox` tolerance (~1.9 pt),
+which is wide enough to hide it. Nothing here fixes that; it is written down so
+the next pass does not rediscover it as a surprise.
+
+### D48. `.askCentred` is gold before anyone taps it
+
+The mockup's centred ask field (2a focus / 2b, line 57) carries
+`border-color: var(--color-accent)` **on the element**, and DESIGN.md §2's table
+and §3-2a·4 both repeat it. `NTextField.Metrics` had no field for a resting
+border, so the preset drew a hairline until focused — and the field is not
+focused when that screen opens, so 2b would have shipped grey.
+
+`Metrics` gained `border: Border`, defaulting to `.divider`, `.accent` on
+`.askCentred` alone.
+
+The interesting part is why nothing caught it. The gallery passed
+`showsFocusRing: true` on that one row — a flag whose own doc comment says
+"gallery / preview only" — which made the screenshot look right. And
+`testPillAndRoundedControlsActuallyDrawDifferentCorners` rendered `.askCentred`
+at rest and searched the top row for the **hairline** colour, so the test
+asserted the bug. Both now read the colour from `Metrics.restingBorderColor`,
+and `testEachPresetDrawsItsOwnRestingBorder` reads the outline off the render
+for all six presets.
+
+### D49. A sum of its own parts is not a measurement
+
+`testTabBarHeightIsBuiltFromItsOwnMetrics` measured `icon.height` and
+`label.height` from the very views the bar is built from, then asserted the bar
+equalled their sum plus the padding. That is an identity. It proved the padding
+was applied and nothing about the two terms that decide the height — it was
+green throughout the 78.67 pt bar and the 2.33 pt baseline spread.
+
+This is D33's failure mode recurring one level up: the previous round replaced
+constants-compared-with-themselves, and the replacement compared a *render* with
+itself. The fix is that the expectation contains no term read back off the view:
+`1 + 9 + 18 + 5 + 10.5 × 1.55 + 26`, every term a `Theme` constant, cross-checked
+against the literal 75.275. `testEveryTabGlyphOccupiesTheSameDesignBox` pins the
+box that D46 was about.

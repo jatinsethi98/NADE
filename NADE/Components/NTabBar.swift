@@ -47,6 +47,17 @@ enum NTab: String, CaseIterable, Identifiable, Sendable {
 struct NTabBar: View {
     @Binding private var selection: NTab
 
+    /// The label's line box, `10.5 × 1.55 = 16.275`, scaling with the label.
+    ///
+    /// Set directly rather than through `nadeLineHeight`, which derives its
+    /// delta from `UIFont.lineHeight`. That premise holds at the 13–17 pt the
+    /// modifier was measured against, but at 10.5 pt Lora reports 13.44 where
+    /// SwiftUI lays out 14.33 — so the modifier overshot by 1.06 and the bar
+    /// came out 76.33 against the mockup's 75.28. A tab label is a fixed
+    /// one-line box, which is precisely what a `frame` expresses.
+    @ScaledMetric(relativeTo: .caption2) private var labelBox: CGFloat =
+        Theme.Metrics.TabBar.labelSize * Theme.LineHeight.body
+
     init(selection: Binding<NTab>) {
         self._selection = selection
     }
@@ -124,6 +135,11 @@ struct NTabBar: View {
                     // with tracking is already tight — shrink, never wrap.
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
+                    // The label is a flex item, so its box is the inherited
+                    // `line-height: 1.55` — 10.5 × 1.55 = 16.275, not Lora's
+                    // own ~13.4. Left off, the bar's height was decided by the
+                    // face rather than by the design. See `labelBox`.
+                    .frame(height: labelBox)
                     .accessibilityHidden(true)
             }
             .foregroundStyle(isSelected ? Theme.Color.accent : Theme.Color.ink62)

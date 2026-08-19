@@ -359,20 +359,27 @@ final class ThemeTests: XCTestCase {
     /// DESIGN.md §2's ask-field table, one preset per row. Rendered heights are
     /// in `ComponentGeometryTests`; this is the table itself.
     func testEveryAskFieldPresetIsItsScreensNumbers() {
-        let expected: [(String, NTextField.Metrics, CGFloat, CGFloat, CGFloat, CGFloat)] = [
-            ("DS .input", .input, 14, 6, 10, 36),
-            ("2a feed", .askPinned, 13.5, 8, 15, 38),
-            ("1a docked", .askDocked, 14, 9, 15, 40),
-            ("2a focus / 2b", .askCentred, 14, 10, 16, 44),
-            ("1f thread", .askThread, 13.5, 10, 15, 38),
-            ("1h search", .searchPill, 13.5, 8, 14, 38),
+        let expected: [(String, NTextField.Metrics, CGFloat, CGFloat, CGFloat, CGFloat, NTextField.Border)] = [
+            ("DS .input", .input, 14, 6, 10, 36, .divider),
+            ("2a feed", .askPinned, 13.5, 8, 15, 38, .divider),
+            ("1a docked", .askDocked, 14, 9, 15, 40, .divider),
+            // The one row of DESIGN.md §2's table whose Border column is not
+            // "divider" — the mockup gives 2b's field its accent at rest.
+            ("2a focus / 2b", .askCentred, 14, 10, 16, 44, .accent),
+            ("1f thread", .askThread, 13.5, 10, 15, 38, .divider),
+            ("1h search", .searchPill, 13.5, 8, 14, 38, .divider),
         ]
-        for (name, m, font, padV, padH, minH) in expected {
+        for (name, m, font, padV, padH, minH, border) in expected {
             XCTAssertEqual(m.fontSize, font, "\(name) font size")
             XCTAssertEqual(m.paddingV, padV, "\(name) vertical padding")
             XCTAssertEqual(m.paddingH, padH, "\(name) horizontal padding")
             XCTAssertEqual(m.minHeight, minH, "\(name) min-height")
+            XCTAssertEqual(m.border, border, "\(name) resting border")
         }
+        XCTAssertEqual(
+            expected.filter { $0.6 == .accent }.count, 1,
+            "exactly one preset is gold before it is focused"
+        )
         XCTAssertEqual(NTextField.Metrics.input.shape, .rounded)
         for m in [NTextField.Metrics.askPinned, .askDocked, .askCentred, .askThread, .searchPill] {
             XCTAssertEqual(m.shape, .pill)

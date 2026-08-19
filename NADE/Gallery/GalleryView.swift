@@ -376,10 +376,13 @@ struct GalleryView: View {
                 NButton(systemImage: "arrow.up", label: "Ask", glyph: 17, corner: .pill, box: 40) {}
             }
 
-            GalleryLabel("2a focus / 2b — 14 pt · 10/16 · 44 · accent border · `arrow.up` 18")
+            GalleryLabel("2a focus / 2b — 14 pt · 10/16 · 44 · accent border at rest · `arrow.up` 18")
             HStack(spacing: 10) {
+                // No `showsFocusRing` here: the accent comes from the preset,
+                // which is the point. Faking it with focus hid the fact that
+                // `.askCentred` had no resting border of its own.
                 NTextField("Ask, search, or describe an agent", text: $emptyField,
-                           metrics: .askCentred, showsFocusRing: true)
+                           metrics: .askCentred)
                 NButton(systemImage: "arrow.up", label: "Ask", glyph: 18, corner: .pill, box: 44) {}
             }
 

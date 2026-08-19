@@ -33,6 +33,22 @@ final class ComponentGeometryTests: XCTestCase {
     /// two of these components, which is what the mutation checks confirmed.
     private var cssBox: CGFloat { 1.2 + 2 * RenderMeasure.snap }
 
+    /// A `Theme` colour as it lands **on the page**. `RenderMeasure.components`
+    /// drops alpha, and half this palette is a translucent ink — `divider` is
+    /// `ink` at 16 %, so what a render paints is that blend over `bg`. An
+    /// opaque colour (`accent`) comes back unchanged, which is what lets a
+    /// caller pass either one without knowing which it has.
+    private static func onPageComponents(of color: SwiftUI.Color) -> (r: Double, g: Double, b: Double) {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(color).getRed(&r, green: &g, blue: &b, alpha: &a)
+        let ground = RenderMeasure.components(of: Theme.Color.bg)
+        return (
+            r: ground.r + Double(a) * (Double(r) - ground.r),
+            g: ground.g + Double(a) * (Double(g) - ground.g),
+            b: ground.b + Double(a) * (Double(b) - ground.b)
+        )
+    }
+
     // MARK: - Line height (F1)
 
     /// DS `body { line-height: 1.55 }`. One line of Lora 15 must occupy
@@ -470,33 +486,59 @@ final class ComponentGeometryTests: XCTestCase {
         }
     }
 
-    /// F13. `ThemeTests.testTabBarMetricsMatchTheDesign` compares
-    /// `Theme.Metrics.TabBar` with itself; every one of these numbers stayed
-    /// green with the bar rendering `padding(.top, 4)`, `padding(.bottom, 40)`,
-    /// `VStack(spacing: 15)` and an **28 pt** glyph. The bar's height is the
-    /// only place four of them are observable at once, so it is taken apart
-    /// here: `1 + 9 + icon + 5 + label + 26`, every term a `Theme` constant and
-    /// the two variable ones rendered rather than assumed.
-    func testTabBarHeightIsBuiltFromItsOwnMetrics() {
+    /// F13, and then a second time in the same place.
+    ///
+    /// The first version measured `icon.height` and `label.height` off the very
+    /// same views the bar is built from, then asserted the bar equalled their
+    /// sum plus the padding. That is an identity: it proves the padding is
+    /// applied and nothing whatever about the two terms that matter. It stayed
+    /// green with a 24.2 pt glyph box and a 13.4 pt label box — a bar measured
+    /// at **78.67** pt against the mockup's 75.28.
+    ///
+    /// The mockup's terms are fixed and none of them is read back off the view:
+    /// an `<svg width="18" height="18">`, a label whose flex box is the
+    /// inherited `line-height: 1.55`, and `padding: 9px 10px 26px` under a
+    /// 1 px `border-top`.
+    func testTabBarHeightIsTheMockupsOwnArithmetic() {
         typealias M = Theme.Metrics.TabBar
         let bar = RenderMeasure.size(of: NTabBar(selection: .constant(.ask)), proposedWidth: 402)
 
-        let icon = RenderMeasure.size(
-            of: NIcon(NTab.ask.symbol, size: M.iconSize, weight: .light, relativeTo: .caption2)
-        )
-        let label = RenderMeasure.size(
-            of: Text(NTab.ask.title)
-                .textCase(.uppercase)
-                .font(Theme.Font.body(M.labelSize))
-                .nadeTracking(M.labelTracking, at: M.labelSize)
-                .lineLimit(1)
-        )
+        let expected = Theme.Stroke.border                // border-top: 1px
+            + M.paddingTop                                // 9
+            + M.iconSize                                  // the svg's own 18
+            + M.iconLabelGap                              // gap: 5
+            + M.labelSize * Theme.LineHeight.body         // 10.5 × 1.55 = 16.275
+            + M.paddingBottom                             // 26
 
-        XCTAssertMeasures(
-            bar.height,
-            Theme.Stroke.border + M.paddingTop + icon.height + M.iconLabelGap + label.height + M.paddingBottom,
-            accuracy: grid,
-            "tab bar height = hairline + \(M.paddingTop) + glyph + \(M.iconLabelGap) + label + \(M.paddingBottom)"
+        XCTAssertMeasures(bar.height, expected, accuracy: grid, "tab bar height against the mockup's boxes")
+        // The same number written out, so a `Theme` constant drifting fails
+        // here and not only in `ThemeTests`.
+        XCTAssertMeasures(bar.height, 75.275, accuracy: grid, "the mockup's bar is 75.275 pt")
+    }
+
+    /// Four columns, four SF Symbols, one `VStack` each: if the glyph boxes
+    /// differ the labels land on different baselines, and in `p1-shell.png`
+    /// they did — label ink tops 39.00 / 39.33 / 41.00 / 41.33 pt below the
+    /// rule, a **2.33 pt** spread, because each column was sized by its own
+    /// symbol's font line box (glyph ink 15.0 / 16.0 / 18.67 / 20.0).
+    ///
+    /// Every glyph in the mockup is an 18 × 18 `<svg>`. Equal boxes is the
+    /// sufficient condition — the label below carries identical modifiers in
+    /// all four columns — so it is the box that is asserted here.
+    func testEveryTabGlyphOccupiesTheSameDesignBox() {
+        typealias M = Theme.Metrics.TabBar
+        var boxes: [String: CGSize] = [:]
+        for tab in NTab.allCases {
+            let glyph = RenderMeasure.size(
+                of: NIcon(tab.symbol, size: M.iconSize, weight: .light, relativeTo: .caption2)
+            )
+            boxes[tab.rawValue] = glyph
+            XCTAssertMeasures(glyph.height, M.iconSize, accuracy: RenderMeasure.snap, "\(tab.rawValue) glyph box height")
+            XCTAssertMeasures(glyph.width, M.iconSize, accuracy: RenderMeasure.snap, "\(tab.rawValue) glyph box width")
+        }
+        XCTAssertEqual(
+            Set(boxes.values.map(\.height)).count, 1,
+            "the four tab glyph boxes are not the same height: \(boxes)"
         )
     }
 
@@ -620,17 +662,12 @@ final class ComponentGeometryTests: XCTestCase {
     /// row 0 spans `r … width − r`; a pill's radius is half its height. On a
     /// 38–44 pt control that is a 15–18 pt difference per side.
     func testPillAndRoundedControlsActuallyDrawDifferentCorners() throws {
-        // `divider` is `ink` at 16 %; on the page it is that blend over `bg`.
-        let ink = RenderMeasure.components(of: Theme.Color.ink)
-        let bg = RenderMeasure.components(of: Theme.Color.bg)
-        let hairline = (
-            r: bg.r + 0.16 * (ink.r - bg.r),
-            g: bg.g + 0.16 * (ink.g - bg.g),
-            b: bg.b + 0.16 * (ink.b - bg.b)
-        )
-
         var insets: [NTextField.Shape: [CGFloat]] = [:]
         for metrics in [NTextField.Metrics.input, .askPinned, .askDocked, .askCentred, .searchPill] {
+            // Each preset is outlined in its own resting colour — `.askCentred`
+            // is accent before it is ever focused — so the run to look for is
+            // the one that preset actually paints.
+            let border = Self.onPageComponents(of: metrics.restingBorderColor)
             let bitmap = try XCTUnwrap(
                 RenderMeasure.bitmap(
                     of: NTextField("Ask, search, or describe an agent", text: .constant(""), metrics: metrics)
@@ -639,8 +676,8 @@ final class ComponentGeometryTests: XCTestCase {
                 "the \(metrics.shape) field rendered nothing"
             )
             let top = try XCTUnwrap(
-                bitmap.longestRun(matching: hairline, onRowAt: 0, tolerance: 0.05),
-                "no border on the top row of a \(metrics.shape) field"
+                bitmap.longestRun(matching: border, onRowAt: 0, tolerance: 0.05),
+                "no \(metrics.border) border on the top row of a \(metrics.shape) field"
             )
 
             let radius = metrics.shape == .pill ? bitmap.pointSize.height / 2 : Theme.Radius.md
@@ -667,6 +704,70 @@ final class ComponentGeometryTests: XCTestCase {
             pill - rounded, 8,
             "a pill's corner (\(pill)) is barely deeper than radius-md's (\(rounded)) — the shapes have collapsed"
         )
+    }
+
+    /// The mockup's centred ask field (2a focus / 2b, line 57) carries
+    /// `border-color: var(--color-accent)` **on the element**, and DESIGN.md
+    /// §2's table and §3-2a·4 both repeat it. Nothing asserted it, `Metrics`
+    /// had no field for it, and the gallery covered the hole by passing
+    /// `showsFocusRing: true` — so the one preset that is gold at rest drew a
+    /// hairline, and every test agreed with the bug.
+    ///
+    /// This reads the outline off the render, unfocused, for all six presets.
+    func testEachPresetDrawsItsOwnRestingBorder() throws {
+        for metrics in [
+            NTextField.Metrics.input, .askPinned, .askDocked, .askCentred, .askThread, .searchPill,
+        ] {
+            let bitmap = try XCTUnwrap(
+                RenderMeasure.bitmap(
+                    of: NTextField("Ask, search, or describe an agent", text: .constant(""), metrics: metrics)
+                        .frame(width: 300)
+                ),
+                "the \(metrics.border) field rendered nothing"
+            )
+
+            // Mid-height on the left edge is outline and nothing else: the
+            // corner arc is at its widest there and the placeholder has not
+            // started. Half a point in is the middle pixel of the 1 pt stroke,
+            // so it is fully covered and carries no antialiasing.
+            let scale = RenderMeasure.bitmapScale
+            let edge = bitmap.rgb(
+                x: Int((Theme.Stroke.border / 2 * scale).rounded(.down)),
+                y: Int((metrics.minHeight / 2 * scale).rounded(.down))
+            )
+            let expected = Self.onPageComponents(of: metrics.restingBorderColor)
+            let wrong = Self.onPageComponents(
+                of: metrics.border == .accent ? Theme.Color.divider : Theme.Color.accent
+            )
+
+            let toExpected = Self.distance(edge, expected)
+            let toWrong = Self.distance(edge, wrong)
+            XCTAssertLessThan(
+                toExpected, toWrong,
+                """
+                a \(metrics.border)-bordered field painted \(edge) — that is nearer the \
+                other colour (\(toWrong)) than its own (\(toExpected))
+                """
+            )
+        }
+
+        // And the two are far enough apart that the comparison above means
+        // something: accent against divider-over-bg is most of the ramp.
+        XCTAssertGreaterThan(
+            Self.distance(
+                Self.onPageComponents(of: Theme.Color.accent),
+                Self.onPageComponents(of: Theme.Color.divider)
+            ),
+            0.3,
+            "accent and divider have collapsed into each other — this test proves nothing"
+        )
+    }
+
+    private static func distance(
+        _ a: (r: Double, g: Double, b: Double),
+        _ b: (r: Double, g: Double, b: Double)
+    ) -> Double {
+        ((a.r - b.r) * (a.r - b.r) + (a.g - b.g) * (a.g - b.g) + (a.b - b.b) * (a.b - b.b)).squareRoot()
     }
 
     /// F13. `NStepper.countSize` (15) is invisible to `sizeThatFits`: the
@@ -728,4 +829,5 @@ final class ComponentGeometryTests: XCTestCase {
             "the disabled button's border composites at α = \(faded), not \(NButton.disabledOpacity)"
         )
     }
+
 }
