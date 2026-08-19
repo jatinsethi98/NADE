@@ -309,8 +309,15 @@ reads is `NADE_`-prefixed, and `config::tests::env_example_documents_every_var`
 keeps the list and `backend/.env.example` in lockstep either way. The variable
 is `NADE_MAX_SYNC_MESSAGES`; the cap's *value* is PLAN.md's 2 000, clamped in
 `Config::from_env` rather than trusted, and asserted by
-`sync::tests::the_dev_caps_are_applied` alongside `newer_than:30d`, 45 per batch
-and one batch per second.
+`sync::tests::the_dev_caps_are_applied` alongside `newer_than:30d`,
+`MAX_BATCH` per batch and one batch per second.
+
+Amended at P3: this said "45 per batch". `MAX_BATCH` is 10, and
+`Config::from_env` refuses to start above it (the batch width is a concurrency
+figure, not a quota one). `backend/.env.example` documented 45 as well, so
+copying the documented file made the server refuse to boot; that is fixed and
+`config::tests::every_documented_value_is_one_the_server_would_boot_with` now
+parses the example's values rather than only its names.
 
 ## D21 — A placeholder `nade-gmail-sim/src/lib.rs`.
 

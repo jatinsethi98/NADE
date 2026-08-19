@@ -64,6 +64,12 @@ pub mod cost {
     pub const MESSAGES_GET: u32 = 5;
     pub const THREADS_GET: u32 = 10;
     pub const ATTACHMENTS_GET: u32 = 5;
+    /// `users.watch` - the most expensive call we make, by a factor of ten.
+    /// Renewal is daily, so the cost is irrelevant to the budget; it matters
+    /// only because a retry storm against it would be unusually loud.
+    pub const WATCH: u32 = 100;
+    /// `users.stop`.
+    pub const STOP: u32 = 50;
 }
 
 /// The longest we ever back off on our own initiative.
@@ -290,6 +296,21 @@ mod tests {
             assert_eq!(bucket.reserve_at(cost::MESSAGES_LIST, t0), Duration::ZERO);
         }
         assert!(bucket.reserve_at(cost::MESSAGES_LIST, t0) > Duration::ZERO);
+
+        // P3's two. `watch` is 100 units - two and a half full-price gets
+        // short of half the per-second budget - so a full bucket funds two of
+        // them and no more. It runs once a day; this is here so a future
+        // caller in a loop is caught by a test rather than by Google.
+        let bucket = Bucket::new();
+        assert_eq!(bucket.reserve_at(cost::WATCH, t0), Duration::ZERO);
+        assert_eq!(bucket.reserve_at(cost::WATCH, t0), Duration::ZERO);
+        assert!(bucket.reserve_at(cost::WATCH, t0) > Duration::ZERO);
+
+        let bucket = Bucket::new();
+        for _ in 0..5 {
+            assert_eq!(bucket.reserve_at(cost::STOP, t0), Duration::ZERO);
+        }
+        assert!(bucket.reserve_at(cost::STOP, t0) > Duration::ZERO);
     }
 
     /// Criterion L2.

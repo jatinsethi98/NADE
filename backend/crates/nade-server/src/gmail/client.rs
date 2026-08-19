@@ -15,7 +15,7 @@ use super::{
     quota::{self, Bucket},
     types::{
         Attachment, GmailMessage, GmailThread, HistoryList, Label, LabelsList, MessageRef,
-        MessagesList, Profile,
+        MessagesList, Profile, WatchRegistration,
     },
 };
 
@@ -329,6 +329,50 @@ impl GmailClient {
             .ok_or_else(|| GmailError::Upstream("attachment body was not base64url".to_owned()))
     }
 
+    /// `users.watch`. Registers the mailbox against `topic` for seven days.
+    ///
+    /// Calling it again **replaces** the registration rather than adding one,
+    /// which is exactly what the daily renewal wants: there is no "unregister
+    /// then register" window in which a notification could be lost.
+    ///
+    /// An empty `label_ids` means "every change". That is deliberate - the push
+    /// is only a trigger, and the walk that follows reads all four history
+    /// types regardless, so filtering here would only mean archive and label
+    /// events waited for the polling fallback.
+    ///
+    /// # Errors
+    /// [`GmailError::Upstream`] if the topic is malformed or the Publisher
+    /// grant is missing; [`GmailError::NeedsReauth`] on a dead credential.
+    pub async fn watch(
+        &self,
+        topic: &str,
+        label_ids: &[String],
+    ) -> Result<WatchRegistration, GmailError> {
+        let mut body = serde_json::json!({ "topicName": topic });
+        if !label_ids.is_empty() {
+            body["labelIds"] = serde_json::json!(label_ids);
+            body["labelFilterBehavior"] = serde_json::json!("include");
+        }
+        self.post_json("/gmail/v1/users/me/watch", &body, quota::cost::WATCH)
+            .await
+    }
+
+    /// `users.stop`. Ends the push registration.
+    ///
+    /// Answers **204 with no body**, so it must not go through
+    /// [`Self::post_json`] - deserialising nothing is a hard error, and it
+    /// would turn a successful stop into an upstream failure.
+    ///
+    /// Stopping a mailbox that was never watched is a success, not an error:
+    /// the postcondition ("no registration") already holds.
+    ///
+    /// # Errors
+    /// Returns [`GmailError`] on an upstream failure.
+    pub async fn stop_watch(&self) -> Result<(), GmailError> {
+        self.post_discard("/gmail/v1/users/me/stop", quota::cost::STOP)
+            .await
+    }
+
     /// One real `multipart/mixed` batch of `messages.get?format=raw`.
     ///
     /// Returns one outcome **per requested id**, correlated by `Content-ID` and
@@ -410,6 +454,38 @@ impl GmailClient {
                 "gmail returned unreadable JSON for {path}: {error}"
             ))
         })
+    }
+
+    async fn post_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        cost: u32,
+    ) -> Result<T, GmailError> {
+        let url = format!("{}{path}", self.endpoints.api_base);
+        let payload = serde_json::to_vec(body)
+            .map_err(|error| GmailError::Upstream(format!("cannot serialise {path}: {error}")))?;
+        let (_, response) = self
+            .send(
+                reqwest::Method::POST,
+                &url,
+                Some(("application/json".to_owned(), payload)),
+                cost,
+            )
+            .await?;
+        serde_json::from_slice(&response).map_err(|error| {
+            GmailError::Upstream(format!(
+                "gmail returned unreadable JSON for {path}: {error}"
+            ))
+        })
+    }
+
+    /// A POST whose response body is discarded. `users.stop` answers `204` with
+    /// nothing at all, and an empty body is not valid JSON.
+    async fn post_discard(&self, path: &str, cost: u32) -> Result<(), GmailError> {
+        let url = format!("{}{path}", self.endpoints.api_base);
+        self.send(reqwest::Method::POST, &url, None, cost).await?;
+        Ok(())
     }
 
     /// One request, with the quota debit, the bearer token, and the retry
@@ -690,6 +766,121 @@ mod tests {
             Arc::new(StaticTokens("ya29.test-token".to_owned())),
         )
         .with_retry_budget(4, 0.001)
+    }
+
+    /// Criterion S1 - `users.watch` registers the topic, and the expiry comes
+    /// back as epoch **milliseconds in a string**.
+    #[tokio::test]
+    async fn watch_registers_the_topic_and_parses_a_millisecond_expiry() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/watch"))
+            .respond_with(|request: &Request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(
+                    body["topicName"], "projects/p/topics/gmail-events",
+                    "the topic is the whole point of the call"
+                );
+                assert!(
+                    body.get("labelIds").is_none(),
+                    "an empty label list must not be sent at all - Gmail reads a \
+                     present-but-empty list as `include nothing`"
+                );
+                ResponseTemplate::new(200).set_body_raw(
+                    br#"{"historyId":"9412771","expiration":"1755648000000"}"#.to_vec(),
+                    "application/json",
+                )
+            })
+            .mount(&server)
+            .await;
+
+        let registration = client_for(&server)
+            .watch("projects/p/topics/gmail-events", &[])
+            .await
+            .unwrap();
+
+        assert_eq!(registration.history(), Some(9_412_771));
+        // 1755648000000 ms = 2025-08-20T00:00:00Z. Read as *seconds* this would
+        // land in the year 57'600 and every renewal check would think the
+        // registration was fine forever.
+        assert_eq!(
+            registration.expires_at().unwrap().to_rfc3339(),
+            "2025-08-20T00:00:00+00:00"
+        );
+    }
+
+    /// A non-empty label filter is sent with its behaviour, or Gmail ignores it.
+    #[tokio::test]
+    async fn a_label_filtered_watch_sends_the_behaviour_too() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/watch"))
+            .respond_with(|request: &Request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                assert_eq!(body["labelIds"], serde_json::json!(["INBOX"]));
+                assert_eq!(body["labelFilterBehavior"], "include");
+                ResponseTemplate::new(200).set_body_raw(
+                    br#"{"historyId":"1","expiration":"1755648000000"}"#.to_vec(),
+                    "application/json",
+                )
+            })
+            .mount(&server)
+            .await;
+
+        client_for(&server)
+            .watch("projects/p/topics/gmail-events", &["INBOX".to_owned()])
+            .await
+            .unwrap();
+    }
+
+    /// Criterion S3/S4 - `users.stop` answers `204` with **no body**, and an
+    /// empty body is not valid JSON. Routed through `post_json` this fails.
+    ///
+    /// This also covers "stopping a mailbox that was never watched". Gmail
+    /// answers `204` either way, so nothing at this layer can tell the two
+    /// apart; a second test with the same mock would have looked like coverage
+    /// without adding any. The state transition belongs to the simulator, which
+    /// actually models the registration.
+    #[tokio::test]
+    async fn stop_watch_accepts_a_204_with_no_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/gmail/v1/users/me/stop"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+
+        client_for(&server).stop_watch().await.unwrap();
+    }
+
+    /// The cursor rule, at the type that carries the trap.
+    ///
+    /// `history_id` is the mailbox's current id and is repeated on every page;
+    /// only `max_record_id` describes what this page actually covered.
+    #[test]
+    fn the_page_cursor_is_the_last_record_id_and_never_the_top_level_history_id() {
+        let page: HistoryList = serde_json::from_str(
+            r#"{"history":[{"id":"101"},{"id":"102"}],
+                "nextPageToken":"tok","historyId":"999"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(page.max_record_id(), Some(102));
+        assert_eq!(
+            page.history_id.as_deref(),
+            Some("999"),
+            "the trap is still on the type; the helper is what avoids it"
+        );
+
+        // An empty page has no cursor at all - it must not move anything.
+        let empty: HistoryList = serde_json::from_str(r#"{"historyId":"999"}"#).unwrap();
+        assert_eq!(empty.max_record_id(), None);
+
+        // Gmail does not promise the records are sorted, so take the maximum
+        // rather than the last element.
+        let unsorted: HistoryList =
+            serde_json::from_str(r#"{"history":[{"id":"7"},{"id":"5"}]}"#).unwrap();
+        assert_eq!(unsorted.max_record_id(), Some(7));
     }
 
     #[tokio::test]

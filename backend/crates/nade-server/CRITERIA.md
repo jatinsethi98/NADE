@@ -348,8 +348,12 @@ not done. **Nothing is `[ ]`.**
 - [x] N2 The list query is exactly `newer_than:30d`, the cap is
   `NADE_MAX_SYNC_MESSAGES`, and both are checked on the wire.
   `sync::tests::the_dev_caps_are_applied`, `config::tests::the_dev_caps_have_the_values_plan_md_fixes`
-- [x] N3 Batches are 45 messages, `format=raw`, at most one per second.
-  `sync::tests::batches_are_45_and_paced`
+- [x] N3 Batches are `MAX_BATCH` messages, `format=raw`, at most one per second.
+  Written as 45 until P3, which is a value the server now refuses to boot with:
+  the batch width turned out to be a *concurrency* figure, not a quota one, and
+  45 produced `Too many concurrent requests for user` live. The number is
+  `crate::gmail::client::MAX_BATCH` (10) and the tests read it rather than
+  restate it. `sync::tests::batches_are_capped_and_paced`
 - [x] N4 **Partial failure mid-sync**: an unparseable message gets a
   metadata-only row plus an `audit_log` entry, and the other four are fully
   parsed. `sync::tests::a_parse_failure_is_recorded_and_the_sync_continues`
@@ -479,3 +483,151 @@ not done. **Nothing is `[ ]`.**
 | 8 | **Clock skew** | monotonic bucket and pacer; `internalDate` over the `Date` header; 60 s expiry margin | `concurrent_callers_share_the_budget`, `internal_date_wins_over_the_date_header`, `a_live_token_is_not_refreshed_but_a_nearly_dead_one_is` |
 | 9 | **Partial failure mid-sync** (new) | parse failure -> metadata row + audit, sync continues; one 404 inside a batch does not kill the batch; one whole batch failing does not kill the sync | `a_parse_failure_is_recorded_and_the_sync_continues`, `one_broken_message_does_not_stop_the_batch`, `a_real_batch_returns_the_other_44_when_one_is_gone` |
 | 10 | **A message that vanishes between list and get** (new) | `404` on a batched `messages.get` is skipped, never retried, never audited as a failure | `a_message_that_vanished_is_skipped`, `a_single_404_does_not_fail_the_batch` |
+
+---
+
+# P3 — "Mail stays current"
+
+Sections A–P are P1 and P2. P3 continues at Q. Unticked boxes are the parts of
+the phase still to land; they are listed here rather than added later so the
+checklist is the plan, not a record of what happened to get built.
+
+## Q. Incremental history (`sync/incremental.rs`)
+
+- [x] Q1 One walk applies all four `historyTypes`.
+  `sync::incremental::tests::a_page_plans_every_history_type`
+- [x] Q2 A message `messagesAdded` names is fetched, parsed, stored and rolled
+  up into its thread — the rollup asserted separately, because the first live
+  sync left `threads` empty and the mail list blank with a full `messages`
+  table. `sync::tests::a_message_added_by_history_is_ingested_and_rolled_up`
+- [x] Q3 A label change updates the row with **no** `messages.get`. Fifty
+  messages read in the Gmail UI is fifty records; at 5 units each that is the
+  whole per-second budget spent on `UNREAD` flips.
+  `sync::tests::a_label_change_updates_the_row_without_fetching_it`
+- [x] Q4 Trash arrives as a label move, never as `messagesDeleted`.
+  `sync::incremental::tests::trashing_is_planned_as_a_label_move_not_a_deletion`
+- [x] Q5 An un-trashed message comes back from a soft delete, because
+  `apply_label_delta` clears `deleted_at`.
+  `sync::tests::a_label_delta_is_idempotent_and_clears_a_soft_delete`
+- [x] Q6 A label change for a message outside the cached window is counted and
+  skipped. `sync::tests::a_label_change_for_an_uncached_message_is_skipped`
+- [x] Q7 **The cursor is `max(record.id)`, never the top-level `historyId`.**
+  The trap is that `historyId` is the mailbox's *current* id, repeated on every
+  page: store it after page one and the next walk gets a `200` with no
+  `history` key, indistinguishable from "nothing changed", with the unread
+  records never ingested and no error raised.
+  `sync::incremental::tests::the_cursor_is_the_last_record_id_and_never_the_top_level_history_id`,
+  `gmail::client::tests::the_page_cursor_is_the_last_record_id_and_never_the_top_level_history_id`,
+  `sync::tests::a_message_added_by_history_is_ingested_and_rolled_up`
+- [x] Q8 `startHistoryId` is constant across a walk; only `pageToken` advances.
+  Covered by the multi-page walk, which the mock would reject otherwise.
+  `sync::tests::every_page_of_a_multi_page_walk_is_applied`
+- [x] Q9 A page's writes — messages, label deltas, deletes, thread rollups,
+  audits and the cursor — commit in **one** transaction.
+- [x] Q10 A **transient** fetch failure does not advance the page's cursor; a
+  **permanent** one is audited and accounted, or one dead message pins
+  incremental sync for the life of the account.
+  `sync::tests::a_transient_fetch_failure_does_not_advance_the_cursor`,
+  `..::a_permanent_fetch_failure_is_audited_and_the_walk_continues`
+- [x] Q11 An empty page stamps `last_checked_at` and moves nothing else — an
+  empty page is a check that changed nothing, not a check that did not happen.
+  `sync::tests::an_empty_history_page_checks_without_moving_the_cursor`,
+  `..::an_empty_page_stamps_the_check_without_touching_the_cursor`
+- [x] Q12 Three pages are all applied and none is skipped.
+  `sync::tests::every_page_of_a_multi_page_walk_is_applied`
+- [x] Q13 A replayed page changes nothing.
+  `sync::tests::replaying_a_history_page_changes_nothing`
+- [x] Q14 A replayed page cannot rewind the cursor; `advance_history_id` is a
+  compare-and-set. `sync::tests::the_history_cursor_never_moves_backwards`
+- [x] Q15 Unicode survives ingest by the history path byte for byte.
+  `sync::tests::a_unicode_subject_arriving_by_history_survives_ingest`
+- [x] Q16 `needs_reauth` pauses the walk with **no** Gmail call at all.
+  `sync::tests::an_incremental_walk_is_paused_when_the_account_needs_reauth`
+- [x] Q17 The walk returns the ids it ingested — P5's seam, tested now so P5
+  wires an existing list rather than rediscovering where exactly-once lives.
+  `sync::tests::a_message_added_by_history_is_ingested_and_rolled_up`
+- [x] Q18 `plan_page` folds records in **id** order, last-writer-wins, so a
+  label added then removed is one net update and a message added then deleted
+  is never fetched.
+  `sync::incremental::tests::a_label_added_then_removed_folds_to_a_single_removal`,
+  `..::records_are_folded_in_id_order_not_arrival_order`,
+  `..::a_message_added_and_deleted_on_one_page_is_never_fetched`
+- [x] Q19 A history entry with no message id is **counted and audited**, not
+  silently dropped — and deliberately does not block the cursor, because the id
+  is the only handle on the message and refusing to advance would re-read the
+  same malformed record forever without recovering it.
+  `sync::incremental::tests::records_with_no_message_id_are_counted_not_silently_dropped`
+- [x] Q20 A walk with no cursor asks for a full sync instead of guessing.
+  `sync::tests::a_walk_without_a_cursor_asks_for_a_full_sync_instead`
+- [x] Q21 Incremental batches are paced like the full sync's. The token bucket
+  alone does not provide it: a full bucket funds 250 units and a ten-message
+  batch costs 50, so five would leave back to back.
+- [x] Q22 **The lost wakeup.** A notification suppressed at enqueue records
+  itself on `sync_state.rerun_requested`; the walk takes the flag and goes
+  round again. Re-reading the cursor cannot substitute — the webhook never
+  writes the notification's own `historyId` — and "did our cursor move?" is not
+  a signal, because it moved because we moved it.
+  `sync::tests::a_rerun_request_makes_the_walk_go_round_again`,
+  `..::a_walk_with_no_rerun_request_makes_exactly_one_pass`
+- [x] Q23 An expired cursor is reported rather than failing the job, so the
+  caller can reconcile.
+  `sync::tests::an_expired_cursor_is_reported_rather_than_failing_the_job`
+
+## R. Reconciliation sweep (`sync/sweep.rs`)
+
+- [ ] R1–R9 — not yet built. The durable `sync_state.reconcile_after` marker
+  they depend on is in `0002`, and the walk already reports `cursor_expired`.
+
+## S. Watch and scheduling (`sync/watch.rs`, `sync/schedule.rs`)
+
+- [x] S1 `users.watch` registers the topic and parses an epoch-**millisecond**
+  expiry. Read as seconds it lands in the year 57'600 and every renewal check
+  believes the registration is fine for ever.
+  `gmail::client::tests::watch_registers_the_topic_and_parses_a_millisecond_expiry`
+- [x] S2 `watch` debits 100 quota units and `stop` 50.
+  `gmail::quota::tests::each_method_debits_its_own_cost`
+- [x] S3/S4 `users.stop` answers `204` with no body and must not be parsed as
+  JSON; stopping an unwatched mailbox is the same `204`.
+  `gmail::client::tests::stop_watch_accepts_a_204_with_no_body`
+- [x] S12 `jobs.dedupe_key` is unique over pending rows and nullable, so every
+  P1/P2 enqueue site is untouched.
+  `db::tests::jobs_dedupe_key_is_unique_over_pending_rows_and_nullable`
+- [x] S12a The dedupe index predicate must **not** mention `locked_by`.
+  `Queue::fail`, `release` and `reap_expired_leases` all clear it, so excluding
+  locked rows would make the queue unable to record its own failures during the
+  outage that caused them.
+  `db::tests::a_running_job_can_still_fail_release_and_be_reaped_with_a_pending_twin`
+- [ ] S5–S11, S13–S16 — the scheduler itself is not yet built.
+
+## T. Webhook and OIDC (`api/webhooks.rs`)
+
+- [ ] T1–T16 — not yet built.
+
+## U. Ops
+
+- [x] U1 `.env.example` documents exactly the variables the crate reads.
+  `config::tests::env_example_documents_every_var`
+- [x] U2 Every value `.env.example` actually **sets** is one the server would
+  boot with. The name check let `NADE_SYNC_BATCH_SIZE=45` survive a whole phase
+  after `MAX_BATCH` became 10, so copying the documented file bricked the
+  server and nothing failed. A malformed value fails the test rather than being
+  skipped by a lenient parse.
+  `config::tests::every_documented_value_is_one_the_server_would_boot_with`
+- [x] U4 The account advisory lock survives its own future being cancelled.
+  The job worker aborts handlers on lease loss and after the shutdown grace, so
+  `release` may never run; dropping the guard detaches and closes the
+  connection rather than recycling a session that still holds the lock.
+- [ ] U3 `NADE_LIVE=1` live smoke — not yet built.
+
+## Mandated edge cases — P3 (so far)
+
+| # | Edge case | Verified by |
+|---|---|---|
+| 1 | **Empty input** | `an_empty_history_page_checks_without_moving_the_cursor`, `an_empty_page_plans_nothing_and_offers_no_cursor`, `records_with_no_message_id_are_counted_not_silently_dropped`, `stop_watch_accepts_a_204_with_no_body` |
+| 2 | **Unicode** | `a_unicode_subject_arriving_by_history_survives_ingest` |
+| 3 | **Crash mid-step** | `a_transient_fetch_failure_does_not_advance_the_cursor` — the page's writes and its cursor commit together, so a failure leaves neither |
+| 4 | **Duplicate delivery / replay** | `replaying_a_history_page_changes_nothing`, `the_history_cursor_never_moves_backwards`, `a_label_delta_is_idempotent_and_clears_a_soft_delete`, `soft_deleting_twice_keeps_the_first_timestamp`, `jobs_dedupe_key_is_unique_over_pending_rows_and_nullable` |
+| 5 | **Expiry** | `an_expired_cursor_is_reported_rather_than_failing_the_job`, `watch_registers_the_topic_and_parses_a_millisecond_expiry` |
+| 6 | **Pagination boundary** | `every_page_of_a_multi_page_walk_is_applied`, `the_cursor_is_the_last_record_id_and_never_the_top_level_history_id` |
+| 7 | **429 / timeout** | `a_transient_fetch_failure_does_not_advance_the_cursor`, `a_permanent_fetch_failure_is_audited_and_the_walk_continues` |
+| 8 | **Clock skew** | every timestamp the walk compares is computed by PostgreSQL (`now()`), never by a worker; the pacer is monotonic |

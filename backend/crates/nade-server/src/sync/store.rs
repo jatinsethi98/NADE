@@ -339,16 +339,188 @@ pub async fn record_history_id(
     account_id: Uuid,
     history_id: Option<i64>,
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    advance_history_id(&mut tx, account_id, history_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Move the cursor forward, **never backward**, and stamp `last_checked_at`.
+///
+/// `greatest` is the compare-and-set, and it is what makes replay safe. Pub/Sub
+/// delivers at-least-once and out of order, a crashed walk re-covers ground it
+/// already committed, and a stale job can finish after a newer one - all three
+/// offer a value less than or equal to the stored one, and all three are
+/// discarded here rather than in three call sites. PostgreSQL's `greatest`
+/// ignores nulls, so the first write and the null-cursor case fall out for
+/// free.
+///
+/// # Errors
+/// Returns an error if the write fails.
+pub async fn advance_history_id(
+    tx: &mut Transaction<'_, Postgres>,
+    account_id: Uuid,
+    history_id: Option<i64>,
+) -> Result<()> {
     sqlx::query(
-        "insert into sync_state (account_id, last_history_id, updated_at) \
-         values ($1, $2, now()) \
+        "insert into sync_state (account_id, last_history_id, last_checked_at, updated_at) \
+         values ($1, $2, now(), now()) \
          on conflict (account_id) do update set \
-             last_history_id = coalesce(excluded.last_history_id, sync_state.last_history_id), \
+             last_history_id = greatest(sync_state.last_history_id, excluded.last_history_id), \
+             last_checked_at = now(), \
              updated_at = now()",
     )
     .bind(account_id)
     .bind(history_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Stamp `last_checked_at` without touching the cursor.
+///
+/// An empty history page is a check that changed nothing, not a check that did
+/// not happen - so it must still hold off the 30-minute poll.
+///
+/// # Errors
+/// Returns an error if the write fails.
+pub async fn touch_checked(tx: &mut Transaction<'_, Postgres>, account_id: Uuid) -> Result<()> {
+    advance_history_id(tx, account_id, None).await
+}
+
+/// Apply one message's net label delta.
+///
+/// The result is `(existing ∪ added) \ removed`, de-duplicated and sorted, so
+/// applying the same page twice is the same as applying it once - which is the
+/// whole reason a redelivered notification is harmless. Sorting is free: nothing
+/// reads `label_ids` in order (`refresh_thread` unnests it and mailbox
+/// membership reads `thread_labels`).
+///
+/// **`deleted_at` is cleared.** Trash and un-trash both arrive as label events,
+/// never as `messagesDeleted`, and until now only a full upsert cleared the
+/// column - so a message the reconciliation sweep soft-deleted and the user
+/// then restored would get correct labels and stay invisible forever.
+///
+/// Returns the thread id, or `None` when we do not hold the message - a label
+/// change for mail outside the cached window is counted and skipped rather than
+/// fetched, because re-reading fifty messages in the Gmail UI would otherwise
+/// cost the entire per-second quota budget in `UNREAD` flips.
+///
+/// # Errors
+/// Returns an error if the write fails.
+pub async fn apply_label_delta(
+    tx: &mut Transaction<'_, Postgres>,
+    account_id: Uuid,
+    gmail_id: &str,
+    added: &[String],
+    removed: &[String],
+) -> Result<Option<String>> {
+    let thread_id: Option<String> = sqlx::query_scalar(
+        "update messages \
+            set label_ids = coalesce(( \
+                    select array_agg(distinct label order by label) \
+                      from unnest(label_ids || $3::text[]) as label \
+                     where not (label = any($4::text[]))), '{}'), \
+                deleted_at = null \
+          where account_id = $1 and gmail_id = $2 \
+         returning thread_id",
+    )
+    .bind(account_id)
+    .bind(gmail_id)
+    .bind(added)
+    .bind(removed)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(thread_id)
+}
+
+/// Soft-delete a message Gmail says is gone.
+///
+/// The thread id comes from **our** row: a `messagesDeleted` history record
+/// does not reliably carry one, and every reader already filters
+/// `deleted_at is null`, so re-deleting an already-deleted row is a no-op.
+///
+/// # Errors
+/// Returns an error if the write fails.
+pub async fn soft_delete_message(
+    tx: &mut Transaction<'_, Postgres>,
+    account_id: Uuid,
+    gmail_id: &str,
+) -> Result<Option<String>> {
+    let thread_id: Option<String> = sqlx::query_scalar(
+        "update messages set deleted_at = coalesce(deleted_at, now()) \
+          where account_id = $1 and gmail_id = $2 \
+         returning thread_id",
+    )
+    .bind(account_id)
+    .bind(gmail_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(thread_id)
+}
+
+/// Record that a notification arrived which no walk has covered yet.
+///
+/// Called when `enqueue_unique` finds a job already pending: the notification
+/// is real, but the job that would have carried it was suppressed. Without this
+/// the change waits for the 30-minute poll, because the walk's own cursor
+/// cannot see it - the webhook deliberately never writes the notification's
+/// `historyId`.
+///
+/// # Errors
+/// Returns an error if the write fails.
+pub async fn request_rerun(pool: &PgPool, account_id: Uuid) -> Result<()> {
+    sqlx::query(
+        "insert into sync_state (account_id, rerun_requested, updated_at) \
+         values ($1, true, now()) \
+         on conflict (account_id) do update set rerun_requested = true, updated_at = now()",
+    )
+    .bind(account_id)
     .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Read the rerun flag and clear it in one statement.
+///
+/// Read-then-clear as two statements would drop a notification that landed
+/// between them, which is the bug this whole mechanism exists to fix.
+///
+/// # Errors
+/// Returns an error if the write fails.
+pub async fn take_rerun_request(
+    tx: &mut Transaction<'_, Postgres>,
+    account_id: Uuid,
+) -> Result<bool> {
+    let requested: Option<bool> = sqlx::query_scalar(
+        "update sync_state set rerun_requested = false \
+          where account_id = $1 and rerun_requested \
+         returning true",
+    )
+    .bind(account_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(requested.unwrap_or(false))
+}
+
+/// Append an audit row **inside a caller's transaction**, so a page's evidence
+/// commits with the page rather than surviving a rollback.
+///
+/// # Errors
+/// Returns an error if the write fails.
+pub async fn audit_in(
+    tx: &mut Transaction<'_, Postgres>,
+    account_id: Uuid,
+    action: &str,
+    subject: serde_json::Value,
+) -> Result<()> {
+    sqlx::query(
+        "insert into audit_log (account_id, actor, action, subject) values ($1, 'system', $2, $3)",
+    )
+    .bind(account_id)
+    .bind(action)
+    .bind(subject)
+    .execute(&mut **tx)
     .await?;
     Ok(())
 }
@@ -407,7 +579,9 @@ mod tests {
 
         let stored = storable(&row.snippet);
         assert!(
-            !stored.chars().any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t'),
+            !stored
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t'),
             "a control character reached a text column: {stored:?}"
         );
         assert_eq!(stored, "Invoice attached");
@@ -431,7 +605,10 @@ mod tests {
         }
 
         // EDGE (the common case): nothing to remove means nothing allocated.
-        assert!(matches!(storable("ordinary text\nwith a newline"), Cow::Borrowed(_)));
+        assert!(matches!(
+            storable("ordinary text\nwith a newline"),
+            Cow::Borrowed(_)
+        ));
         // Newline, carriage return and tab are legal in a text column and are
         // real content in a mail body.
         assert_eq!(storable("a\nb\tc\rd"), "a\nb\tc\rd");

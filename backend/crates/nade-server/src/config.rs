@@ -328,6 +328,7 @@ fn backend_root() -> PathBuf {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     /// `backend/.env.example` must document exactly the variables we read -
     /// no more, no fewer. Criterion H2.
@@ -364,6 +365,82 @@ pub(crate) mod tests {
                 "{doc} is documented in backend/.env.example but never read"
             );
         }
+    }
+
+    /// Every value `.env.example` actually sets must be one the server would
+    /// accept. Criterion U2.
+    ///
+    /// `env_example_documents_every_var` compares **names**, which is why
+    /// `NADE_SYNC_BATCH_SIZE=45` survived in the example for a whole phase
+    /// after `MAX_BATCH` became 10: copying the documented file to
+    /// `backend/.env` verbatim made the server refuse to boot, and nothing
+    /// failed. This checks the values that carry a hard bound, so the next
+    /// stale default cannot land the same way.
+    #[test]
+    fn every_documented_value_is_one_the_server_would_boot_with() {
+        let path = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../.env.example"));
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+
+        // Only the lines that are actually set. A commented line is an
+        // illustration, not a value the server will ever read.
+        let mut set: HashMap<&str, &str> = HashMap::new();
+        for line in text.lines().map(str::trim) {
+            if line.starts_with('#') {
+                continue;
+            }
+            if let Some((key, value)) = line.split_once('=') {
+                set.insert(key.trim(), value.trim());
+            }
+        }
+
+        // A malformed value must FAIL, not vanish. `.parse().ok()` would turn
+        // `NADE_SYNC_BATCH_SIZE=ten` into `None` and skip every range assertion
+        // below, so the test would pass on a file the server refuses to read.
+        let number = |key: &str| -> Option<u64> {
+            set.get(key).map(|raw| {
+                raw.parse().unwrap_or_else(|_| {
+                    panic!(
+                        "backend/.env.example sets {key}={raw:?}, which is not a number - \
+                         Config::from_env would refuse to start"
+                    )
+                })
+            })
+        };
+
+        if let Some(batch) = number("NADE_SYNC_BATCH_SIZE") {
+            let max = u64::try_from(crate::gmail::client::MAX_BATCH).unwrap();
+            assert!(
+                (1..=max).contains(&batch),
+                "backend/.env.example sets NADE_SYNC_BATCH_SIZE={batch}, but the server \
+                 refuses to start outside 1..={max} - copying the example would brick it"
+            );
+        }
+        for key in ["NADE_MAX_SYNC_MESSAGES", "NADE_SYNC_WINDOW_DAYS"] {
+            if let Some(value) = number(key) {
+                assert!(
+                    value >= 1,
+                    "backend/.env.example sets {key}={value}, and the server requires at least 1"
+                );
+            }
+        }
+        if let (Some(heartbeat), Some(lease)) = (
+            number("NADE_JOB_HEARTBEAT_SECS"),
+            number("NADE_JOB_LEASE_SECS"),
+        ) {
+            assert!(
+                heartbeat > 0 && heartbeat < lease,
+                "backend/.env.example sets a heartbeat of {heartbeat}s against a {lease}s \
+                 lease; the server refuses to start unless the heartbeat is shorter"
+            );
+        }
+
+        // The check must be able to fail. If none of the bounded variables is
+        // set, everything above is vacuous and this test proves nothing.
+        assert!(
+            set.contains_key("NADE_SYNC_BATCH_SIZE"),
+            "no bounded variable is set in backend/.env.example, so this test checked nothing"
+        );
     }
 
     #[test]

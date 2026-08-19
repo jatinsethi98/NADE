@@ -6,6 +6,7 @@
 //! over the wire as **strings** holding 64-bit numbers, which is a classic place
 //! to lose data by typing them as `u64`.
 
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 /// `users.getProfile`.
@@ -186,12 +187,37 @@ pub struct HistoryList {
     pub history: Vec<HistoryRecord>,
     #[serde(default)]
     pub next_page_token: Option<String>,
-    /// The cursor to store once the whole walk succeeds.
+    /// Gmail's **current** id for the mailbox, repeated on every page of a
+    /// walk. It is not this page's cursor and must never be stored as one -
+    /// use [`Self::max_record_id`], which explains what goes wrong otherwise.
     #[serde(default)]
     pub history_id: Option<String>,
 }
 
 impl HistoryList {
+    /// The highest record id on this page, parsed.
+    ///
+    /// **This - never [`Self::history_id`] - is the only legal cursor.**
+    ///
+    /// `history_id` is the mailbox's *current* id, and Gmail repeats it on
+    /// every page of a walk. Storing it after page one and coming back asks
+    /// `history.list` from a point past everything that had not been read yet;
+    /// the log filter is `record.id > start`, so the answer is a `200` with no
+    /// `history` key - byte-indistinguishable from "nothing changed". The
+    /// unread records are never ingested and nothing raises an error.
+    ///
+    /// `crates/nade-gmail-sim/tests/sync_story.rs`
+    /// (`advancing_to_the_top_level_history_id_after_page_one_loses_records`)
+    /// is the reproduction.
+    #[must_use]
+    pub fn max_record_id(&self) -> Option<i64> {
+        self.history
+            .iter()
+            .filter_map(|record| record.id.as_deref())
+            .filter_map(|id| id.parse::<i64>().ok())
+            .max()
+    }
+
     /// Every message id this page touches, in any of the four history types.
     #[must_use]
     pub fn touched_message_ids(&self) -> Vec<String> {
@@ -213,6 +239,35 @@ impl HistoryList {
             }
         }
         out
+    }
+}
+
+/// `users.watch`. Registers the mailbox against a Pub/Sub topic for seven days;
+/// calling it again *replaces* the registration, which is what renewal is.
+///
+/// Both fields arrive as **strings**, and `expiration` is epoch
+/// **milliseconds** - the unit that gets misread as seconds and silently makes
+/// every registration look forty thousand years stale.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchRegistration {
+    #[serde(default)]
+    pub history_id: Option<String>,
+    #[serde(default)]
+    pub expiration: Option<String>,
+}
+
+impl WatchRegistration {
+    /// The history id Gmail was at when the watch was registered.
+    #[must_use]
+    pub fn history(&self) -> Option<i64> {
+        self.history_id.as_deref()?.parse().ok()
+    }
+
+    /// When the registration lapses, from epoch milliseconds.
+    #[must_use]
+    pub fn expires_at(&self) -> Option<DateTime<Utc>> {
+        DateTime::from_timestamp_millis(self.expiration.as_deref()?.parse().ok()?)
     }
 }
 

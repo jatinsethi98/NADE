@@ -558,7 +558,14 @@ mod tests {
             .fetch_one(&db.pool)
             .await
             .unwrap();
-        assert_eq!(applied, 1, "0001_init must be recorded exactly once");
+        // Derived from the migrator, not written down. A hardcoded 1 survived
+        // until P3 added a second migration, and a hardcoded 2 would survive
+        // exactly as long as the third (D44's lesson, applied here).
+        let expected = i64::try_from(MIGRATOR.iter().count()).unwrap();
+        assert_eq!(
+            applied, expected,
+            "every migration must be recorded exactly once, however many there are"
+        );
     }
 
     /// Criterion B6 + C4.
@@ -685,6 +692,125 @@ mod tests {
             "compile-time sqlx query macros are banned (DECISIONS.md D1):\n{}",
             offenders.join("\n")
         );
+    }
+
+    /// Criterion S12 - `jobs.dedupe_key` collapses a burst into one pending
+    /// row, and nulls stay distinct so every P1/P2 enqueue site is untouched.
+    #[tokio::test]
+    async fn jobs_dedupe_key_is_unique_over_pending_rows_and_nullable() {
+        let db = test_db().await;
+
+        let insert = |key: Option<&'static str>| {
+            let pool = db.pool.clone();
+            async move {
+                sqlx::query("insert into jobs (kind, dedupe_key) values ('gmail_incremental', $1)")
+                    .bind(key)
+                    .execute(&pool)
+                    .await
+            }
+        };
+
+        insert(Some("gmail_incremental:acct")).await.unwrap();
+        let err = insert(Some("gmail_incremental:acct")).await.unwrap_err();
+        assert_eq!(constraint_code(&err), "23505");
+
+        // Nulls are distinct: every enqueue that predates P3 leaves it unset.
+        insert(None).await.unwrap();
+        insert(None).await.unwrap();
+
+        // A finished row leaves the index, so the next push can enqueue again.
+        sqlx::query("update jobs set done_at = now() where dedupe_key is not null")
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        insert(Some("gmail_incremental:acct")).await.unwrap();
+    }
+
+    /// The index predicate must not mention `locked_by`.
+    ///
+    /// Excluding locked rows is tempting - it would let a push enqueue while an
+    /// earlier walk is still running - but `Queue::fail`, `Queue::release` and
+    /// `Queue::reap_expired_leases` all set `locked_by = null`. With
+    /// `locked_by is null` in the predicate, a replacement row inserted during
+    /// the run would collide the instant the original failed, was released at
+    /// shutdown, or had its lease reaped: the queue would be unable to record
+    /// its own failures during precisely the outage that caused them.
+    ///
+    /// This test is the regression. It fails loudly against that predicate and
+    /// passes against the one we shipped.
+    #[tokio::test]
+    async fn a_running_job_can_still_fail_release_and_be_reaped_with_a_pending_twin() {
+        let db = test_db().await;
+
+        let running: i64 = sqlx::query_scalar(
+            "insert into jobs (kind, dedupe_key, locked_by, lease_expires_at) \
+             values ('gmail_incremental', 'k', 'worker-1', now() - interval '1 minute') \
+             returning id",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+
+        // A second notification arrives. Under the shipped predicate the
+        // running row is still indexed, so this is suppressed rather than
+        // inserted - which is what keeps the three updates below legal.
+        let second = sqlx::query(
+            "insert into jobs (kind, dedupe_key) values ('gmail_incremental', 'k') \
+             on conflict (dedupe_key) \
+                 where dedupe_key is not null and done_at is null and dead_at is null \
+             do nothing",
+        )
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            second.rows_affected(),
+            0,
+            "a pending row with this key already exists"
+        );
+
+        // Now the three writers that clear `locked_by`. Each must succeed.
+        for statement in [
+            "update jobs set locked_by = null, lease_expires_at = null, attempts = attempts + 1 \
+               where id = $1",
+            "update jobs set locked_by = 'worker-1' where id = $1",
+            "update jobs set locked_by = null, lease_expires_at = null where id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(running)
+                .execute(&db.pool)
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("clearing locked_by must never violate the dedupe index: {e}")
+                });
+        }
+    }
+
+    /// Criterion S1/S5 - the columns P3's scheduler and sweep read.
+    #[tokio::test]
+    async fn sync_state_carries_the_p3_columns() {
+        let db = test_db().await;
+        let columns: Vec<(String, String)> = sqlx::query_as(
+            "select column_name, data_type from information_schema.columns \
+             where table_name = 'sync_state'",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        let by_name: std::collections::BTreeMap<_, _> = columns
+            .iter()
+            .map(|(n, t)| (n.as_str(), t.as_str()))
+            .collect();
+
+        for (column, ty) in [
+            ("watch_renewed_at", "timestamp with time zone"),
+            ("watch_topic", "text"),
+            ("last_checked_at", "timestamp with time zone"),
+            ("last_webhook_at", "timestamp with time zone"),
+            ("reconcile_after", "bigint"),
+        ] {
+            assert_eq!(by_name.get(column), Some(&ty), "sync_state.{column}");
+        }
     }
 
     fn constraint_code(error: &sqlx::Error) -> String {

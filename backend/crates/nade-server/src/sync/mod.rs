@@ -31,6 +31,7 @@
 //! when the model was slow or unavailable. [`tests::ingest_never_calls_an_llm`]
 //! enforces it by grep.
 
+pub mod incremental;
 pub mod store;
 
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
@@ -227,7 +228,7 @@ pub async fn run_sync(
 }
 
 /// Steps 1-6, with the account lock already held.
-async fn sync_window(
+pub(crate) async fn sync_window(
     pool: &PgPool,
     client: &GmailClient,
     account_id: Uuid,
@@ -402,23 +403,18 @@ async fn sync_window(
     // The one branch this whole module exists for.
     if !pending.is_empty() {
         let sample: Vec<&String> = pending.iter().take(20).collect();
-        store::audit(
-            pool,
-            account_id,
-            "gmail_sync_incomplete",
-            {
-                let mut entry = serde_json::to_value(&report)
-                    .unwrap_or_else(|_| json!({"listed": report.listed}));
-                if let Some(fields) = entry.as_object_mut() {
-                    fields.insert("unresolved_sample".to_owned(), json!(sample));
-                    // The history id was computed and deliberately *not* stored:
-                    // the cursor stays where it was so the next sync re-lists
-                    // what this one could not fetch.
-                    fields.insert("history_id_recorded".to_owned(), json!(false));
-                }
-                entry
-            },
-        )
+        store::audit(pool, account_id, "gmail_sync_incomplete", {
+            let mut entry =
+                serde_json::to_value(&report).unwrap_or_else(|_| json!({"listed": report.listed}));
+            if let Some(fields) = entry.as_object_mut() {
+                fields.insert("unresolved_sample".to_owned(), json!(sample));
+                // The history id was computed and deliberately *not* stored:
+                // the cursor stays where it was so the next sync re-lists
+                // what this one could not fetch.
+                fields.insert("history_id_recorded".to_owned(), json!(false));
+            }
+            entry
+        })
         .await?;
         tracing::error!(
             ?report,
@@ -453,8 +449,11 @@ async fn sync_window(
 /// Session-scoped, so the connection is held for the sync's lifetime and the
 /// lock disappears by itself if the process dies - which is exactly the property
 /// a `syncing` column would not have, and the reason a table flag was not used.
-struct AccountLock {
-    connection: sqlx::pool::PoolConnection<sqlx::Postgres>,
+pub(crate) struct AccountLock {
+    /// `None` only after [`AccountLock::release`] has taken it. Everything else
+    /// leaves it populated so [`Drop`] can see that the lock was never given
+    /// back - see the `Drop` impl for why that matters.
+    connection: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
     key: i32,
 }
 
@@ -471,7 +470,7 @@ pub(crate) fn account_lock_key(account_id: Uuid) -> i32 {
 }
 
 impl AccountLock {
-    async fn take(pool: &PgPool, account_id: Uuid) -> Result<Option<Self>> {
+    pub(crate) async fn take(pool: &PgPool, account_id: Uuid) -> Result<Option<Self>> {
         let key = account_lock_key(account_id);
         let mut connection = pool.acquire().await?;
         let taken: bool = sqlx::query_scalar("select pg_try_advisory_lock($1, $2)")
@@ -479,17 +478,23 @@ impl AccountLock {
             .bind(key)
             .fetch_one(&mut *connection)
             .await?;
-        Ok(taken.then_some(Self { connection, key }))
+        Ok(taken.then_some(Self {
+            connection: Some(connection),
+            key,
+        }))
     }
 
     /// Give the lock back before the connection returns to the pool. A pooled
     /// connection is *recycled*, not closed, so its session - and therefore its
     /// locks - would otherwise outlive the sync.
-    async fn release(mut self) {
+    pub(crate) async fn release(mut self) {
+        let Some(mut connection) = self.connection.take() else {
+            return;
+        };
         if let Err(error) = sqlx::query("select pg_advisory_unlock($1, $2)")
             .bind(SYNC_LOCK_NAMESPACE)
             .bind(self.key)
-            .execute(&mut *self.connection)
+            .execute(&mut *connection)
             .await
         {
             // Not fatal: the lock dies with the session, and the session dies
@@ -499,24 +504,56 @@ impl AccountLock {
     }
 }
 
+impl Drop for AccountLock {
+    /// The lock has to survive its own future being cancelled.
+    ///
+    /// `release` is an `async fn`, so it only runs if the holder is polled to
+    /// completion - and the job worker deliberately does not guarantee that: it
+    /// aborts a handler whose lease it has lost, and again when the shutdown
+    /// grace period expires (`jobs.rs`). An aborted handler drops this guard
+    /// without ever awaiting `release`.
+    ///
+    /// Dropping a `PoolConnection` **returns it to the pool**, where it is
+    /// recycled rather than closed - and a session-scoped advisory lock belongs
+    /// to the session, not the transaction. So the lock would survive on a
+    /// connection now serving unrelated requests, and every later sync of that
+    /// account would stand down as `skipped_concurrent` forever, with nothing
+    /// holding a lock anyone could find.
+    ///
+    /// `detach()` takes the connection out of the pool's ownership. Dropping the
+    /// detached connection closes the socket, and PostgreSQL releases every
+    /// session lock when the backend goes away. Losing one pooled connection on
+    /// an aborted sync is a cost worth paying; a permanently wedged account is
+    /// not.
+    fn drop(&mut self) {
+        if let Some(connection) = self.connection.take() {
+            tracing::warn!(
+                "the account sync lock was dropped without being released - closing its \
+                 connection so PostgreSQL frees the session lock"
+            );
+            drop(connection.detach());
+        }
+    }
+}
+
 /// At most one batch per `interval`, measured monotonically.
 ///
 /// EDGE (clock skew): `tokio::time::Instant` is monotonic, so a wall-clock jump
 /// cannot make the pacer either stall for hours or fire in a burst.
-struct Pacer {
+pub(crate) struct Pacer {
     interval: Duration,
     next: Option<tokio::time::Instant>,
 }
 
 impl Pacer {
-    fn new(interval: Duration) -> Self {
+    pub(crate) fn new(interval: Duration) -> Self {
         Self {
             interval,
             next: None,
         }
     }
 
-    async fn wait(&mut self) {
+    pub(crate) async fn wait(&mut self) {
         if let Some(at) = self.next {
             tokio::time::sleep_until(at).await;
         }

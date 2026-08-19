@@ -319,6 +319,247 @@ fn fast_options() -> SyncOptions {
 
 // ------------------------------------------------------------- the tests --
 
+/// Criterion Q14 - the cursor is compare-and-set, so replay cannot rewind it.
+///
+/// Pub/Sub is at-least-once and unordered, a crashed walk re-covers committed
+/// ground, and a stale job can finish after a newer one. All three offer a
+/// value that is not greater than the stored one, and all three must be
+/// discarded.
+#[tokio::test]
+async fn the_history_cursor_never_moves_backwards() {
+    let (db, account) = connected().await;
+
+    let set = |value: Option<i64>| {
+        let pool = db.pool.clone();
+        async move {
+            let mut tx = pool.begin().await.unwrap();
+            store::advance_history_id(&mut tx, account, value)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+        }
+    };
+    let cursor = || {
+        let pool = db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<i64>>(
+                "select last_history_id from sync_state where account_id = $1",
+            )
+            .bind(account)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    // First write from nothing.
+    set(Some(100)).await;
+    assert_eq!(cursor().await, Some(100));
+
+    // Forward moves.
+    set(Some(200)).await;
+    assert_eq!(cursor().await, Some(200));
+
+    // Backward does not - this is the replay case.
+    set(Some(150)).await;
+    assert_eq!(
+        cursor().await,
+        Some(200),
+        "a replayed page rewound the cursor"
+    );
+
+    // Equal is a no-op, not an error.
+    set(Some(200)).await;
+    assert_eq!(cursor().await, Some(200));
+
+    // A null cursor is a check, not a reset.
+    set(None).await;
+    assert_eq!(cursor().await, Some(200), "an empty page erased the cursor");
+}
+
+/// Criterion Q11 - an empty page is a check that changed nothing, so it stamps
+/// `last_checked_at` and moves nothing else. Without this the 30-minute poll
+/// would fire every tick on a quiet mailbox.
+#[tokio::test]
+async fn an_empty_page_stamps_the_check_without_touching_the_cursor() {
+    let (db, account) = connected().await;
+
+    let mut tx = db.pool.begin().await.unwrap();
+    store::advance_history_id(&mut tx, account, Some(42))
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    sqlx::query(
+        "update sync_state set last_checked_at = now() - interval '2 hours' where account_id = $1",
+    )
+    .bind(account)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let mut tx = db.pool.begin().await.unwrap();
+    store::touch_checked(&mut tx, account).await.unwrap();
+    tx.commit().await.unwrap();
+
+    let (cursor, stale): (Option<i64>, bool) = sqlx::query_as(
+        "select last_history_id, last_checked_at < now() - interval '1 minute' \
+           from sync_state where account_id = $1",
+    )
+    .bind(account)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(cursor, Some(42));
+    assert!(
+        !stale,
+        "an empty page must still count as a successful check"
+    );
+}
+
+/// Criterion Q18 + Q13 - the label delta is a set operation, so applying the
+/// same page twice equals applying it once.
+#[tokio::test]
+async fn a_label_delta_is_idempotent_and_clears_a_soft_delete() {
+    let (db, account) = connected().await;
+    seed_one_message(&db, account, "m1", "t1", &["INBOX", "UNREAD"]).await;
+
+    let apply = |added: Vec<String>, removed: Vec<String>| {
+        let pool = db.pool.clone();
+        async move {
+            let mut tx = pool.begin().await.unwrap();
+            let thread = store::apply_label_delta(&mut tx, account, "m1", &added, &removed)
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            thread
+        }
+    };
+    let labels = || {
+        let pool = db.pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Vec<String>>(
+                "select label_ids from messages where account_id = $1 and gmail_id = 'm1'",
+            )
+            .bind(account)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    // Read the message: UNREAD off, nothing added.
+    let thread = apply(vec![], vec!["UNREAD".to_owned()]).await;
+    assert_eq!(thread.as_deref(), Some("t1"));
+    assert_eq!(labels().await, vec!["INBOX".to_owned()]);
+
+    // The same record again - a redelivered notification.
+    apply(vec![], vec!["UNREAD".to_owned()]).await;
+    assert_eq!(
+        labels().await,
+        vec!["INBOX".to_owned()],
+        "replay changed the row"
+    );
+
+    // Trash: INBOX off, TRASH on, in one record.
+    apply(vec!["TRASH".to_owned()], vec!["INBOX".to_owned()]).await;
+    assert_eq!(labels().await, vec!["TRASH".to_owned()]);
+
+    // Now the sweep soft-deletes it, and the user un-trashes it afterwards.
+    // Only a full upsert used to clear `deleted_at`, so without the clear in
+    // `apply_label_delta` the row keeps correct labels and stays invisible.
+    let mut tx = db.pool.begin().await.unwrap();
+    store::soft_delete_message(&mut tx, account, "m1")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    apply(vec!["INBOX".to_owned()], vec!["TRASH".to_owned()]).await;
+    let alive: bool = sqlx::query_scalar(
+        "select deleted_at is null from messages where account_id = $1 and gmail_id = 'm1'",
+    )
+    .bind(account)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(alive, "an un-trashed message must come back from a sweep");
+    assert_eq!(labels().await, vec!["INBOX".to_owned()]);
+}
+
+/// A label change for mail we never cached is not an error and not a fetch.
+#[tokio::test]
+async fn a_label_change_for_an_uncached_message_is_skipped() {
+    let (db, account) = connected().await;
+    let mut tx = db.pool.begin().await.unwrap();
+    let thread =
+        store::apply_label_delta(&mut tx, account, "never-seen", &[], &["UNREAD".to_owned()])
+            .await
+            .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(thread, None);
+}
+
+/// Soft-delete is idempotent, and it keeps the first deletion's timestamp.
+#[tokio::test]
+async fn soft_deleting_twice_keeps_the_first_timestamp() {
+    let (db, account) = connected().await;
+    seed_one_message(&db, account, "m1", "t1", &["INBOX"]).await;
+
+    let delete = || {
+        let pool = db.pool.clone();
+        async move {
+            let mut tx = pool.begin().await.unwrap();
+            let thread = store::soft_delete_message(&mut tx, account, "m1")
+                .await
+                .unwrap();
+            tx.commit().await.unwrap();
+            thread
+        }
+    };
+
+    assert_eq!(delete().await.as_deref(), Some("t1"));
+    let first: DateTime<Utc> = sqlx::query_scalar(
+        "select deleted_at from messages where account_id = $1 and gmail_id = 'm1'",
+    )
+    .bind(account)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+
+    delete().await;
+    let second: DateTime<Utc> = sqlx::query_scalar(
+        "select deleted_at from messages where account_id = $1 and gmail_id = 'm1'",
+    )
+    .bind(account)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(first, second, "a replayed delete must not restamp the row");
+}
+
+/// One stored message, without going through Gmail.
+async fn seed_one_message(
+    db: &TestDb,
+    account: Uuid,
+    gmail_id: &str,
+    thread: &str,
+    labels: &[&str],
+) {
+    let owned: Vec<String> = labels.iter().map(|l| (*l).to_owned()).collect();
+    sqlx::query(
+        "insert into messages (account_id, gmail_id, thread_id, internal_ts, label_ids, body_text) \
+         values ($1, $2, $3, now(), $4, '')",
+    )
+    .bind(account)
+    .bind(gmail_id)
+    .bind(thread)
+    .bind(&owned)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+}
+
 /// Criterion N1 - the ordering that turns a gap into an overlap.
 #[tokio::test]
 async fn history_id_is_read_before_listing() {
@@ -375,11 +616,14 @@ async fn the_dev_caps_are_applied() {
     let mut config = crate::config::tests::sample();
     config.gmail.sync_window_days = 30;
     config.gmail.max_sync_messages = 2_000;
-    config.gmail.batch_size = 45;
+    // Injected from `MAX_BATCH` rather than written down. This line said 45
+    // until P3: a value `Config::from_env` now refuses to start with, asserted
+    // as if it were the production one.
+    config.gmail.batch_size = crate::gmail::client::MAX_BATCH;
     let production = SyncOptions::from_config(&config);
     assert_eq!(production.query, "newer_than:30d");
     assert_eq!(production.max_messages, 2_000);
-    assert_eq!(production.batch_size, 45);
+    assert_eq!(production.batch_size, crate::gmail::client::MAX_BATCH);
     assert_eq!(
         production.batch_interval,
         std::time::Duration::from_secs(1),
@@ -1247,4 +1491,507 @@ fn ingest_never_calls_an_llm() {
         "ingest must never call an LLM (PLAN.md §Gmail sync 3):\n{}",
         offenders.join("\n")
     );
+}
+
+// ------------------------------------------------- the incremental walk --
+//
+// `plan_page` is unit-tested next to itself; these drive the real
+// `run_incremental` against a wiremock Gmail, which is what gives control over
+// pagination boundaries, a stale cursor, and the transient/permanent split.
+
+use super::incremental::{run_incremental, IncrementalReport};
+
+/// A Gmail that serves `history.list` pages, plus the batch endpoint.
+struct FakeHistory {
+    server: MockServer,
+    calls: Arc<AtomicUsize>,
+}
+
+impl FakeHistory {
+    /// `pages` is served in order; each entry is the raw JSON body. A `404`
+    /// is requested with `None`, which is how Gmail says "your cursor aged
+    /// out".
+    async fn start(pages: Vec<Option<String>>, fixtures: Vec<Fixture>) -> Self {
+        let server = MockServer::start().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let served = pages;
+        let counter = Arc::clone(&calls);
+        Mock::given(method("GET"))
+            .and(path("/gmail/v1/users/me/history"))
+            .respond_with(move |_: &Request| {
+                let index = counter.fetch_add(1, Ordering::SeqCst);
+                match served.get(index) {
+                    Some(Some(body)) => ResponseTemplate::new(200)
+                        .set_body_raw(body.clone().into_bytes(), "application/json"),
+                    // Past the end: an empty page, which is what a quiet
+                    // mailbox really answers.
+                    None => ResponseTemplate::new(200)
+                        .set_body_raw(br#"{"historyId":"1"}"#.to_vec(), "application/json"),
+                    Some(None) => ResponseTemplate::new(404).set_body_raw(
+                        br#"{"error":{"code":404,"message":"Requested entity was not found."}}"#
+                            .to_vec(),
+                        "application/json",
+                    ),
+                }
+            })
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/batch/gmail/v1"))
+            .respond_with(move |request: &Request| batch_reply(request, &fixtures))
+            .mount(&server)
+            .await;
+
+        Self { server, calls }
+    }
+
+    fn client(&self) -> GmailClient {
+        GmailClient::new(
+            crate::gmail::http_client().unwrap(),
+            Endpoints::at(&self.server.uri()),
+            Arc::new(Bucket::new()),
+            Arc::new(StaticTokens("ya29.test".to_owned())),
+        )
+        .with_retry_budget(2, 0.0)
+    }
+
+    fn history_calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+async fn set_cursor(db: &TestDb, account: Uuid, cursor: i64) {
+    sqlx::query(
+        "insert into sync_state (account_id, last_history_id) values ($1, $2) \
+         on conflict (account_id) do update set last_history_id = excluded.last_history_id",
+    )
+    .bind(account)
+    .bind(cursor)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+}
+
+async fn cursor_of(db: &TestDb, account: Uuid) -> Option<i64> {
+    sqlx::query_scalar::<_, Option<i64>>(
+        "select last_history_id from sync_state where account_id = $1",
+    )
+    .bind(account)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap()
+}
+
+async fn run(db: &TestDb, gmail: &FakeHistory, account: Uuid) -> IncrementalReport {
+    run_incremental(&db.pool, &gmail.client(), account, &fast_options())
+        .await
+        .expect("the walk failed")
+}
+
+/// Criterion Q2 - a message the history adds is fetched, parsed, stored, and
+/// rolled up into its thread.
+#[tokio::test]
+async fn a_message_added_by_history_is_ingested_and_rolled_up() {
+    let fixture = Fixture::new(1);
+    let gmail = FakeHistory::start(
+        vec![Some(format!(
+            r#"{{"history":[{{"id":"200","messagesAdded":[{{"message":{{"id":"{}","threadId":"{}"}}}}]}}],
+                 "historyId":"999"}}"#,
+            fixture.id, fixture.thread_id
+        ))],
+        vec![fixture.clone()],
+    )
+    .await;
+    let (db, account) = connected().await;
+    set_cursor(&db, account, 100).await;
+
+    let report = run(&db, &gmail, account).await;
+
+    assert_eq!(report.added, vec![fixture.id.clone()]);
+    assert_eq!(report.pages, 1);
+    assert_eq!(report.threads, 1);
+
+    let stored: i64 =
+        sqlx::query_scalar("select count(*) from messages where account_id = $1 and gmail_id = $2")
+            .bind(account)
+            .bind(&fixture.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, 1, "the message must actually be in the table");
+
+    let threads: i64 = sqlx::query_scalar("select count(*) from threads where account_id = $1")
+        .bind(account)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        threads, 1,
+        "the rollup must exist or the mail list is blank"
+    );
+
+    assert_eq!(
+        cursor_of(&db, account).await,
+        Some(200),
+        "the record id, not 999"
+    );
+}
+
+/// Criterion Q7 + Q12 - three pages are all applied, and the cursor is the last
+/// record's id rather than the repeated top-level one.
+#[tokio::test]
+async fn every_page_of_a_multi_page_walk_is_applied() {
+    let fixtures: Vec<Fixture> = (1..=3).map(Fixture::new).collect();
+    let pages: Vec<Option<String>> = fixtures
+        .iter()
+        .enumerate()
+        .map(|(index, fixture)| {
+            let token = if index < 2 {
+                ",\"nextPageToken\":\"tok\"".to_owned()
+            } else {
+                String::new()
+            };
+            Some(format!(
+                r#"{{"history":[{{"id":"{}","messagesAdded":[{{"message":{{"id":"{}","threadId":"{}"}}}}]}}]{token},
+                     "historyId":"999"}}"#,
+                200 + index,
+                fixture.id,
+                fixture.thread_id
+            ))
+        })
+        .collect();
+
+    let gmail = FakeHistory::start(pages, fixtures.clone()).await;
+    let (db, account) = connected().await;
+    set_cursor(&db, account, 100).await;
+
+    let report = run(&db, &gmail, account).await;
+
+    assert_eq!(report.pages, 3, "a page was skipped");
+    assert_eq!(report.added.len(), 3);
+    assert_eq!(
+        cursor_of(&db, account).await,
+        Some(202),
+        "the cursor must be the last record applied, never the top-level 999"
+    );
+}
+
+/// Criterion Q11 - an empty page moves no cursor but still counts as a check.
+#[tokio::test]
+async fn an_empty_history_page_checks_without_moving_the_cursor() {
+    let gmail = FakeHistory::start(vec![Some(r#"{"historyId":"999"}"#.to_owned())], vec![]).await;
+    let (db, account) = connected().await;
+    set_cursor(&db, account, 100).await;
+    sqlx::query(
+        "update sync_state set last_checked_at = now() - interval '2 hours' where account_id = $1",
+    )
+    .bind(account)
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    let report = run(&db, &gmail, account).await;
+
+    assert_eq!(report.records, 0);
+    assert_eq!(cursor_of(&db, account).await, Some(100));
+    let fresh: bool = sqlx::query_scalar(
+        "select last_checked_at > now() - interval '1 minute' from sync_state where account_id = $1",
+    )
+    .bind(account)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert!(fresh, "an empty page is still a successful check");
+}
+
+/// Criterion Q13 - replaying the same page changes nothing and cannot rewind.
+#[tokio::test]
+async fn replaying_a_history_page_changes_nothing() {
+    let fixture = Fixture::new(1);
+    let body = format!(
+        r#"{{"history":[{{"id":"200","messagesAdded":[{{"message":{{"id":"{}","threadId":"{}"}}}}]}}],
+             "historyId":"999"}}"#,
+        fixture.id, fixture.thread_id
+    );
+    let gmail = FakeHistory::start(
+        vec![Some(body.clone()), Some(body)],
+        vec![fixture.clone(), fixture.clone()],
+    )
+    .await;
+    let (db, account) = connected().await;
+    set_cursor(&db, account, 100).await;
+
+    run(&db, &gmail, account).await;
+    let after_first: i64 =
+        sqlx::query_scalar("select count(*) from messages where account_id = $1")
+            .bind(account)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+
+    // A redelivered notification: the cursor is already past this page, but the
+    // walk is driven from our cursor, so re-running is the real test.
+    set_cursor(&db, account, 100).await;
+    run(&db, &gmail, account).await;
+
+    let after_second: i64 =
+        sqlx::query_scalar("select count(*) from messages where account_id = $1")
+            .bind(account)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(after_first, after_second, "replay duplicated a message");
+    assert_eq!(cursor_of(&db, account).await, Some(200));
+}
+
+/// Criterion Q10 - a **transient** fetch failure leaves the cursor alone, so
+/// the page is read again rather than skipped over.
+#[tokio::test]
+async fn a_transient_fetch_failure_does_not_advance_the_cursor() {
+    let mut fixture = Fixture::new(1);
+    fixture.broken = true; // a 500 inside the batch: transient
+    let gmail = FakeHistory::start(
+        vec![Some(format!(
+            r#"{{"history":[{{"id":"200","messagesAdded":[{{"message":{{"id":"{}","threadId":"{}"}}}}]}}],
+                 "historyId":"999"}}"#,
+            fixture.id, fixture.thread_id
+        ))],
+        vec![fixture],
+    )
+    .await;
+    let (db, account) = connected().await;
+    set_cursor(&db, account, 100).await;
+
+    let error = run_incremental(&db.pool, &gmail.client(), account, &fast_options())
+        .await
+        .expect_err("a page we could not fully account for must fail");
+    assert!(
+        error.to_string().contains("could not be fetched right now"),
+        "{error}"
+    );
+    assert_eq!(
+        cursor_of(&db, account).await,
+        Some(100),
+        "the cursor moved past a message we never stored"
+    );
+}
+
+/// The other half of Q10, and the one that matters more: a **permanent**
+/// failure must NOT pin the cursor. Asking again produces the same 400 forever,
+/// so blocking would wedge incremental sync for the life of the account.
+#[tokio::test]
+async fn a_permanent_fetch_failure_is_audited_and_the_walk_continues() {
+    let mut fixture = Fixture::new(1);
+    fixture.permanent = true; // a 400: asking again cannot help
+    let gmail = FakeHistory::start(
+        vec![Some(format!(
+            r#"{{"history":[{{"id":"200","messagesAdded":[{{"message":{{"id":"{}","threadId":"{}"}}}}]}}],
+                 "historyId":"999"}}"#,
+            fixture.id, fixture.thread_id
+        ))],
+        vec![fixture],
+    )
+    .await;
+    let (db, account) = connected().await;
+    set_cursor(&db, account, 100).await;
+
+    let report = run(&db, &gmail, account).await;
+
+    assert_eq!(report.fetch_failures, 1);
+    assert_eq!(
+        cursor_of(&db, account).await,
+        Some(200),
+        "a permanently dead message must not pin the cursor forever"
+    );
+    let audited: i64 = sqlx::query_scalar(
+        "select count(*) from audit_log where account_id = $1 and action = 'message_fetch_failed'",
+    )
+    .bind(account)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(audited, 1, "the skip must leave evidence");
+}
+
+/// Criterion R1's trigger - a cursor Gmail no longer serves is reported, not
+/// swallowed, so the caller can run the reconciliation sweep.
+#[tokio::test]
+async fn an_expired_cursor_is_reported_rather_than_failing_the_job() {
+    let gmail = FakeHistory::start(vec![None], vec![]).await;
+    let (db, account) = connected().await;
+    set_cursor(&db, account, 100).await;
+
+    let report = run(&db, &gmail, account).await;
+
+    assert!(
+        report.cursor_expired,
+        "the 404 must surface as a recovery request"
+    );
+    assert_eq!(
+        cursor_of(&db, account).await,
+        Some(100),
+        "nothing may move yet"
+    );
+}
+
+/// A mailbox that has never fully synced has no point from which "what changed"
+/// is even a question.
+#[tokio::test]
+async fn a_walk_without_a_cursor_asks_for_a_full_sync_instead() {
+    let gmail = FakeHistory::start(vec![], vec![]).await;
+    let (db, account) = connected().await;
+
+    let report = run(&db, &gmail, account).await;
+
+    assert!(report.needs_full_sync);
+    assert_eq!(
+        gmail.history_calls(),
+        0,
+        "there is nothing to ask Gmail yet"
+    );
+}
+
+/// Criterion Q16 - a dead credential makes no Gmail call at all, exactly as the
+/// full sync behaves.
+#[tokio::test]
+async fn an_incremental_walk_is_paused_when_the_account_needs_reauth() {
+    let gmail = FakeHistory::start(vec![], vec![]).await;
+    let (db, account) = connected().await;
+    set_cursor(&db, account, 100).await;
+    sqlx::query("update accounts set status = 'needs_reauth' where id = $1")
+        .bind(account)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+
+    let report = run(&db, &gmail, account).await;
+
+    assert!(report.paused);
+    assert_eq!(
+        gmail.history_calls(),
+        0,
+        "a paused sync must not call Gmail"
+    );
+}
+
+/// The lost wakeup, end to end.
+///
+/// A notification suppressed at enqueue records itself on
+/// `sync_state.rerun_requested`. The walk must take that flag and go round
+/// again, because its own cursor cannot see the change: the webhook
+/// deliberately never writes the notification's `historyId`.
+#[tokio::test]
+async fn a_rerun_request_makes_the_walk_go_round_again() {
+    let gmail = FakeHistory::start(
+        vec![
+            Some(r#"{"historyId":"999"}"#.to_owned()),
+            Some(r#"{"historyId":"999"}"#.to_owned()),
+        ],
+        vec![],
+    )
+    .await;
+    let (db, account) = connected().await;
+    set_cursor(&db, account, 100).await;
+    store::request_rerun(&db.pool, account).await.unwrap();
+
+    let report = run(&db, &gmail, account).await;
+
+    assert_eq!(report.reruns, 1, "the outstanding notification was dropped");
+    assert!(gmail.history_calls() >= 2, "the second pass never happened");
+    let still_set: bool =
+        sqlx::query_scalar("select rerun_requested from sync_state where account_id = $1")
+            .bind(account)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert!(
+        !still_set,
+        "the flag must be cleared once it has been acted on"
+    );
+}
+
+/// Without a request, the walk does not loop. Otherwise the test above would
+/// pass on a walk that always went round twice.
+#[tokio::test]
+async fn a_walk_with_no_rerun_request_makes_exactly_one_pass() {
+    let gmail = FakeHistory::start(vec![Some(r#"{"historyId":"999"}"#.to_owned())], vec![]).await;
+    let (db, account) = connected().await;
+    set_cursor(&db, account, 100).await;
+
+    let report = run(&db, &gmail, account).await;
+
+    assert_eq!(report.reruns, 0);
+    assert_eq!(gmail.history_calls(), 1);
+}
+
+/// Criterion Q3 - a label change costs no `messages.get`. Reading fifty
+/// messages in the Gmail UI is fifty records; at five units each that is the
+/// entire per-second quota budget spent on `UNREAD` flips.
+#[tokio::test]
+async fn a_label_change_updates_the_row_without_fetching_it() {
+    let gmail = FakeHistory::start(
+        vec![Some(
+            r#"{"history":[{"id":"200","labelsRemoved":[{"message":{"id":"m1"},"labelIds":["UNREAD"]}]}],
+                "historyId":"999"}"#
+                .to_owned(),
+        )],
+        vec![],
+    )
+    .await;
+    let (db, account) = connected().await;
+    set_cursor(&db, account, 100).await;
+    seed_one_message(&db, account, "m1", "t1", &["INBOX", "UNREAD"]).await;
+
+    let report = run(&db, &gmail, account).await;
+
+    assert_eq!(report.relabelled, 1);
+    assert_eq!(
+        report.added.len(),
+        0,
+        "no message may be fetched for a label change"
+    );
+    let labels: Vec<String> = sqlx::query_scalar(
+        "select label_ids from messages where account_id = $1 and gmail_id = 'm1'",
+    )
+    .bind(account)
+    .fetch_one(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(labels, vec!["INBOX".to_owned()]);
+}
+
+/// Criterion Q15 - a unicode subject arriving by history survives byte for
+/// byte, exactly as it does through the full sync.
+#[tokio::test]
+async fn a_unicode_subject_arriving_by_history_survives_ingest() {
+    let mut fixture = Fixture::new(7);
+    fixture.raw = rfc822(
+        "Priya Raghavan <priya@kettle.com>",
+        "=?utf-8?B?8J+agCDorr7orqHlrqHmn6U=?=",
+        "Body with an emoji \u{1f680} and CJK \u{8bbe}\u{8ba1}.",
+    );
+    let gmail = FakeHistory::start(
+        vec![Some(format!(
+            r#"{{"history":[{{"id":"200","messagesAdded":[{{"message":{{"id":"{}","threadId":"{}"}}}}]}}],
+                 "historyId":"999"}}"#,
+            fixture.id, fixture.thread_id
+        ))],
+        vec![fixture.clone()],
+    )
+    .await;
+    let (db, account) = connected().await;
+    set_cursor(&db, account, 100).await;
+
+    run(&db, &gmail, account).await;
+
+    let subject: String =
+        sqlx::query_scalar("select subject from messages where account_id = $1 and gmail_id = $2")
+            .bind(account)
+            .bind(&fixture.id)
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+    assert_eq!(subject, "\u{1f680} \u{8bbe}\u{8ba1}\u{5ba1}\u{67e5}");
 }
