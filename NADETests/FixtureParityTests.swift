@@ -21,16 +21,55 @@ final class FixtureParityTests: XCTestCase {
         try ContractFixture.repoDirectory("NADE/Fixtures/mail")
     }
 
-    /// The set, both ways. A missing copy and a stray extra both fail.
+    /// The set, both ways, for **both** extensions. A missing copy and a stray
+    /// extra both fail.
+    ///
+    /// The `.sse` half is not decoration: P3 bundles the four Ask streams, and
+    /// they cannot live in `FixtureSeed.names` because the loader appends
+    /// `.json` — so a single list would have been silently right for most of
+    /// the set and wrong for the rest.
     func testTheBundledSetIsExactlyTheManifest() throws {
-        let onDisk = Set(
-            try FileManager.default.contentsOfDirectory(atPath: try appFixtureDirectory().path)
-                .filter { ($0 as NSString).pathExtension == "json" }
-                .map { ($0 as NSString).deletingPathExtension }
-        )
-        XCTAssertEqual(onDisk, Set(FixtureSeed.names),
+        let contents = try FileManager.default
+            .contentsOfDirectory(atPath: try appFixtureDirectory().path)
+
+        func onDisk(_ ext: String) -> Set<String> {
+            Set(
+                contents
+                    .filter { ($0 as NSString).pathExtension == ext }
+                    .map { ($0 as NSString).deletingPathExtension }
+            )
+        }
+
+        XCTAssertEqual(onDisk("json"), Set(FixtureSeed.names),
                        "NADE/Fixtures/mail does not match FixtureSeed.names")
-        XCTAssertEqual(FixtureSeed.names.count, 10)
+        XCTAssertEqual(onDisk("sse"), Set(FixtureSeed.streamNames),
+                       "NADE/Fixtures/mail does not match FixtureSeed.streamNames")
+
+        // Counted, not pinned to a literal. This assertion said `10` until P3
+        // added fourteen more, and a `24` would rot exactly as fast — the point
+        // is that the manifest and the directory agree, which the two
+        // assertions above already say, and that neither is empty.
+        XCTAssertFalse(FixtureSeed.names.isEmpty)
+        XCTAssertFalse(FixtureSeed.streamNames.isEmpty)
+    }
+
+    /// The streams reach the app bundle unchanged, and parse.
+    func testEveryBundledStreamIsByteIdenticalToTheContract() throws {
+        let appDirectory = try appFixtureDirectory()
+        let contractDirectory = try ContractFixture.directory()
+
+        for name in FixtureSeed.streamNames {
+            let contract = try Data(contentsOf: contractDirectory.appendingPathComponent("\(name).sse"))
+            let copy = try Data(contentsOf: appDirectory.appendingPathComponent("\(name).sse"))
+            XCTAssertEqual(copy, contract, "NADE/Fixtures/mail/\(name).sse has drifted")
+
+            let bundled = try FixtureSeed.stream(name)
+            XCTAssertEqual(bundled, contract, "\(name).sse reached the bundle with different bytes")
+
+            var parser = SSEParser()
+            let events = try parser.consume(bundled)
+            XCTAssertFalse(events.isEmpty, "\(name).sse parsed to nothing")
+        }
     }
 
     /// Three-way: the contract, the copy, and what actually reached the app.

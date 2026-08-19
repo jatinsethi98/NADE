@@ -167,11 +167,17 @@ impl GmailClient {
     ///
     /// # Errors
     /// Returns [`GmailError`] on an upstream failure.
+    /// Returns the ids **and whether Gmail had more to give**.
+    ///
+    /// The second half matters to the reconciliation sweep: `listed == cap` is
+    /// not proof of truncation (a mailbox of exactly the cap with no next page
+    /// is complete), and treating it as such narrows the sweep's floor and
+    /// leaves genuinely deleted rows behind.
     pub async fn list_message_ids(
         &self,
         query: &str,
         cap: usize,
-    ) -> Result<Vec<MessageRef>, GmailError> {
+    ) -> Result<(Vec<MessageRef>, bool), GmailError> {
         let mut out: Vec<MessageRef> = Vec::new();
         let mut page_token: Option<String> = None;
 
@@ -192,8 +198,11 @@ impl GmailClient {
             }
         }
 
+        // Truncated means "Gmail still had more when we stopped", which is a
+        // page token surviving the loop - not `out.len() == cap`.
+        let truncated = out.len() > cap || (page_token.is_some() && out.len() >= cap);
         out.truncate(cap);
-        Ok(out)
+        Ok((out, truncated))
     }
 
     /// **One** page of `users.messages.list`, with Gmail's own `pageToken`.
@@ -973,9 +982,14 @@ mod tests {
             .await
             .unwrap();
 
+        let (ids, truncated) = ids;
         assert_eq!(ids.len(), 1200, "the cap is a hard stop");
         assert_eq!(ids[0].id, "m0");
         assert_eq!(ids[1199].id, "m1199");
+        assert!(
+            truncated,
+            "stopping at the cap with a page token still in hand is truncation"
+        );
         assert_eq!(
             calls.load(Ordering::SeqCst),
             3,
@@ -1001,7 +1015,9 @@ mod tests {
             .list_message_ids("newer_than:30d", 2000)
             .await
             .unwrap();
+        let (ids, truncated) = ids;
         assert!(ids.is_empty());
+        assert!(!truncated, "an empty window is complete, not truncated");
     }
 
     #[tokio::test]

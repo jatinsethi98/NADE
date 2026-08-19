@@ -90,6 +90,7 @@ postgresql_embedded = { version = "0.21", default-features = false, features = [
   "tokio",
   "tls-rustls-ring",
 ] }
+jsonwebtoken = { version = "11.0.0", default-features = false, features = ["use_pem", "rust_crypto"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
@@ -103,3 +104,4 @@ wiremock = "0.6"
 # only echo back whatever we already believed. Dev-only, and one-directional -
 # nothing in `src/` may reach for it.
 nade-gmail-sim = { path = "../nade-gmail-sim" }
+rsa = "0.9.10"

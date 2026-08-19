@@ -465,7 +465,10 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = T6BTHTJ6Y8;
 				ENABLE_PREVIEWS = YES;
-				EXCLUDED_SOURCE_FILE_NAMES = "NADE/Fixtures/mail/*.json";
+				EXCLUDED_SOURCE_FILE_NAMES = (
+					"NADE/Fixtures/mail/*.json",
+					"NADE/Fixtures/mail/*.sse",
+				);
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = NADE/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;

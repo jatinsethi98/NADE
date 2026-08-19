@@ -486,7 +486,11 @@ Routing is decided server-side: heuristics first (a quoted phrase or a
 `from:`/`to:`/`has:` operator → `results`; an imperative "when…"/"every…" →
 `agent_draft`), then a cheap model for the remainder.
 
-`GET /search` still exists and is what the Mail tab's plain search box uses.
+`GET /search` still exists, but **it has no screen**: `DESIGN.md` §1e draws no
+search field on the mail list and the mockup has none. It is reached through
+Ask and by the agents' `search_mail` tool. (This sentence used to promise "the
+Mail tab's plain search box"; `PLAN.md` §Ask routing retracted that screen and
+this had not caught up.)
 
 ---
 

@@ -515,3 +515,203 @@ indistinguishable from "there were fewer matches".
 audit row. **This is not the whole fix.** `ThreadsResponse` has no `partial`
 field, so the response still cannot say so — `ThreadDetail` gained one (D26) and
 the threads list should too. Recorded rather than half-done quietly.
+
+# P3 — "Mail stays current"
+
+## D31 — The history cursor is `max(record.id)`, never `historyId`.
+
+`HistoryList.historyId` is the mailbox's **current** id, and Gmail repeats it on
+every page of a walk. Store it after page one and the next walk asks
+`history.list` from a point past everything it had not read; the log filter is
+`record.id > start`, so the answer is a `200` **with no `history` key** — byte
+for byte what a quiet mailbox returns.
+
+Nothing errors. Nothing retries. The messages are simply never ingested, and the
+only thing that can notice is a full re-sync.
+
+`crates/nade-gmail-sim/tests/sync_story.rs::advancing_to_the_top_level_history_id_after_page_one_loses_records`
+was written before the consumer existed and is the reproduction.
+`HistoryList::max_record_id` is the only way to a cursor, and the warning lives
+in its doc comment — next to the trap rather than in a design document.
+
+## D32 — The push body's `historyId` is never persisted.
+
+The webhook logs and audits it and writes it nowhere. The walk is driven
+**only** by our own stored cursor.
+
+That one rule is what makes Pub/Sub's at-least-once, out-of-order delivery
+irrelevant: a notification for 100 arriving before one for 99 triggers exactly
+the same walk, and a redelivery produces an empty page. Writing it would be a
+second cursor with different semantics, updated by an untrusted body.
+
+Rejected alternative: storing Pub/Sub `messageId`s to deduplicate deliveries. It
+buys nothing — the work is cursor-driven and idempotent at every layer — and it
+would be a second table to garbage-collect and a second thing to get wrong.
+
+## D33 — `jobs.dedupe_key`'s index must not mention `locked_by`.
+
+The obvious predicate is `... and locked_by is null`, so a notification arriving
+mid-walk can still enqueue. It is unsafe: `Queue::fail`, `Queue::release` and
+`Queue::reap_expired_leases` **all** set `locked_by = null`, so a replacement row
+inserted during the run collides the instant the original fails, is released at
+shutdown, or has its lease reaped. The queue would be unable to record its own
+failures during exactly the outage that caused them.
+
+So the index is over pending rows regardless of lock, and the race it would have
+solved is closed by `sync_state.rerun_requested` instead (D34).
+`db::tests::a_running_job_can_still_fail_release_and_be_reaped_with_a_pending_twin`
+fails against the unsafe predicate.
+
+## D34 — The lost wakeup, and why re-reading the cursor cannot fix it.
+
+A notification that lands after the walk's last (empty) page and before the job
+completes is suppressed at enqueue by D33's index. The walk cannot see it by
+re-reading `last_history_id`, because D32 means the webhook never wrote it.
+
+"Did our own cursor move?" is not a signal either: it moved because *we* moved
+it, so it is true after every productive walk and would spend an extra
+`history.list` confirming silence for ever.
+
+So the suppressed enqueue records itself on `sync_state.rerun_requested`, and
+the walk takes **and clears** the flag in one statement before deciding whether
+to finish. Read-then-clear as two statements would drop a notification landing
+between them, which is the bug the mechanism exists to fix. Bounded at
+`MAX_DRAIN_PASSES`, after which the flag is put back and the next job takes it.
+
+## D35 — The reconciliation debt is durable, not inferred.
+
+The 404 recovery re-syncs the window and then sweeps. The obvious structure —
+"both in one job, so a crash retries both" — does not work: `sync_window`
+durably commits a **fresh** cursor before returning, so the retry's
+`history.list` succeeds, never produces the `404` that enters recovery, and the
+sweep is skipped **permanently**. Deleted and moved mail stays live with nothing
+able to notice.
+
+`sync_state.reconcile_after` is written **when the `404` is seen** — before the
+recovery re-sync begins — and cleared only by a completed sweep, so the
+reconciliation survives independently of whether the 404 ever recurs. The
+guarantee is the ordering, not a shared transaction: persisting first means
+every crash point between the 404 and the sweep still owes the work.
+
+## D36 — The sweep's floor, and the two ways it would delete live mail.
+
+"Everything in the window the fresh listing did not mention" is wrong twice over
+without guards:
+
+1. `messages` legitimately holds mail from **outside** the window. Every search
+   hit is cached (`mail::cache::fetch_missing`) and opening an old thread pulls
+   in the whole conversation; a `newer_than:30d` listing can never name any of
+   it. Without `internal_ts >= floor` the sweep deletes everything the user has
+   ever searched for.
+2. `list_message_ids` truncates at `MAX_SYNC_MESSAGES`, so the window may not
+   have been enumerated at all. `messages.list` is newest-first, so a truncated
+   listing enumerates exactly the window's *suffix* — and the floor becomes the
+   oldest message actually seen, not the window's edge. Not the later of the
+   two: untruncated, we want `now - window`, because the band between it and the
+   oldest listed message is precisely where deleted mail lives.
+
+And the sweep does not run at all unless the re-sync accounted for every
+message, because a listing that gave up half way through looks exactly like
+"these messages were deleted".
+
+## D37 — `jsonwebtoken`'s `rust_crypto` backend, and why not `aws_lc_rs`.
+
+`jsonwebtoken` 11 offers `rust_crypto` and `aws_lc_rs` and **no `ring` option at
+all**, so CLAUDE.md's "APNs via reqwest + jsonwebtoken" did not settle the
+question. `aws_lc_rs` needs cmake, which is not on this machine, and D19 already
+forbids a second crypto provider in one process.
+
+`rust_crypto` it is. Its `rsa` and `sha2` are already in `Cargo.lock` (via
+`sqlx-mysql` and our own hashing), it installs no rustls provider, and
+`grep -c aws-lc Cargo.lock` is still `0` after the add — which is the check to
+re-run if this dependency is ever bumped.
+
+## D38 — `AccountLock` has a `Drop`, because `release` is an `async fn`.
+
+The guard released the lock only on the path that awaited `release`. The job
+worker deliberately does not guarantee that path: it aborts a handler whose
+lease it has lost, and again when the shutdown grace expires.
+
+Dropping a `PoolConnection` **returns it to the pool**, where it is recycled
+rather than closed — and a session-scoped advisory lock belongs to the session.
+The lock would survive on a connection now serving unrelated requests, and every
+later sync of that account would stand down as `skipped_concurrent` for ever,
+with no lock anyone could find.
+
+`Drop` now detaches the connection so PostgreSQL frees its session locks. Losing
+one pooled connection on an aborted sync is a cost worth paying; a permanently
+wedged account is not. The bug predates P3 and applied to `run_sync` too.
+
+## D39 — A malformed history record is audited, not blocking.
+
+A history entry with no message id is counted and audited rather than skipped in
+silence — but it deliberately does **not** hold the cursor.
+
+The id is the only handle on the message, so refusing to advance would re-read
+the same malformed record for ever: a wedged account that has *also* lost the
+mail, which is strictly worse than an audited skip. The 30-day sync and the
+reconciliation sweep are the backstops that can still find it.
+
+Contrast a **transient** fetch failure, which does hold the cursor (asking again
+is likely to work), and a **permanent** one, which does not (asking again
+produces the same 400 for ever, so one dead message would otherwise pin
+incremental sync for the life of the account).
+
+## D40 — Truncation is the listing's answer, not a count comparison.
+
+The reconciliation sweep narrows its floor when the 30-day listing was cut
+short. That was inferred from `listed == MAX_SYNC_MESSAGES`, which is wrong in
+both directions: a mailbox holding exactly the cap with no next page is
+*complete*, and treating it as truncated leaves genuinely deleted rows behind
+while clearing the debt anyway.
+
+`list_message_ids` now returns `(ids, truncated)`, with `truncated` derived from
+a `nextPageToken` surviving the loop.
+
+## D41 — The sweep's boundary is `>` when truncated, `>=` otherwise.
+
+Gmail pages by `internalDate`, so a capped listing can stop **inside** a group
+of messages sharing one timestamp: it returns some of them and stops. With
+`internal_ts >= floor`, the ones it did not reach match the predicate, are
+absent from the listed ids, and are soft-deleted while still live in Gmail.
+
+`>` keeps the whole boundary cohort. The cost is that a message genuinely
+deleted at exactly that timestamp waits for the next reconciliation; the
+alternative cost is deleting live mail, silently.
+
+## D42 — A busy account lock is not a completed notification.
+
+`run_incremental` returns `Ok` with `skipped_concurrent` when another worker
+holds the lock, and `jobs.rs` marks any `Ok` handler done — so a push racing a
+full sync would be acknowledged and its work discarded, with the change waiting
+on the 30-minute poll.
+
+The handler re-enqueues itself once, ten seconds out, with a `requeued` flag so
+a second contention stops rather than looping.
+
+## D43 — The JWKS cache separates *lookup* from *freshness*.
+
+Two bugs came from conflating them, and both were outages:
+
+- an unknown `kid` refetched only when the set was **stale**, so Google rotating
+  a key inside our TTL rejected every push until the TTL expired — up to the
+  24-hour clamp;
+- a failed refresh logged "serving a stale JWKS" and then rejected the token
+  anyway, because the next lookup insisted on freshness. The documented
+  stale-key fallback was unreachable.
+
+Freshness now decides only *when to refetch*. A cached key verifies whether or
+not the set is stale, and an unknown `kid` may provoke a refetch at any time,
+gated solely by the rate limit that stops forged `kid`s becoming an amplifier
+pointed at Google. The limit is a field rather than a constant so a test can
+prove both halves without sleeping through a minute.
+
+## D44 — The outbox writes the intention before it moves the card.
+
+The queue write was `try?` and the card was resolved regardless. A disk or
+migration failure therefore produced the worst possible outcome: the UI said the
+approval had happened, nothing was ever sent, and the token — the capability
+needed to retry — was cleared from the only copy the client had.
+
+Durability first, optimism second. A failed enqueue leaves the card actionable
+and surfaces the error.

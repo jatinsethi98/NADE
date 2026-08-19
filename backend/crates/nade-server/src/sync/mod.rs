@@ -32,7 +32,9 @@
 //! enforces it by grep.
 
 pub mod incremental;
+pub mod schedule;
 pub mod store;
+pub mod sweep;
 
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 
@@ -72,6 +74,10 @@ pub struct SyncOptions {
     /// window - which is the other half of why the history cursor is read before
     /// the listing rather than after it.
     pub query: String,
+    /// The same number the query is built from, kept as an integer because the
+    /// reconciliation sweep needs a floor and parsing it back out of the string
+    /// would be inventing a second source of truth.
+    pub window_days: u32,
     /// `MAX_SYNC_MESSAGES`.
     pub max_messages: usize,
     /// Messages per batch, capped at [`crate::gmail::client::MAX_BATCH`].
@@ -106,6 +112,7 @@ impl SyncOptions {
     pub fn from_config(config: &crate::config::Config) -> Self {
         Self {
             query: format!("newer_than:{}d", config.gmail.sync_window_days),
+            window_days: config.gmail.sync_window_days,
             max_messages: config.gmail.max_sync_messages,
             batch_size: config.gmail.batch_size,
             batch_interval: Duration::from_secs(1),
@@ -130,6 +137,12 @@ impl SyncOptions {
 pub struct SyncReport {
     pub labels: usize,
     pub listed: usize,
+    /// The listing stopped at `MAX_SYNC_MESSAGES` with more still to come.
+    ///
+    /// Derived from Gmail's own `nextPageToken`, not from `listed == cap`: a
+    /// mailbox holding exactly the cap with no next page is complete, and the
+    /// reconciliation sweep narrows its floor when this is true.
+    pub listing_truncated: bool,
     pub batches: usize,
     pub ingested: usize,
     /// Deleted between `messages.list` and `messages.get`. Normal.
@@ -221,19 +234,35 @@ pub async fn run_sync(
     };
 
     // The lock is released on every path out of `sync_window`, success or not.
-    let outcome = sync_window(pool, client, account_id, options, &mut report).await;
+    let mut listed_ids = Vec::new();
+    let outcome = sync_window(
+        pool,
+        client,
+        account_id,
+        options,
+        &mut report,
+        &mut listed_ids,
+    )
+    .await;
     lock.release().await;
     outcome?;
     Ok(report)
 }
 
 /// Steps 1-6, with the account lock already held.
+///
+/// `listed_ids` receives every gmail id the window enumerated. It is an
+/// out-parameter rather than a field on [`SyncReport`] because that struct's
+/// contract is "every field reaches the audit row", and two thousand ids would
+/// balloon every audit entry to serialise a working set only the reconciliation
+/// sweep ever reads.
 pub(crate) async fn sync_window(
     pool: &PgPool,
     client: &GmailClient,
     account_id: Uuid,
     options: &SyncOptions,
     report: &mut SyncReport,
+    listed_ids: &mut Vec<String>,
 ) -> Result<()> {
     // STEP 1 - the history cursor, BEFORE the listing. Overlap, never a gap.
     let profile = client
@@ -247,11 +276,14 @@ pub(crate) async fn sync_window(
     report.labels = store::upsert_labels(pool, account_id, &labels).await?;
 
     // STEP 2 - the dev caps.
-    let listed = client
+    let (listed, truncated) = client
         .list_message_ids(&options.query, options.max_messages)
         .await
         .context("listing Gmail messages")?;
     report.listed = listed.len();
+    report.listing_truncated = truncated;
+    listed_ids.clear();
+    listed_ids.extend(listed.iter().map(|entry| entry.id.clone()));
 
     // STEP 3 - paced batches, then as many re-ask rounds as it takes.
     let mut touched_threads: BTreeSet<String> = BTreeSet::new();

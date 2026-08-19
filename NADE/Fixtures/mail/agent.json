@@ -1,0 +1,47 @@
+{
+  "id": "a0000001-0000-4000-8000-000000000001",
+  "name": "Job Search Tracker",
+  "nl_definition": "When a recruiter emails about a tech role, pull out the next steps and save them to a note. Ask me before you save.",
+  "status": "published",
+  "trigger_summary": "On new mail",
+  "schedule": null,
+  "last_run_at": "2026-08-17T08:22:43Z",
+  "approval_required": true,
+  "allowed_tools": [
+    "search_mail",
+    "read_thread",
+    "write_note"
+  ],
+  "compile_error": null,
+  "when_span": "a recruiter emails about a tech role",
+  "do_span": "pull out the next steps and save them to a note",
+  "trailing": "Ask me before you save.",
+  "spec": {
+    "version": 1,
+    "trigger": {
+      "kind": "mail",
+      "filters": {
+        "from_domains": [],
+        "from_contains": [],
+        "subject_contains": [],
+        "body_contains": [],
+        "label_ids": [
+          "INBOX"
+        ],
+        "has_attachment": null,
+        "newer_than_days": 30
+      },
+      "semantic": "The sender is a recruiter, hiring manager, or in-house talent partner writing about a specific engineering, design, or product role."
+    },
+    "instruction": "Read the thread. Extract every concrete next step the sender proposes -- calls, take-homes, intro meetings, deadlines -- with its date if one is given. Write them to a note titled after the company. If there are no concrete next steps, do nothing.",
+    "tools": [
+      "search_mail",
+      "read_thread",
+      "write_note"
+    ],
+    "output": {
+      "kind": "note",
+      "title_template": "{company} — next steps"
+    }
+  }
+}

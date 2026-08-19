@@ -95,6 +95,18 @@ async fn serve(config: Config) -> Result<()> {
         spawn_workers(&queue, &registry, config.workers, &shutdown_rx)
     };
 
+    // Google's key set, fetched once so the first real push does not pay for
+    // it. Fire-and-forget: a failure is a warning, never a boot failure - the
+    // server starts with no network, exactly as it starts with no OAuth client.
+    {
+        let state = state.clone();
+        tokio::spawn(async move { state.push.warm().await });
+    }
+
+    // The watch renewal and the polling fallback. A pure enqueuer: it asks the
+    // database what is overdue and puts one deduplicated job on the queue.
+    let scheduler = nade_server::sync::schedule::spawn(state.clone(), queue.clone());
+
     let address = format!("{}:{}", config.bind, config.port);
     let listener = TcpListener::bind(&address)
         .await
@@ -113,6 +125,10 @@ async fn serve(config: Config) -> Result<()> {
     sighup.abort();
     // Workers finish their in-flight job (or release its lease) and stop.
     let _ = shutdown_tx.send(true);
+    // The scheduler holds nothing and writes nothing but an enqueue, so it is
+    // aborted rather than drained; the workers own the in-flight jobs and are
+    // given their grace period below.
+    scheduler.abort();
     for worker in workers {
         let _ = worker.await;
     }

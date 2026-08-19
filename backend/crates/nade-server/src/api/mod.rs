@@ -15,6 +15,7 @@ pub mod cursor;
 pub mod gmail_auth;
 pub mod health;
 pub mod mail;
+pub mod webhooks;
 
 /// Our real response types, serialised and compared against `docs/contract/`.
 #[cfg(test)]
@@ -66,7 +67,20 @@ pub fn router(state: AppState) -> Router {
         // requires the cookie `start` set. backend/DECISIONS.md D15.
         .route("/auth/gmail/start", get(gmail_auth::start))
         .route("/auth/gmail/callback", get(gmail_auth::callback))
-        // P3 adds /webhooks/gmail here - public, but OIDC-verified.
+        // Public, but not open: Pub/Sub cannot present a bearer, so the OIDC
+        // token is verified in full instead. The method fallback matters -
+        // without it a `GET` here answers `405` and confirms the route exists,
+        // while every other unknown /v1 path answers `401`.
+        .route(
+            "/webhooks/gmail",
+            post(webhooks::gmail)
+                .fallback(|| async { crate::error::ApiError::unauthorized() })
+                // `API.md` §0 caps a request body at 1 MB. axum's own default
+                // is 2 MiB, so without this an unauthenticated caller could
+                // force twice the buffering the contract promises - before
+                // verification, because the body is read as `Bytes`.
+                .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)),
+        )
         .with_state(state)
         .fallback_service(protected);
 
@@ -123,6 +137,11 @@ mod tests {
             "/v1/healthz/extra",
             "/v1/auth",
             "/v1/auth/pair/extra",
+            // The webhook is public, but only at exactly this path and exactly
+            // this method. Everything around it must look like any other
+            // unknown route.
+            "/v1/webhooks",
+            "/v1/webhooks/gmail/extra",
         ] {
             let response = authed_get(&app, path, None).await;
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{path}");
@@ -196,5 +215,21 @@ mod tests {
                 .contains("kaboom"),
             "the panic message must not reach the client"
         );
+    }
+    /// Criterion T15 - a `GET` to the webhook answers exactly like an unknown
+    /// route. Without the method fallback, axum answers `405`, which tells a
+    /// prober the path exists and is worth attacking.
+    #[tokio::test]
+    async fn a_get_to_the_webhook_is_indistinguishable_from_an_unknown_route() {
+        let app = test_app(Env::Prod).await;
+
+        let probe = authed_get(&app, "/v1/webhooks/gmail", None).await;
+        assert_eq!(probe.status(), StatusCode::UNAUTHORIZED);
+        let probe_body = response_json(probe).await;
+
+        let unknown = authed_get(&app, "/v1/no-such-route", None).await;
+        assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(probe_body, response_json(unknown).await);
+        assert_eq!(probe_body, fixture("error_unauthorized.json"));
     }
 }

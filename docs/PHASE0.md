@@ -24,6 +24,22 @@ Account `jatinsethi98@gmail.com`, project `deliveriesapp-293223`
 - `gmail-api-push@system.gserviceaccount.com` → `roles/pubsub.publisher`
   on that topic. Verified in the topic's IAM policy.
 
+## ~~H4 — `cloudflared tunnel login`~~ ❌ dropped at P3
+
+`PLAN.md`'s Phase 0 table defines H4 as a browser click for
+`cloudflared tunnel login`. This file supersedes that table, and never had an
+H4 section — so it sat between the two documents, owned by neither.
+
+It is **dropped**, deliberately. P3 uses a *quick* tunnel
+(`cloudflared tunnel --url`), which needs no login and no Cloudflare-managed
+domain. The cost is an ephemeral `*.trycloudflare.com` hostname that changes
+every session, so the Pub/Sub push subscription and the OAuth redirect URI have
+to be re-pointed each time — which is what `just tunnel` does.
+
+A named tunnel would give a stable hostname and remove that step, but it needs
+both the login click and a domain whose DNS is on Cloudflare. There is no domain
+before P8 (H10), so it would have blocked P3 on buying one.
+
 ## H6 — push subscription · **prerequisites done, subscription waits on P3**
 
 Done already:
@@ -39,6 +55,9 @@ Still to do, at P3, by the orchestrator once cloudflared has a hostname:
 create the push subscription on `gmail-events` targeting
 `https://<tunnel>/v1/webhooks/gmail` with OIDC auth as `nade-push`.
 
+`just tunnel` now does exactly this — create-or-update — every session, because
+a quick tunnel's hostname does not survive a restart.
+
 ## ~~H3 — OAuth Web client~~ ✅ done 2026-08-17
 
 `backend/secrets/web_client.json`, client id
@@ -49,7 +68,10 @@ probing Google's authorize endpoint now reaches the sign-in page instead of
 `redirect_uri_mismatch`.
 
 At P3, add `https://<tunnel>/v1/auth/gmail/callback` as a second redirect URI
-once the tunnel hostname exists. No need to re-download the JSON — redirect
+once the tunnel hostname exists. **This is the one step `just tunnel` cannot
+do**: `gcloud` does not expose redirect URIs for a web client created in the
+console, so the script prints the URI and you paste it in. With a quick tunnel
+it recurs whenever you need the Gmail link flow from a new tunnel. No need to re-download the JSON — redirect
 URIs are validated server-side, not read from that file.
 
 Still worth doing on that page: the old Desktop client

@@ -39,6 +39,20 @@ nonisolated enum FixtureSeed {
         // It backs the "To Reply" label, which is where `thread.json` and
         // `thread_partial.json` are both filed.
         "search",
+        // P3.
+        "feed", "feed_empty", "feed_item", "feed_item_info", "feed_item_editable",
+        "agents", "agents_empty",
+        "agent", "agent_draft", "agent_scheduled", "agent_compile_failed",
+        "approve", "skip", "seen",
+    ]
+
+    /// The Ask streams, kept separate because they are **not** `.json`.
+    ///
+    /// `FixtureSeed.data` appends the extension, so a stream listed above would
+    /// be looked up as `ask_answer.sse.json` and never found. Two lists and two
+    /// extensions, rather than one list that is right for most of it.
+    static let streamNames = [
+        "ask_answer", "ask_results", "ask_agent_draft", "ask_error",
     ]
 
     /// **Which fixture backs which mailbox.**
@@ -76,6 +90,14 @@ nonisolated enum FixtureSeed {
 
     static func data(_ name: String) throws -> Data {
         guard let url = Bundle.main.url(forResource: name, withExtension: "json") else {
+            throw FixtureError.missing(name)
+        }
+        return try Data(contentsOf: url)
+    }
+
+    /// The raw bytes of an `.sse` fixture.
+    static func stream(_ name: String) throws -> Data {
+        guard let url = Bundle.main.url(forResource: name, withExtension: "sse") else {
             throw FixtureError.missing(name)
         }
         return try Data(contentsOf: url)
@@ -140,6 +162,39 @@ nonisolated final class FixtureMailSource: MailSource {
 
     func isPaired() throws -> Bool {
         state.withLock { $0.paired }
+    }
+
+    // MARK: - P3
+
+    func feed(cursor: String?) async throws -> WireFeedPage {
+        try FixtureSeed.decode(WireFeedPage.self, isEmpty ? "feed_empty" : "feed")
+    }
+
+    func feedItem(id: String) async throws -> WireFeedItem {
+        let page = try FixtureSeed.decode(WireFeedPage.self, "feed")
+        guard let item = page.items.first(where: { $0.id == id }) else {
+            throw APIFailure.server(code: .notFound, status: 404,
+                                    message: "No such feed item.", retryAfter: nil)
+        }
+        return item
+    }
+
+    /// The fixture world answers an approve the way the server would, so the
+    /// outbox's success path is exercised rather than stubbed.
+    func approve(feedItemID: String, approvalToken: String) async throws -> WireApproveResponse {
+        try FixtureSeed.decode(WireApproveResponse.self, "approve")
+    }
+
+    func skip(feedItemID: String, approvalToken: String) async throws -> WireSkipResponse {
+        try FixtureSeed.decode(WireSkipResponse.self, "skip")
+    }
+
+    func seen(ids: [String]) async throws -> WireSeenResponse {
+        try FixtureSeed.decode(WireSeenResponse.self, "seen")
+    }
+
+    func agents() async throws -> [WireAgentRow] {
+        try FixtureSeed.decode(WireAgentList.self, isEmpty ? "agents_empty" : "agents").agents
     }
 
     func pair(code: String, deviceName: String) async throws -> Credential {

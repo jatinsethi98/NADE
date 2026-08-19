@@ -35,6 +35,10 @@ if [ ! -d "$APP" ]; then
     exit 1
 fi
 
+# `.sse` is here for a reason: P3 bundles the four Ask streams, and the pattern
+# was `*.json` only - so the streams would have shipped in Release and this
+# check would have said nothing. `EXCLUDED_SOURCE_FILE_NAMES` had the same gap.
+#
 # `calendar.json` is the one fixture v1 genuinely ships: DESIGN.md §1j makes the
 # Calendar tab a stub rendered from it, and PLAN.md's parity map says so.
 # `-not -path '*/PlugIns/*'` matters: a Debug .app embeds NADETests.xctest,
@@ -42,7 +46,7 @@ fi
 # those would make the cross-check below pass for entirely the wrong reason —
 # and would make this look like it had inspected the app when it had inspected
 # the tests.
-UNEXPECTED=$(find "$APP" -name '*.json' ! -name 'calendar.json' -not -path '*/PlugIns/*' | sed "s|$APP/||" || true)
+UNEXPECTED=$(find "$APP" \( -name '*.json' -o -name '*.sse' \) ! -name 'calendar.json' -not -path '*/PlugIns/*' | sed "s|$APP/||" || true)
 
 if [ -n "$UNEXPECTED" ]; then
     echo "FAIL: a Release build carries fixture mail:" >&2
@@ -60,7 +64,7 @@ DEBUG_PRODUCTS=$(products_dir Debug)
 DEBUG_APP="$DEBUG_PRODUCTS/$SCHEME.app"
 
 if [ -d "$DEBUG_APP" ]; then
-    DEBUG_FIXTURES=$(find "$DEBUG_APP" -name '*.json' ! -name 'calendar.json' -not -path '*/PlugIns/*' | wc -l | tr -d ' ')
+    DEBUG_FIXTURES=$(find "$DEBUG_APP" \( -name '*.json' -o -name '*.sse' \) ! -name 'calendar.json' -not -path '*/PlugIns/*' | wc -l | tr -d ' ')
     if [ "$DEBUG_FIXTURES" -eq 0 ]; then
         echo "FAIL: the Debug build carries no fixtures either, so this check" >&2
         echo "cannot distinguish 'excluded from Release' from 'never built'." >&2

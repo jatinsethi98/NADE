@@ -39,6 +39,14 @@ pub const ENV_VARS: &[&str] = &[
     "NADE_MAX_SYNC_MESSAGES",
     "NADE_SYNC_WINDOW_DAYS",
     "NADE_SYNC_BATCH_SIZE",
+    "NADE_PUSH_SA_EMAIL",
+    "NADE_PUSH_AUDIENCE",
+    "NADE_PUSH_JWKS_URL",
+    "NADE_PUSH_JWKS_TTL_SECS",
+    "NADE_PUSH_TOPIC",
+    "NADE_SCHEDULER_TICK_SECS",
+    "NADE_WATCH_RENEW_HOURS",
+    "NADE_POLL_INTERVAL_MINS",
     "NADE_BACKEND_ROOT",
     "NADE_PG_PORT",
     "NADE_PG_PASSWORD",
@@ -123,6 +131,38 @@ pub struct GmailConfig {
     pub batch_size: usize,
 }
 
+/// Gmail push: who is allowed to call the webhook, and what to watch.
+///
+/// Both claim checks are `Option`, and unset means **every push is rejected**.
+/// The webhook is fail-closed on purpose: `aud` alone is forgeable, so a
+/// half-configured server that accepted pushes would be worse than one that
+/// accepted none.
+#[derive(Debug, Clone)]
+pub struct PushConfig {
+    /// The OIDC `email` claim we require - the service account Pub/Sub mints
+    /// its token as.
+    pub sa_email: Option<String>,
+    /// The OIDC `aud` claim, which must equal the audience set on the push
+    /// subscription. With a quick tunnel this changes every session.
+    pub audience: Option<String>,
+    /// Google's JWK Set. Only the test suite overrides it.
+    pub jwks_url: String,
+    /// Fallback key-set lifetime when the response carries no `max-age`.
+    pub jwks_ttl: Duration,
+    /// The Pub/Sub topic `users.watch` registers against. Unset means no watch
+    /// is registered and the poll is the only thing keeping mail current -
+    /// which is exactly the dev-without-a-tunnel case.
+    pub topic: Option<String>,
+}
+
+/// How often the background scheduler asks the database what is overdue.
+#[derive(Debug, Clone)]
+pub struct ScheduleConfig {
+    pub tick: Duration,
+    pub watch_renew_after: Duration,
+    pub poll_after: Duration,
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub env: Env,
@@ -139,6 +179,8 @@ pub struct Config {
     pub pairing: PairingConfig,
     pub gmail: GmailConfig,
     pub jobs: crate::jobs::QueueConfig,
+    pub push: PushConfig,
+    pub schedule: ScheduleConfig,
     pub workers: usize,
     pub embedded: EmbeddedConfig,
 }
@@ -176,6 +218,32 @@ impl Config {
                  NADE_JOB_LEASE_SECS ({}s), otherwise a live job loses its lease",
                 heartbeat.as_secs(),
                 lease.as_secs()
+            );
+        }
+
+        let scheduler_tick = Duration::from_secs(parse::<u64>("NADE_SCHEDULER_TICK_SECS", 60)?);
+        let poll_after = Duration::from_secs(60 * parse::<u64>("NADE_POLL_INTERVAL_MINS", 30)?);
+        let watch_renew_after =
+            Duration::from_secs(3600 * parse::<u64>("NADE_WATCH_RENEW_HOURS", 24)?);
+        if scheduler_tick.is_zero() || poll_after.is_zero() {
+            bail!("NADE_SCHEDULER_TICK_SECS and NADE_POLL_INTERVAL_MINS must both be non-zero");
+        }
+        if scheduler_tick > poll_after {
+            bail!(
+                "NADE_SCHEDULER_TICK_SECS ({}s) is longer than NADE_POLL_INTERVAL_MINS ({}s), \
+                 so the polling fallback would always be late",
+                scheduler_tick.as_secs(),
+                poll_after.as_secs()
+            );
+        }
+        // Gmail's watch registration lasts seven days. Renewing more slowly than
+        // that is not a preference, it is a guaranteed outage, so the process
+        // refuses to start rather than discovering it a week later.
+        if watch_renew_after >= Duration::from_secs(7 * 24 * 3600) {
+            bail!(
+                "NADE_WATCH_RENEW_HOURS ({}h) is at or past Gmail's 7-day watch lifetime; \
+                 the registration would lapse before it was renewed",
+                watch_renew_after.as_secs() / 3600
             );
         }
 
@@ -242,6 +310,19 @@ impl Config {
                 max_sync_messages,
                 sync_window_days,
                 batch_size,
+            },
+            push: PushConfig {
+                sa_email: string("NADE_PUSH_SA_EMAIL"),
+                audience: string("NADE_PUSH_AUDIENCE"),
+                jwks_url: string("NADE_PUSH_JWKS_URL")
+                    .unwrap_or_else(|| "https://www.googleapis.com/oauth2/v3/certs".to_owned()),
+                jwks_ttl: Duration::from_secs(parse::<u64>("NADE_PUSH_JWKS_TTL_SECS", 3600)?),
+                topic: string("NADE_PUSH_TOPIC"),
+            },
+            schedule: ScheduleConfig {
+                tick: scheduler_tick,
+                watch_renew_after,
+                poll_after,
             },
             jobs: crate::jobs::QueueConfig {
                 lease,
@@ -521,6 +602,18 @@ pub(crate) mod tests {
                 rate_window: Duration::from_secs(60),
             },
             gmail: sample_gmail(),
+            push: PushConfig {
+                sa_email: Some("nade-push@example.iam.gserviceaccount.com".to_owned()),
+                audience: Some("https://example.test/v1/webhooks/gmail".to_owned()),
+                jwks_url: "http://127.0.0.1:1/certs".to_owned(),
+                jwks_ttl: Duration::from_secs(3600),
+                topic: Some("projects/p/topics/gmail-events".to_owned()),
+            },
+            schedule: ScheduleConfig {
+                tick: Duration::from_secs(60),
+                watch_renew_after: Duration::from_secs(24 * 3600),
+                poll_after: Duration::from_secs(30 * 60),
+            },
             jobs: crate::jobs::QueueConfig::default(),
             workers: 1,
             embedded: EmbeddedConfig {

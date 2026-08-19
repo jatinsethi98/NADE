@@ -59,6 +59,20 @@ private final class ScriptedSource: MailSource, @unchecked Sendable {
         }
         return try threadDetail.get()
     }
+
+    // P3's endpoints. `AppStateTests` is about the connection state machine,
+    // which none of these participate in; a source that refuses them keeps that
+    // scope honest rather than quietly widening it.
+    func feed(cursor: String?) async throws -> WireFeedPage { throw APIFailure.notServedYet("feed") }
+    func feedItem(id: String) async throws -> WireFeedItem { throw APIFailure.notServedYet("feed item") }
+    func approve(feedItemID: String, approvalToken: String) async throws -> WireApproveResponse {
+        throw APIFailure.notServedYet("approve")
+    }
+    func skip(feedItemID: String, approvalToken: String) async throws -> WireSkipResponse {
+        throw APIFailure.notServedYet("skip")
+    }
+    func seen(ids: [String]) async throws -> WireSeenResponse { throw APIFailure.notServedYet("seen") }
+    func agents() async throws -> [WireAgentRow] { throw APIFailure.notServedYet("agents") }
 }
 
 @MainActor

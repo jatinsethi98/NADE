@@ -29,6 +29,9 @@ pub struct AppState {
     /// because it is an *API* concern: it is what makes a browser-facing route
     /// authorised without a header.
     pub gmail_link: Arc<LinkCapabilities>,
+    /// Verifies Gmail's Pub/Sub push. Holds the cached JWK Set, so it must be
+    /// shared rather than rebuilt per request.
+    pub push: Arc<crate::api::webhooks::oidc::Verifier>,
 }
 
 impl AppState {
@@ -50,6 +53,13 @@ impl AppState {
             config.pairing.rate_window,
         ));
         let gmail = Arc::new(GmailRuntime::build(pool.clone(), &config)?);
+        // The same shared client the Gmail calls use: the crate takes
+        // `rustls-no-provider`, so a `reqwest::Client::new()` here would panic
+        // at construction (`gmail::tests::no_bare_reqwest_clients`).
+        let push = Arc::new(crate::api::webhooks::oidc::Verifier::new(
+            gmail.http.clone(),
+            config.push.clone(),
+        ));
         Ok(Self {
             pool,
             config: Arc::new(config),
@@ -57,6 +67,7 @@ impl AppState {
             pair_limiter,
             gmail,
             gmail_link: Arc::new(LinkCapabilities::new()),
+            push,
         })
     }
 

@@ -148,6 +148,20 @@ pub fn test_config(env: Env) -> Config {
             rate_window: Duration::from_secs(60),
         },
         gmail: crate::config::tests::sample_gmail(),
+        // A verifier with both claims set, pointed at a JWKS URL that refuses
+        // instantly. A test that needs a real key set overrides it.
+        push: crate::config::PushConfig {
+            sa_email: Some("nade-push@example.iam.gserviceaccount.com".to_owned()),
+            audience: Some("https://example.test/v1/webhooks/gmail".to_owned()),
+            jwks_url: "http://127.0.0.1:1/certs".to_owned(),
+            jwks_ttl: Duration::from_secs(3600),
+            topic: Some("projects/p/topics/gmail-events".to_owned()),
+        },
+        schedule: crate::config::ScheduleConfig {
+            tick: Duration::from_secs(60),
+            watch_renew_after: Duration::from_secs(24 * 3600),
+            poll_after: Duration::from_secs(30 * 60),
+        },
         jobs: QueueConfig::default(),
         workers: 0,
         embedded: embedded_config(),
@@ -210,6 +224,31 @@ impl TestApp {
     pub fn set_pair_rate_limit(&mut self, max: u32, window: Duration) {
         self.config.pairing.rate_limit = max;
         self.config.pairing.rate_window = window;
+        self.rebuild();
+    }
+
+    /// Point the push verifier at a local JWK Set, and name the claims it
+    /// should require.
+    pub fn set_push(&mut self, jwks_url: &str, audience: &str, sa_email: &str) {
+        self.config.push.jwks_url = jwks_url.to_owned();
+        self.config.push.audience = Some(audience.to_owned());
+        self.config.push.sa_email = Some(sa_email.to_owned());
+        self.rebuild();
+        // Rotation is asserted without sleeping through the production limit.
+        self.state.push = std::sync::Arc::new(
+            crate::api::webhooks::oidc::Verifier::new(
+                self.state.gmail.http.clone(),
+                self.config.push.clone(),
+            )
+            .with_min_refresh(Duration::ZERO),
+        );
+        self.router = api::router(self.state.clone());
+    }
+
+    /// Leave the webhook unconfigured, which must reject everything.
+    pub fn clear_push_claims(&mut self) {
+        self.config.push.audience = None;
+        self.config.push.sa_email = None;
         self.rebuild();
     }
 

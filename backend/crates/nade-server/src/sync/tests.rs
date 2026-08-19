@@ -25,9 +25,9 @@ use crate::{
 
 /// One message the fake Gmail will serve.
 #[derive(Debug, Clone)]
-struct Fixture {
-    id: String,
-    thread_id: String,
+pub(crate) struct Fixture {
+    pub(crate) id: String,
+    pub(crate) thread_id: String,
     labels: Vec<String>,
     internal_ms: i64,
     raw: Vec<u8>,
@@ -45,7 +45,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(index: usize) -> Self {
+    pub(crate) fn new(index: usize) -> Self {
         Self {
             id: format!("msg{index:04}"),
             thread_id: format!("thr{index:04}"),
@@ -215,7 +215,7 @@ impl FakeGmail {
 
 /// Answer a real multipart batch, **in reverse order**, so every sync test also
 /// re-proves that correlation is by `Content-ID` and not by position.
-fn batch_reply(request: &Request, fixtures: &[Fixture]) -> ResponseTemplate {
+pub(crate) fn batch_reply(request: &Request, fixtures: &[Fixture]) -> ResponseTemplate {
     let body = String::from_utf8_lossy(&request.body).into_owned();
     let mut asked: Vec<(String, String)> = Vec::new();
     let mut content_id: Option<String> = None;
@@ -304,6 +304,7 @@ async fn connected() -> (TestDb, Uuid) {
 fn fast_options() -> SyncOptions {
     SyncOptions {
         query: "newer_than:30d".to_owned(),
+        window_days: 30,
         max_messages: 2_000,
         batch_size: crate::gmail::client::MAX_BATCH,
         // The pacer is a real 1 s in production; the tests assert that
@@ -1112,6 +1113,7 @@ fn the_sync_query_is_a_fixed_template_with_no_scope_operator() {
 fn retry_delay_is_exponential_and_capped() {
     let options = SyncOptions {
         query: String::new(),
+        window_days: 30,
         max_messages: 1,
         batch_size: 1,
         batch_interval: std::time::Duration::ZERO,

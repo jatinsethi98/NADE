@@ -1,0 +1,66 @@
+{
+  "id": "a0000002-0000-4000-8000-000000000002",
+  "name": "Morning To-Do",
+  "nl_definition": "Every weekday at 8:00, build today's to-do list from the mail I haven't replied to and save it as a note.",
+  "status": "published",
+  "trigger_summary": "Every weekday at 08:00",
+  "schedule": {
+    "freq": "week",
+    "interval": 1,
+    "byweekday": [
+      "mon",
+      "tue",
+      "wed",
+      "thu",
+      "fri"
+    ],
+    "bymonthday": null,
+    "at": "08:00",
+    "tz": "America/Phoenix",
+    "ends": {
+      "kind": "never",
+      "date": null,
+      "count": null
+    },
+    "runs_done": 42
+  },
+  "last_run_at": "2026-08-16T15:00:02Z",
+  "approval_required": false,
+  "allowed_tools": [
+    "search_mail",
+    "read_thread",
+    "write_note"
+  ],
+  "compile_error": null,
+  "when_span": "every weekday at 08:00",
+  "do_span": "save today's to-do list as a note",
+  "trailing": null,
+  "spec": {
+    "version": 1,
+    "trigger": {
+      "kind": "schedule",
+      "filters": {
+        "from_domains": [],
+        "from_contains": [],
+        "subject_contains": [],
+        "body_contains": [],
+        "label_ids": [
+          "Label_12"
+        ],
+        "has_attachment": null,
+        "newer_than_days": 7
+      },
+      "semantic": null
+    },
+    "instruction": "Search for threads in To Reply that Jatin has not answered. For each, write one line naming the person and what they are waiting for. Save the lot as a single note titled with today's date.",
+    "tools": [
+      "search_mail",
+      "read_thread",
+      "write_note"
+    ],
+    "output": {
+      "kind": "note",
+      "title_template": "To-do — {date}"
+    }
+  }
+}

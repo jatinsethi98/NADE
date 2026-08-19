@@ -29,6 +29,13 @@ nonisolated enum APIFailure: Error, Equatable {
     case cancelled
     /// A 2xx whose body was not the shape the contract promises.
     case malformedResponse(String)
+    /// A screen asked for an endpoint this phase's backend does not serve yet.
+    ///
+    /// P3 builds the feed and the agent screens against fixtures, because
+    /// `/feed` lands at P5 and `/agents` at P4. This case is what makes that
+    /// honest: the live source fails loudly and nameably instead of returning
+    /// an empty list that would be indistinguishable from "you have no mail".
+    case notServedYet(String)
 
     var isUnreachable: Bool {
         if case .unreachable = self { return true }
@@ -67,6 +74,8 @@ nonisolated enum APIFailure: Error, Equatable {
         case .cancelled: ""
         case .malformedResponse: String(localized: "The server sent something unexpected.",
                                         comment: "Shown when a response does not match the API contract")
+        case .notServedYet: String(localized: "This server doesn't offer that yet.",
+                                   comment: "Shown when a screen outruns the backend phase")
         }
     }
 }

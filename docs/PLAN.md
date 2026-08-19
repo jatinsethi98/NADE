@@ -152,8 +152,8 @@ constraints and indexes; the sketch that used to sit here was pseudocode
 (`uuid pk`, `bigint identity pk`) that no implementer could execute and that
 silently permitted a much weaker schema. It is deleted rather than kept in sync.
 
-The tables: `accounts`, `gmail_tokens`, `messages` (with the stored generated
-`attachments`, `labels`, `sync_state`, `agents`, `agent_runs`,
+The tables: `accounts`, `gmail_tokens`, `messages`, `attachments`, `labels`,
+`sync_state`, `agents`, `agent_runs`,
 `run_journal`, `notes`, `drafts`, `feed_items`, `audit_log`, `devices`,
 `settings`, `jobs`. Ownership columns are `not null` and cascade from
 `accounts`; every enum column carries a check constraint; `agents.status`
@@ -192,7 +192,7 @@ Quota: 250 units/user/s; `messages.get`=5 units → ceiling 50 gets/s. Token buc
 4. **404 recovery** re-run 30-day sync + reconciliation sweep (ids diff → deletes; per-label membership rebuild).
 5. **Watch** daily renewal job; polling fallback if no webhook 30 min (covers dev without tunnel).
 6. **Webhook auth** full OIDC: JWKS signature, iss, aud, email==`PUSH_SA_EMAIL`, email_verified. Audience alone is forgeable.
-7. **Attachments** proxy endpoint streams `attachments.get` (25 MB cap); `cid:` rewritten; `body_text` guaranteed via html2text.
+7. **Attachments** proxy endpoint streams `attachments.get` (25 MB cap); `cid:` rewritten; `body_text` guaranteed by our own `lol_html` extractor. (`html2text` was measured and **rejected** — `docs/PARSER.md` §20: "not a dependency. Do not add it.")
 8. **Full backfill** of the 63k box: post-v1 flag (`nade backfill --all`, ~35–45 min quota-paced). Not in the test path.
 
 ### Agent runtime
@@ -265,7 +265,7 @@ backing already existed. What moved, and what deliberately did **not**:
 
 | Moved into P2 | Stayed where it was |
 |---|---|
-| HTTP client, error envelope, `Retry-After`, `409 needs_reauth` | Feed, approve/skip round-trip, outbox (**P5**) |
+| HTTP client, error envelope, `Retry-After`, `409 needs_reauth` | Feed, approve/skip round-trip, outbox — *built* at P3 against fixtures, *live* at **P5** |
 | Pairing + Keychain + server URL | Home feed, Ask states, agents, schedule sheet (**P3**) |
 | 1k **CONNECTION** and **ACCOUNT** only | 1k **AGENTS**, **READING**, `disclosure` footer (**P7** — no `/settings` or `/runs` route exists) |
 | The Gmail link flow (`POST /auth/gmail/link`) | Attachments proxy, "View original" WKWebView (**P3**) |
@@ -308,10 +308,27 @@ field and circle are `<span>`s, so it renders without being a control until P6
 gives it one.
 
 **P3 — Mail stays current. [backend] ∥ [ios]**
-- [backend] cloudflared (self-downloaded binary), webhook + full OIDC, incremental history (all 4 types), 404 sweep, daily watch renewal + 30-min poll fallback, attachments proxy + cid rewrite. ✓ H8 email visible ≤60 s no restart; forged JWT → 401; `cargo test sync::` green.
+- [backend] cloudflared quick tunnel (`just tunnel`), webhook + full OIDC,
+  incremental history (all 4 types), 404 sweep, daily watch renewal + 30-min
+  poll fallback. ~~attachments proxy + cid rewrite~~ — **both shipped in P2**
+  (`api/mail.rs`, `mail/html.rs`, criteria O9–O11); P3 owes nothing there.
+  ✓ H8 email visible ≤60 s no restart; forged JWT → 401 in every forgery class;
+  `just ci` green twice, and `cargo test` at the workspace root (D27).
+  `cargo test sync::` alone is **not** the gate — the OIDC suite lives under
+  `api::webhooks::`.
 - [ios] Home feed + focus, ask states, agents list/builder/schedule sheet;
-  settings **beyond** the CONNECTION + ACCOUNT sections P2 shipped; outbox
+  attachments tappable and the locked "View original" `WKWebView`; outbox
   409-semantics. ✓ green. (Pairing entry and the offline XCUITest moved to P2.)
+
+  Built against the DEBUG fixture world, because the endpoints these screens
+  read land at P4–P6. They go live with no rewrite.
+
+  **1k's remaining sections are P7, not P3.** This line used to say "settings
+  beyond the CONNECTION + ACCOUNT sections", which contradicts P2's own scope
+  table above: AGENTS, READING and the served `disclosure` footer need
+  `GET/PATCH /settings` and `GET /runs`, and neither route exists before P7.
+  The footer especially — its whole point is that the sentence is server-supplied
+  so it cannot drift, which a bundled copy would defeat.
 
 **P4 — First runs. [sdk] → [backend] (gate: P1 [sdk] green)**
 - [sdk] Postgres journal driver; kill-mid-run resume test; deterministic-id upsert test (kill between execute and step_done → no duplicate note). ✓ `cargo test --features postgres` green.

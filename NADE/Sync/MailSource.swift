@@ -28,6 +28,19 @@ nonisolated protocol MailSource: Sendable {
     func mailboxes() async throws -> [WireMailbox]
     func threads(mailboxID: String, cursor: String?) async throws -> WireThreadPage
     func thread(id: String) async throws -> WireThread
+
+    // P3. The feed and the agents live behind endpoints that land at P5 and
+    // P4; the seam exists now so the screens are written once. `FixtureMailSource`
+    // implements them today, and `HTTPMailSource` gains its half when the routes
+    // do — which is why these throw `notImplemented` rather than being absent:
+    // a screen that calls a method the live source cannot answer must fail
+    // loudly in DEBUG, not silently render an empty list in production.
+    func feed(cursor: String?) async throws -> WireFeedPage
+    func feedItem(id: String) async throws -> WireFeedItem
+    func approve(feedItemID: String, approvalToken: String) async throws -> WireApproveResponse
+    func skip(feedItemID: String, approvalToken: String) async throws -> WireSkipResponse
+    func seen(ids: [String]) async throws -> WireSeenResponse
+    func agents() async throws -> [WireAgentRow]
 }
 
 // MARK: - Live
@@ -88,4 +101,30 @@ nonisolated final class HTTPMailSource: MailSource {
     func thread(id: String) async throws -> WireThread {
         try await client.thread(origin: origin, id: id)
     }
+
+    // MARK: - P3's endpoints, which the backend does not serve yet
+    //
+    // `APIClient` deliberately refuses to carry a URL builder no screen calls
+    // (see its `Endpoint` comment: "an unreachable URL builder is not a head
+    // start - it is untested code that reads as a shipped capability"). Here
+    // the screens *do* call them, and the routes are what is missing — so the
+    // seam is real and the live half is a loud, single-line failure until
+    // `/feed` (P5) and `/agents` (P4) exist.
+
+    func feed(cursor: String?) async throws -> WireFeedPage { throw APIFailure.notServedYet("GET /feed") }
+    func feedItem(id: String) async throws -> WireFeedItem { throw APIFailure.notServedYet("GET /feed/{id}") }
+
+    func approve(feedItemID: String, approvalToken: String) async throws -> WireApproveResponse {
+        throw APIFailure.notServedYet("POST /feed/{id}/approve")
+    }
+
+    func skip(feedItemID: String, approvalToken: String) async throws -> WireSkipResponse {
+        throw APIFailure.notServedYet("POST /feed/{id}/skip")
+    }
+
+    func seen(ids: [String]) async throws -> WireSeenResponse {
+        throw APIFailure.notServedYet("POST /feed/seen")
+    }
+
+    func agents() async throws -> [WireAgentRow] { throw APIFailure.notServedYet("GET /agents") }
 }

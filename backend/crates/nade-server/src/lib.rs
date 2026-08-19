@@ -32,4 +32,12 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `triage_message` and `expire_approvals`.
 pub fn register_handlers(registry: &mut jobs::Registry, state: &state::AppState) {
     registry.register(sync::KIND, sync::SyncHandler::shared(state.clone()));
+    registry.register(
+        sync::incremental::KIND,
+        sync::incremental::IncrementalHandler::shared(state.clone()),
+    );
+    registry.register(
+        sync::schedule::KIND,
+        sync::schedule::MaintenanceHandler::shared(state.clone()),
+    );
 }

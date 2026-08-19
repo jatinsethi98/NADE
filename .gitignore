@@ -11,6 +11,10 @@ backend/.env
 backend/.pgdata/
 backend/.pgcache/
 
+# cloudflared's log. The tunnel hostname changes every session, so nothing here
+# is worth keeping.
+backend/.tunnel/
+
 # Real mail pulled from the live account for offline tests. Never committed:
 # it is personal mail, and the conformance corpus (backend/testdata/mime) is
 # what actually encodes the parser's specification.

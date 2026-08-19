@@ -82,6 +82,7 @@ impl Harness {
             self.account,
             &crate::sync::SyncOptions {
                 query: "newer_than:30d".to_owned(),
+                window_days: 30,
                 max_messages: 500,
                 batch_size: crate::gmail::client::MAX_BATCH,
                 batch_interval: std::time::Duration::ZERO,

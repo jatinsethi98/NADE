@@ -150,6 +150,96 @@ nonisolated enum Schema {
                 t.column("last_page_at", .text)
             }
         }
+
+        // A **second** migration, never an edit to the first. sqlite has no
+        // checksum to complain, but `eraseDatabaseOnSchemaChange` is off, so an
+        // amended `v1-mail` would simply not run on a device that already has
+        // it - and the missing tables would surface as a crash on first read.
+        migrator.registerMigration("v2-feed-agents") { db in
+            try db.create(table: "feed_item") { t in
+                t.column("id", .text).primaryKey()
+                // Enums verbatim (`docs/PLAN.md` §iOS app), and no CHECK, for
+                // the same reason `account.status` has none.
+                t.column("kind", .text).notNull()
+                t.column("title", .text).notNull()
+                t.column("body", .text).notNull()
+                t.column("status", .text).notNull()
+                t.column("run_id", .text)
+                // The buttons, in order, as JSON. Not a derived property: the
+                // server decides them (`API.md` §7) and the client renders
+                // exactly what it is given.
+                t.column("actions_json", .text).notNull()
+                // Non-null only while an approval is `new`.
+                t.column("approval_token", .text)
+                t.column("approval_expires_at", .text)
+                t.column("resolved_note", .text)
+                // The typed `data`, kept whole. Splitting it into columns would
+                // mean three shapes' worth of nullable columns and a decoder
+                // that had to reassemble them.
+                t.column("data_json", .text)
+                t.column("created_at", .text).notNull()
+            }
+            // The feed is ordered newest first, and the badge counts `new`.
+            try db.create(
+                index: "feed_item_created_idx", on: "feed_item", columns: ["created_at"]
+            )
+
+            try db.create(table: "feed_sync") { t in
+                // One row. The feed is a single list, unlike mailboxes.
+                t.column("id", .integer).primaryKey().check { $0 == 1 }
+                t.column("next_cursor", .text)
+                // The same two bits `mailbox_sync` needs, for the same reason:
+                // `next_cursor IS NULL` conflates "never fetched" with "last
+                // page", and load-more cannot tell them apart without both.
+                t.column("reached_end", .boolean).notNull().defaults(to: false)
+                t.column("generation", .integer).notNull().defaults(to: 0)
+                // The server's own count, kept rather than recomputed: the feed
+                // is paginated and `new_count` is mailbox-wide, so counting
+                // cached rows undercounts the badge past the first page.
+                t.column("new_count", .integer).notNull().defaults(to: 0)
+                t.column("last_page_at", .text)
+            }
+
+            try db.create(table: "agent") { t in
+                t.column("id", .text).primaryKey()
+                t.column("name", .text).notNull()
+                t.column("nl_definition", .text).notNull()
+                t.column("status", .text).notNull()
+                t.column("trigger_summary", .text).notNull()
+                t.column("schedule_json", .text)
+                t.column("last_run_at", .text)
+                t.column("approval_required", .boolean).notNull()
+                // `position` for the same reason the mailbox has one: the list
+                // is **oldest first by `created_at`**, which is not on the
+                // wire's list row, so the order is data rather than derivable.
+                t.column("position", .integer).notNull()
+            }
+
+            // The outbox.
+            //
+            // `origin` is not decoration. IOS_DECISIONS requires every trace of
+            // an old server to be discarded when the origin changes, and an
+            // approval token minted by server A must never be submitted to
+            // server B. `MailStore.wipe` clears this table for that reason.
+            try db.create(table: "pending_action") { t in
+                t.column("id", .text).primaryKey()
+                t.column("origin", .text).notNull()
+                // `approve` | `skip`. `seen` is deliberately absent: the
+                // contract calls it a best-effort read receipt whose unknown
+                // ids are ignored, and queueing it durably would promise more
+                // than the endpoint does.
+                t.column("kind", .text).notNull()
+                t.column("feed_item_id", .text).notNull()
+                t.column("approval_token", .text).notNull()
+                t.column("created_at", .text).notNull()
+                t.column("attempts", .integer).notNull().defaults(to: 0)
+                t.column("last_error", .text)
+                // One queued action per item: tapping Approve twice is one
+                // intention, and the server would answer the second with
+                // `409 token_consumed` anyway.
+                t.uniqueKey(["feed_item_id"])
+            }
+        }
         return migrator
     }
 }

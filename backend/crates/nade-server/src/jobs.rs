@@ -125,6 +125,48 @@ impl Queue {
         .await
     }
 
+    /// Enqueue unless an identical job is already waiting.
+    ///
+    /// `Ok(None)` means one already was, and the caller's work is therefore
+    /// already scheduled. This is what turns a burst of Gmail push
+    /// notifications into one walk instead of twenty that queue behind each
+    /// other's account lock.
+    ///
+    /// The conflict target restates the partial index's predicate verbatim so
+    /// PostgreSQL can infer the index. Note what the predicate does **not**
+    /// mention: `locked_by`. Excluding locked rows would let a notification
+    /// enqueue while an earlier walk is still running - but `fail`, `release`
+    /// and `reap_expired_leases` all clear `locked_by`, so a replacement row
+    /// would collide the instant the original failed, was released at shutdown,
+    /// or had its lease reaped, leaving the queue unable to record its own
+    /// failures during the outage that caused them. The notification that gets
+    /// suppressed instead is picked up by `sync_state.rerun_requested`.
+    ///
+    /// # Errors
+    /// Returns an error if the insert fails.
+    pub async fn enqueue_unique(
+        &self,
+        kind: &str,
+        payload: &Value,
+        run_after: Option<DateTime<Utc>>,
+        dedupe_key: &str,
+    ) -> sqlx::Result<Option<i64>> {
+        sqlx::query_scalar(
+            "insert into jobs (kind, payload, run_after, dedupe_key) \
+             values ($1, $2, coalesce($3::timestamptz, now()), $4) \
+             on conflict (dedupe_key) \
+                 where dedupe_key is not null and done_at is null and dead_at is null \
+             do nothing \
+             returning id",
+        )
+        .bind(kind)
+        .bind(payload)
+        .bind(run_after)
+        .bind(dedupe_key)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
     /// Take at most one ready job of a kind we can actually run.
     ///
     /// `for update skip locked` makes this safe for any number of concurrent

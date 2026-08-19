@@ -1,0 +1,9 @@
+event: route
+data: {"kind":"agent_draft"}
+
+event: draft
+data: {"name":"Recruiter Next Steps","nl_definition":"When a recruiter emails about a tech role, save the next steps as a note. Ask me first.","when_span":"a recruiter emails about a tech role","do_span":"save the next steps as a note","trailing":"Asks before it saves.","tool":"write_note","approval_required":true,"status":"draft"}
+
+event: done
+data: {"sources":[]}
+

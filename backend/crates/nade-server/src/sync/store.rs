@@ -459,6 +459,65 @@ pub async fn soft_delete_message(
     Ok(thread_id)
 }
 
+/// Mark that a reconciliation sweep is owed, carrying the cursor that expired.
+///
+/// Written **before the recovery re-sync begins**, and cleared only by a
+/// completed sweep.
+///
+/// The ordering is the safety property, not a transaction boundary: the re-sync
+/// durably commits a *fresh* cursor before returning, so a crash after it would
+/// leave the retry asking `history.list` from the new cursor, getting a `200`
+/// instead of the `404` that enters recovery — and nothing would ever
+/// reconcile. Persisting the debt first means every one of those crash points
+/// still owes the sweep.
+///
+/// # Errors
+/// Returns an error if the write fails.
+pub async fn owe_reconcile(
+    tx: &mut Transaction<'_, Postgres>,
+    account_id: Uuid,
+    stale_cursor: Option<i64>,
+) -> Result<()> {
+    sqlx::query(
+        "insert into sync_state (account_id, reconcile_after, updated_at) \
+         values ($1, coalesce($2, 0), now()) \
+         on conflict (account_id) do update set \
+             reconcile_after = coalesce(excluded.reconcile_after, 0), updated_at = now()",
+    )
+    .bind(account_id)
+    .bind(stale_cursor)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Clear the reconciliation debt. Called only when a sweep completed.
+///
+/// # Errors
+/// Returns an error if the write fails.
+pub async fn clear_reconcile(tx: &mut Transaction<'_, Postgres>, account_id: Uuid) -> Result<()> {
+    sqlx::query(
+        "update sync_state set reconcile_after = null, updated_at = now() where account_id = $1",
+    )
+    .bind(account_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Is a reconciliation owed?
+///
+/// # Errors
+/// Returns an error if the read fails.
+pub async fn reconcile_owed(pool: &PgPool, account_id: Uuid) -> Result<Option<i64>> {
+    let owed: Option<Option<i64>> =
+        sqlx::query_scalar("select reconcile_after from sync_state where account_id = $1")
+            .bind(account_id)
+            .fetch_optional(pool)
+            .await?;
+    Ok(owed.flatten())
+}
+
 /// Record that a notification arrived which no walk has covered yet.
 ///
 /// Called when `enqueue_unique` finds a job already pending: the notification

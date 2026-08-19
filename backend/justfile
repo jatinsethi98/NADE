@@ -71,6 +71,13 @@ gmail-connect:
     echo "It redirects to Google, and the callback binds the account, stores the"
     echo "tokens, and queues the first 30-day sync."
 
+# A quick cloudflared tunnel, with the Pub/Sub push subscription re-aimed at it.
+# No `cloudflared tunnel login` and no domain: the hostname is different every
+# session, which is why this is a script and not four commands to retype.
+# Needs a server already running. Ctrl-C stops the tunnel.
+tunnel:
+    @scripts/tunnel.sh
+
 # The parser conformance corpus and the live-mail smoke, with their counts.
 parser:
     cargo test -p {{ crate }} mail:: -- --nocapture --test-threads=1

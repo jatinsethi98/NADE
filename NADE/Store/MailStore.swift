@@ -261,6 +261,13 @@ nonisolated final class MailStore: Sendable {
             try MailboxRecord.deleteAll(db)
             try ThreadRecord.deleteAll(db)
             try AccountRecord.deleteAll(db)
+            // P3's tables. `pending_action` especially: it holds approval
+            // capabilities minted by the old server, and presenting one to a
+            // new server is a data-isolation failure, not a stale cache.
+            try FeedItemRecord.deleteAll(db)
+            try FeedSyncRecord.deleteAll(db)
+            try AgentRecord.deleteAll(db)
+            try PendingActionRecord.deleteAll(db)
         }
     }
 
@@ -383,6 +390,245 @@ nonisolated final class MailStore: Sendable {
     /// renders "nothing yet" for one frame and then its rows is a flash the
     /// design has no state for, and a test that has to wait for value #1 needs
     /// an expectation to prove something that is not actually asynchronous.
+
+    // MARK: - P3: feed, agents, outbox
+
+    /// Replace or extend the feed.
+    ///
+    /// - Parameter resetting: true for a first page, which bumps `generation`
+    ///   and clears the list. A page still in flight across that refresh
+    ///   carries the old generation and is discarded rather than stitched onto
+    ///   a list it no longer belongs to — the same rule the mailbox pages use.
+    @discardableResult
+    func saveFeed(
+        _ page: WireFeedPage,
+        resetting: Bool,
+        expectedGeneration: Int? = nil
+    ) async throws -> Bool {
+        try await writer.write { db in
+            let existing = try FeedSyncRecord.fetchOne(db, key: 1)
+            // The generation was stored but never compared until the review
+            // pointed out that the comment promised a check the code did not
+            // make. A load-more that left before a refresh and landed after it
+            // would otherwise write stale items **and** a stale cursor.
+            if let expectedGeneration, !resetting,
+               (existing?.generation ?? 0) != expectedGeneration {
+                return false
+            }
+            let generation = (existing?.generation ?? 0) + (resetting ? 1 : 0)
+            if resetting {
+                try FeedItemRecord.deleteAll(db)
+            }
+            for item in page.items {
+                try Self.upsertFeedItem(item, in: db)
+            }
+            try FeedSyncRecord(
+                id: 1,
+                nextCursor: page.nextCursor,
+                reachedEnd: page.nextCursor == nil,
+                generation: generation,
+                // The server's mailbox-wide count, kept rather than recomputed.
+                // `GET /feed` is paginated, so counting cached rows undercounts
+                // the badge the moment there is more than one page.
+                newCount: page.newCount,
+                lastPageAt: Date()
+            )
+            .save(db)
+            return true
+        }
+    }
+
+    /// The feed as the screens see it, read once rather than observed.
+    /// Used by tests and by the outbox's post-`409` refetch check.
+    func feedForTests() async throws -> [WireFeedItem] {
+        try await writer.read { db in try self.feed(db) }
+    }
+
+    /// One item, refreshed on its own — what the outbox does after a `409`,
+    /// and what P6's push deep link will do.
+    func saveFeedItem(_ item: WireFeedItem) async throws {
+        try await writer.write { db in try Self.upsertFeedItem(item, in: db) }
+    }
+
+    /// The generation a page must still match to be accepted.
+    func feedGeneration() async throws -> Int {
+        try await writer.read { db in try FeedSyncRecord.fetchOne(db, key: 1)?.generation ?? 0 }
+    }
+
+    func feedCursor() async throws -> FeedSyncRecord? {
+        try await writer.read { db in try FeedSyncRecord.fetchOne(db, key: 1) }
+    }
+
+    private static func upsertFeedItem(_ item: WireFeedItem, in db: Database) throws {
+        try FeedItemRecord(
+            id: item.id,
+            kind: item.kind.rawValue,
+            title: item.title.databaseSafe,
+            body: item.body.databaseSafe,
+            status: item.status.rawValue,
+            runId: item.runID,
+            actionsJson: try JSONCodec.encode(item.actions.map(\.rawValue)),
+            approvalToken: item.approvalToken,
+            approvalExpiresAt: item.approvalExpiresAt,
+            resolvedNote: item.resolvedNote?.databaseSafe,
+            dataJson: try item.data.map { try JSONCodec.encode($0) },
+            createdAt: item.createdAt
+        )
+        .save(db)
+    }
+
+    /// Move one item to a terminal state locally, without waiting for a refresh.
+    ///
+    /// The token is dropped at the same time: it is spent, and a row that kept
+    /// it could queue a second action against an approval that is already over.
+    func resolveFeedItem(id: String, status: FeedStatus, note: String?) async throws {
+        try await writer.write { db in
+            // Only a card that was still `new` moves the badge, and only once.
+            let wasNew = try Bool.fetchOne(
+                db,
+                sql: "select status = ? from feed_item where id = ?",
+                arguments: [FeedStatus.new.rawValue, id]
+            ) ?? false
+            if wasNew {
+                try db.execute(
+                    sql: "update feed_sync set new_count = max(0, new_count - 1) where id = 1"
+                )
+            }
+            try db.execute(
+                sql: """
+                    update feed_item
+                       set status = ?, approval_token = null, actions_json = '[]',
+                           resolved_note = coalesce(?, resolved_note)
+                     where id = ?
+                    """,
+                arguments: [status.rawValue, note, id]
+            )
+        }
+    }
+
+    func replaceAgents(_ agents: [WireAgentRow]) async throws {
+        try await writer.write { db in
+            try AgentRecord.deleteAll(db)
+            for (position, agent) in agents.enumerated() {
+                try AgentRecord(
+                    id: agent.id,
+                    name: agent.name.databaseSafe,
+                    nlDefinition: agent.nlDefinition.databaseSafe,
+                    status: agent.status.rawValue,
+                    triggerSummary: agent.triggerSummary.databaseSafe,
+                    scheduleJson: try agent.schedule.map { try JSONCodec.encode($0) },
+                    lastRunAt: agent.lastRunAt,
+                    approvalRequired: agent.approvalRequired,
+                    position: position
+                )
+                .save(db)
+            }
+        }
+    }
+
+    // MARK: The outbox
+
+    /// Queue an approve or a skip.
+    ///
+    /// One row per feed item: tapping Approve twice is one intention, and the
+    /// server answers the second attempt `409 token_consumed` regardless.
+    func enqueue(_ action: PendingActionRecord) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: """
+                    insert into pending_action
+                        (id, origin, kind, feed_item_id, approval_token, created_at, attempts, last_error)
+                    values (?, ?, ?, ?, ?, ?, 0, null)
+                    on conflict(feed_item_id) do nothing
+                    """,
+                arguments: [
+                    action.id, action.origin, action.kind, action.feedItemId,
+                    action.approvalToken, action.createdAt,
+                ]
+            )
+        }
+    }
+
+    /// Everything queued for `origin`, oldest first.
+    ///
+    /// Scoped by origin because a row minted by another server must never be
+    /// sent — `removeEverything` clears them on a deliberate change, and this
+    /// filter is the belt to that braces.
+    func pendingActions(origin: String) async throws -> [PendingActionRecord] {
+        try await writer.read { db in
+            try PendingActionRecord
+                .filter(Column("origin") == origin)
+                .order(Column("created_at"))
+                .fetchAll(db)
+        }
+    }
+
+    func removePendingAction(id: String) async throws {
+        try await writer.write { db in
+            _ = try PendingActionRecord.deleteOne(db, key: id)
+        }
+    }
+
+    func recordPendingFailure(id: String, error: String) async throws {
+        try await writer.write { db in
+            try db.execute(
+                sql: "update pending_action set attempts = attempts + 1, last_error = ? where id = ?",
+                arguments: [error.databaseSafe, id]
+            )
+        }
+    }
+
+    // MARK: Reads
+
+    /// Newest first, which is the order `API.md` §7 guarantees.
+    func feed(_ db: Database) throws -> [WireFeedItem] {
+        try FeedItemRecord
+            .order(Column("created_at").desc, Column("id").desc)
+            .fetchAll(db)
+            .compactMap(\.wire)
+    }
+
+    /// The badge.
+    ///
+    /// The **server's** `new_count`, not a count of cached rows: `GET /feed` is
+    /// paginated and the count is mailbox-wide, so counting locally undercounts
+    /// the badge as soon as there is more than one page. Local terminal actions
+    /// decrement it, so a tap still moves the badge without a round trip.
+    func feedNewCount(_ db: Database) throws -> Int {
+        try FeedSyncRecord.fetchOne(db, key: 1)?.newCount
+            ?? FeedItemRecord.filter(Column("status") == FeedStatus.new.rawValue).fetchCount(db)
+    }
+
+    func agents(_ db: Database) throws -> [WireAgentRow] {
+        try AgentRecord.order(Column("position")).fetchAll(db).compactMap(\.wire)
+    }
+
+    // MARK: Observations
+
+    @MainActor
+    func observeFeed(
+        onError: @escaping @MainActor (Error) -> Void,
+        onChange: @escaping @MainActor ([WireFeedItem]) -> Void
+    ) -> MailStoreCancellable {
+        observe({ try self.feed($0) }, onError: onError, onChange: onChange)
+    }
+
+    @MainActor
+    func observeFeedNewCount(
+        onError: @escaping @MainActor (Error) -> Void,
+        onChange: @escaping @MainActor (Int) -> Void
+    ) -> MailStoreCancellable {
+        observe({ try self.feedNewCount($0) }, onError: onError, onChange: onChange)
+    }
+
+    @MainActor
+    func observeAgents(
+        onError: @escaping @MainActor (Error) -> Void,
+        onChange: @escaping @MainActor ([WireAgentRow]) -> Void
+    ) -> MailStoreCancellable {
+        observe({ try self.agents($0) }, onError: onError, onChange: onChange)
+    }
+
     @MainActor
     private func observe<T: Equatable & Sendable>(
         _ fetch: @escaping @Sendable (Database) throws -> T,

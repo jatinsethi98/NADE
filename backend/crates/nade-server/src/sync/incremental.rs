@@ -27,6 +27,10 @@ use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use std::sync::Arc;
+
+use async_trait::async_trait;
+
 use super::{store, AccountLock, Pacer, SyncOptions};
 use crate::{
     gmail::{
@@ -35,6 +39,15 @@ use crate::{
     },
     mail::parse,
 };
+use chrono::Utc;
+
+use crate::{
+    jobs::{Handler, Job, JobContext, Queue},
+    state::AppState,
+};
+
+/// The job kind that walks history.
+pub const KIND: &str = "gmail_incremental";
 
 /// How many times a single job will re-walk before handing over.
 ///
@@ -179,6 +192,9 @@ pub struct IncrementalReport {
     pub malformed_records: usize,
     /// The walk looped because a notification arrived while it was running.
     pub reruns: usize,
+    /// The drain limit was hit with a notification still outstanding, so a
+    /// successor job is owed.
+    pub handed_over: bool,
     pub cursor_before: Option<i64>,
     pub cursor_after: Option<i64>,
     /// The stored cursor was too old for Gmail to serve; a reconciliation is
@@ -268,8 +284,17 @@ async fn walk(
             let page = match client.list_history(walk_start, page_token.as_deref()).await {
                 Ok(page) => page,
                 Err(crate::gmail::client::GmailError::NotFound) => {
-                    // The cursor aged out of Gmail's log. Recovery is the
-                    // caller's, and it is owed durably.
+                    // The cursor aged out of Gmail's log.
+                    //
+                    // The debt is recorded **before** anything else, and only a
+                    // completed sweep clears it. Recording it afterwards - or
+                    // relying on the 404 happening again - loses the
+                    // reconciliation for good: the recovery re-sync commits a
+                    // fresh cursor, so the retry gets a `200` instead of the
+                    // `404` that enters recovery, and nothing ever reconciles.
+                    let mut tx = pool.begin().await?;
+                    store::owe_reconcile(&mut tx, account_id, Some(walk_start)).await?;
+                    tx.commit().await?;
                     report.cursor_expired = true;
                     return Ok(());
                 }
@@ -400,9 +425,12 @@ async fn walk(
         report.reruns += 1;
 
         if report.reruns >= MAX_DRAIN_PASSES {
-            // Put the request back rather than dropping it because this job has
-            // walked far enough. The next job takes it.
+            // Put the request back rather than dropping it, and say so in the
+            // report so the caller can enqueue the successor. Restoring the flag
+            // alone would leave a real notification represented by nothing but a
+            // boolean, waiting on the 30-minute poll.
             store::request_rerun(pool, account_id).await?;
+            report.handed_over = true;
             tracing::info!(
                 reruns = report.reruns,
                 "handing the walk back after the drain limit"
@@ -516,6 +544,140 @@ async fn fetch_added(
         );
     }
     Ok(fetched)
+}
+
+/// The `gmail_incremental` handler.
+///
+/// It does three things in order, and the order is the point: an outstanding
+/// reconciliation is settled **first**, because a walk from a cursor we already
+/// know is untrustworthy would just advance past the drift; then the walk; then
+/// recovery, if the walk found the cursor expired.
+pub struct IncrementalHandler {
+    state: AppState,
+}
+
+impl IncrementalHandler {
+    /// Ready to hand to [`crate::jobs::Registry::register`].
+    #[must_use]
+    pub fn shared(state: AppState) -> Arc<dyn Handler> {
+        Arc::new(Self { state })
+    }
+}
+
+impl std::fmt::Debug for IncrementalHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("IncrementalHandler")
+    }
+}
+
+#[async_trait]
+impl Handler for IncrementalHandler {
+    async fn handle(&self, job: Job, _ctx: JobContext) -> Result<()> {
+        let account_id = match job.payload.get("account_id").and_then(|v| v.as_str()) {
+            Some(raw) => Uuid::parse_str(raw).context("the account_id in the job payload")?,
+            None => match self.state.account().await? {
+                Some(account) => account.id,
+                None => {
+                    tracing::info!("no Gmail account is connected yet; nothing to walk");
+                    return Ok(());
+                }
+            },
+        };
+
+        let client = self.state.gmail.client_for(account_id);
+        let options = SyncOptions::from_config(&self.state.config);
+
+        let report = settle_and_walk(&self.state.pool, &client, account_id, &options).await?;
+
+        // **A busy lock is not a completed notification.** The house convention
+        // returns `Ok(skipped_concurrent)`, and an `Ok` handler is marked done -
+        // so a push racing a full sync would be acknowledged and its work thrown
+        // away, blowing the 60-second target with nothing to show for it.
+        //
+        // One bounded hop: re-enqueue ten seconds out, with a flag so a second
+        // skip stops rather than looping. The running sync has almost certainly
+        // covered the change by then, and the poll is the backstop either way.
+        if report.skipped_concurrent {
+            let requeued = job
+                .payload
+                .get("requeued")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if !requeued {
+                let queue = Queue::new(self.state.pool.clone(), self.state.config.jobs.clone());
+                queue
+                    .enqueue(
+                        KIND,
+                        &json!({ "account_id": account_id, "requeued": true }),
+                        Some(Utc::now() + chrono::Duration::seconds(10)),
+                    )
+                    .await?;
+            } else {
+                tracing::info!("a second lock contention; leaving it to the poll");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Settle any outstanding reconciliation, walk, and reconcile if the walk found
+/// the cursor expired. Separated from the handler so tests can drive it without
+/// a queue.
+///
+/// # Errors
+/// Returns an error if the walk or the reconciliation fails.
+pub async fn settle_and_walk(
+    pool: &PgPool,
+    client: &GmailClient,
+    account_id: Uuid,
+    options: &SyncOptions,
+) -> Result<IncrementalReport> {
+    if let Some(stale) = store::reconcile_owed(pool, account_id).await? {
+        reconcile_under_lock(pool, client, account_id, options, Some(stale)).await?;
+    }
+
+    let report = run_incremental(pool, client, account_id, options).await?;
+
+    if report.cursor_expired {
+        let stale = store::reconcile_owed(pool, account_id).await?;
+        reconcile_under_lock(pool, client, account_id, options, stale).await?;
+    }
+    Ok(report)
+}
+
+/// Enqueue a walk, collapsing a burst into one pending job.
+///
+/// # Errors
+/// Returns an error if the enqueue fails.
+pub async fn enqueue(queue: &Queue, account_id: Uuid) -> sqlx::Result<Option<i64>> {
+    queue
+        .enqueue_unique(
+            KIND,
+            &json!({ "account_id": account_id }),
+            None,
+            &format!("{KIND}:{account_id}"),
+        )
+        .await
+}
+
+/// Take the account lock and reconcile. A busy lock is not an error: whoever
+/// holds it is doing this work, and the debt survives in `reconcile_after`
+/// either way.
+async fn reconcile_under_lock(
+    pool: &PgPool,
+    client: &GmailClient,
+    account_id: Uuid,
+    options: &SyncOptions,
+    stale_cursor: Option<i64>,
+) -> Result<()> {
+    let Some(lock) = AccountLock::take(pool, account_id).await? else {
+        tracing::info!("another worker holds the account lock; the reconciliation debt stands");
+        return Ok(());
+    };
+    let outcome = super::sweep::reconcile(pool, client, account_id, options, stale_cursor).await;
+    lock.release().await;
+    outcome?;
+    Ok(())
 }
 
 #[cfg(test)]

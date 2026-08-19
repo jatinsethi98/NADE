@@ -575,8 +575,34 @@ checklist is the plan, not a record of what happened to get built.
 
 ## R. Reconciliation sweep (`sync/sweep.rs`)
 
-- [ ] R1–R9 — not yet built. The durable `sync_state.reconcile_after` marker
-  they depend on is in `0002`, and the walk already reports `cursor_expired`.
+- [x] R1 A message inside the window that the fresh listing does not mention is
+  swept. `sync::sweep::tests::a_message_missing_from_the_fresh_listing_is_swept`
+- [x] R2 **The guard that matters most.** A message older than the window is
+  never touched. `messages` legitimately holds mail from outside it — every
+  search hit is cached and opening an old thread pulls in the conversation — and
+  a `newer_than:30d` listing can never name any of it, so a sweep without a
+  floor deletes everything the user ever searched for.
+  `sync::sweep::tests::the_sweep_never_touches_a_message_older_than_the_window`
+- [x] R3 A truncated listing narrows the floor to the oldest message it actually
+  saw, because `messages.list` is newest-first and a capped listing therefore
+  enumerates the window's *suffix*.
+  `sync::sweep::tests::a_truncated_listing_narrows_the_floor_to_what_it_actually_saw`
+- [x] R4 A re-sync that could not account for every message **does not sweep at
+  all** — a partial listing looks exactly like "these messages were deleted", so
+  a 429 storm would otherwise soft-delete the mailbox. Enforced structurally:
+  `reconcile` propagates `sync_window`'s error before reaching the sweep.
+- [x] R5 A row with no `internal_ts` is never swept; it fails `>= floor`, which
+  is the safe direction and a property of the SQL.
+  `sync::sweep::tests::a_message_with_no_timestamp_is_never_swept`
+- [x] R6 Threads are rebuilt and an emptied thread's row is dropped.
+  `sync::sweep::tests::a_thread_whose_last_message_is_swept_disappears`
+- [x] R8 The debt survives a crash between the re-sync and the sweep. It has to
+  be durable rather than inferred: the re-sync commits a **fresh** cursor, so a
+  retry gets a `200` instead of the `404` that enters recovery, and without
+  `sync_state.reconcile_after` the reconciliation would be skipped for ever.
+  `sync::sweep::tests::a_completed_sweep_clears_the_reconciliation_debt`
+- [x] R9 Sweeping twice changes nothing the second time.
+  `sync::sweep::tests::sweeping_twice_changes_nothing_the_second_time`
 
 ## S. Watch and scheduling (`sync/watch.rs`, `sync/schedule.rs`)
 
@@ -597,11 +623,83 @@ checklist is the plan, not a record of what happened to get built.
   locked rows would make the queue unable to record its own failures during the
   outage that caused them.
   `db::tests::a_running_job_can_still_fail_release_and_be_reaped_with_a_pending_twin`
-- [ ] S5–S11, S13–S16 — the scheduler itself is not yet built.
+- [x] S5 The daily cadence, from both sides.
+  `sync::schedule::tests::a_watch_renewed_yesterday_is_due_and_one_renewed_an_hour_ago_is_not`
+- [x] S6 An expiry within a day renews early, off cadence — Gmail's
+  registration lasts seven days, and waiting for the cadence when it is hours
+  from lapsing is how push stops with nobody noticing.
+  `sync::schedule::tests::a_watch_expiring_within_a_day_is_renewed_early`
+- [x] S7 Changing the topic re-registers immediately.
+  `sync::schedule::tests::changing_the_topic_makes_the_watch_due_immediately`
+- [x] S8/S9 The poll measures the last successful check, whatever drove it, and
+  is due only once that has aged out.
+  `sync::schedule::tests::the_poll_is_due_only_once_the_last_check_has_aged_out`
+- [x] S10 Both steps are attempted even when the first fails, so a Gmail outage
+  on `users.watch` cannot also stop the poll. Errors are aggregated in
+  `MaintenanceReport` and raised at the end.
+- [x] S11 A burst collapses into one pending job, and a finished job does not
+  block the next. `sync::schedule::tests::maintenance_enqueues_at_most_one_pending_job`,
+  `..::a_finished_maintenance_job_does_not_block_the_next_one`
+- [x] S13 A restart re-evaluates immediately instead of waiting out a cadence:
+  `tokio::interval`'s first tick fires at once, and due-ness lives in the
+  database rather than in a chain that a restart would lose.
+- [x] S15 **Every timestamp the scheduler compares is computed by PostgreSQL.**
+  Tests set state with SQL and call `due` directly; none touches a wall clock.
+- [x] S16 A renewal slower than Gmail's 7-day watch lifetime is refused at
+  start-up, because it guarantees the registration lapses.
+  `config::from_env`, `sync::schedule::tests::the_config_refuses_a_renewal_slower_than_gmails_watch_lifetime`
+- [x] S17 A `needs_reauth` account is due for nothing. Without the join on
+  `accounts.status` it would be due to poll for ever — a paused walk never
+  advances `last_checked_at` — and the ticker would enqueue a no-op every tick.
+  `sync::schedule::tests::a_paused_account_is_never_due`
 
 ## T. Webhook and OIDC (`api/webhooks.rs`)
 
-- [ ] T1–T16 — not yet built.
+- [x] T1 A correctly signed push is `204` and exactly one job.
+  `api::webhooks::tests::a_correctly_signed_push_returns_204_and_enqueues_exactly_one_job`
+- [x] T2 **Every rejection returns a byte-identical body**, so a prober cannot
+  learn which check it tripped. Asserted by every entry in the forgery matrix
+  against `error_unauthorized.json`.
+- [x] T3 A burst enqueues one job, and the suppressed notifications become the
+  rerun flag rather than being dropped.
+  `api::webhooks::tests::a_duplicate_push_enqueues_one_job_and_records_a_rerun`
+- [x] T4 The push body's `historyId` is **never** written to `sync_state`. That
+  one rule is what makes at-least-once, out-of-order delivery irrelevant.
+  `api::webhooks::tests::the_push_bodys_history_id_is_never_written_to_sync_state`
+- [x] T5 A push for another mailbox is acknowledged, audited and ignored.
+  `api::webhooks::tests::a_push_for_a_different_mailbox_is_acknowledged_and_ignored`
+- [x] T6 An unreadable body from an **already-verified** sender is `204`, not
+  `400` — only Google can send a verified body, so an unreadable shape means the
+  shape changed, and a `400` would make Pub/Sub retry a poison message for ever.
+  `api::webhooks::tests::an_unreadable_body_from_a_verified_sender_is_204_not_400`
+- [x] T7 `message.data` is accepted in either base64 alphabet, padded or not.
+  Pub/Sub's docs say base64 and Google's Gmail guide shows base64url; asserting
+  either one is how a real notification gets permanently acked as malformed.
+  `api::webhooks::tests::message_data_is_accepted_in_either_base64_alphabet`
+- [x] T8 `historyId` parses as a JSON number **and** as a string. Gmail sends a
+  number here and a string from the REST API; getting it wrong is a `500` on
+  every push. `api::webhooks::tests::a_history_id_that_is_a_number_or_a_string_both_parse`
+- [x] T9 The forgery matrix, fourteen classes, each asserting `401`, the exact
+  contract body, **zero jobs enqueued**, and `last_webhook_at` unstamped: no
+  header · non-`Bearer` · empty bearer · not-a-JWT · `alg: none` · HS256
+  algorithm confusion signed with the JWKS modulus · wrong key · unknown `kid` ·
+  wrong `aud` · wrong `iss` · wrong `email` · `email_verified: false` · expired
+  past the leeway · **`aud` correct and everything else absent**.
+- [x] T10 An unconfigured webhook rejects a genuine push. Fail-closed is the
+  only safe default. `api::webhooks::tests::an_unconfigured_webhook_rejects_a_genuine_push`
+- [x] T13 A cold, unreachable key set is `502`, not `401`. Both make Pub/Sub
+  retry, but only one of them is true.
+  `api::webhooks::tests::a_jwks_that_cannot_be_fetched_at_all_is_a_502_not_a_401`
+- [x] T11 An unknown `kid` provokes at most one refetch per minute. Without the
+  limit, forged tokens carrying random `kid`s turn this endpoint into a DoS
+  amplifier pointed at Google. `oidc::MIN_REFRESH`
+- [x] T12 A fetch failure with a **warm** cache keeps serving the stale keys:
+  Google rotates over days, and keys that still verify beat dropping mail.
+- [x] T15 A `GET` to the webhook is indistinguishable from an unknown route —
+  without the method fallback axum answers `405`, which confirms the path
+  exists. `api::tests::a_get_to_the_webhook_is_indistinguishable_from_an_unknown_route`
+- [x] T16 The webhook is the only new public route; everything around it is
+  still bearer-guarded. `api::tests::unknown_v1_routes_are_auth_guarded`
 
 ## U. Ops
 

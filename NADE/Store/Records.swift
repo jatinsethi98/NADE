@@ -256,3 +256,122 @@ nonisolated extension String {
         contains("\u{0000}") ? replacingOccurrences(of: "\u{0000}", with: "") : self
     }
 }
+
+// MARK: - P3: the feed, agents, and the outbox
+
+/// One home-feed card. `docs/API.md` §7.
+///
+/// `actions` and `data` are stored as JSON rather than exploded into columns:
+/// both are read whole and never queried, and `data` has three shapes whose
+/// union would be a dozen nullable columns plus a decoder to reassemble them.
+nonisolated struct FeedItemRecord: MailRecord, Identifiable {
+    static let databaseTableName = "feed_item"
+
+    var id: String
+    var kind: String
+    var title: String
+    var body: String
+    var status: String
+    var runId: String?
+    var actionsJson: String
+    /// Non-null only while `status == "new"` **and** `kind == "approval"`.
+    var approvalToken: String?
+    var approvalExpiresAt: Date?
+    var resolvedNote: String?
+    var dataJson: String?
+    var createdAt: Date
+}
+
+nonisolated struct FeedSyncRecord: MailRecord {
+    static let databaseTableName = "feed_sync"
+
+    /// Always 1; the feed is one list.
+    var id: Int
+    var nextCursor: String?
+    var reachedEnd: Bool
+    var generation: Int
+    /// The server's mailbox-wide `new_count`, not a count of the rows below it.
+    var newCount: Int
+    var lastPageAt: Date?
+}
+
+/// A row of `GET /agents`. `position` is the wire order (oldest first by
+/// `created_at`), which is not itself on the list row.
+nonisolated struct AgentRecord: MailRecord, Identifiable {
+    static let databaseTableName = "agent"
+
+    var id: String
+    var name: String
+    var nlDefinition: String
+    var status: String
+    var triggerSummary: String
+    var scheduleJson: String?
+    var lastRunAt: Date?
+    var approvalRequired: Bool
+    var position: Int
+}
+
+/// A queued approve or skip.
+///
+/// The row is the durable half of a tap: it survives the app being killed, the
+/// network being away, and the same tap arriving twice. `origin` binds it to the
+/// server that minted its token — a capability from one server must never be
+/// presented to another.
+nonisolated struct PendingActionRecord: MailRecord, Identifiable {
+    static let databaseTableName = "pending_action"
+
+    var id: String
+    var origin: String
+    /// `approve` | `skip`.
+    var kind: String
+    var feedItemId: String
+    var approvalToken: String
+    var createdAt: Date
+    var attempts: Int
+    var lastError: String?
+}
+
+// MARK: - P3 rows, back to the wire
+
+nonisolated extension FeedItemRecord {
+    /// `nil` when the row cannot be reconstituted.
+    ///
+    /// `compactMap` at the call site rather than a throw: a single unreadable
+    /// row must not blank the whole feed, and a `ValueObservation` that throws
+    /// is over — GRDB does not resume it.
+    var wire: WireFeedItem? {
+        guard let actions = try? JSONCodec.decode([String].self, from: actionsJson) else {
+            return nil
+        }
+        let data = dataJson.flatMap { try? JSONCodec.decode(WireFeedData.self, from: $0) }
+        return WireFeedItem(
+            id: id,
+            kind: FeedKind(rawValue: kind) ?? .unknown(kind),
+            title: title,
+            body: body,
+            status: FeedStatus(rawValue: status) ?? .unknown(status),
+            runID: runId,
+            actions: actions.map { FeedAction(rawValue: $0) ?? .unknown($0) },
+            approvalToken: approvalToken,
+            approvalExpiresAt: approvalExpiresAt,
+            resolvedNote: resolvedNote,
+            data: data,
+            createdAt: createdAt
+        )
+    }
+}
+
+nonisolated extension AgentRecord {
+    var wire: WireAgentRow? {
+        WireAgentRow(
+            id: id,
+            name: name,
+            nlDefinition: nlDefinition,
+            status: AgentStatus(rawValue: status) ?? .unknown(status),
+            triggerSummary: triggerSummary,
+            schedule: scheduleJson.flatMap { try? JSONCodec.decode(WireSchedule.self, from: $0) },
+            lastRunAt: lastRunAt,
+            approvalRequired: approvalRequired
+        )
+    }
+}
