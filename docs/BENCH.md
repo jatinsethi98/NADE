@@ -114,6 +114,12 @@ neither is reachable from `xcrun simctl ui` the way `appearance` and
 the gallery cannot fake them either — both are read-only environment values, the
 same problem `GalleryView`'s Reduce Motion section already documents.
 
+Nor is the back door: `xcrun simctl spawn <device> defaults write
+com.apple.Accessibility ReduceTransparencyEnabled -bool true` writes the key and
+reads it back, and the app relaunches with its glass entirely unchanged — posting
+`ReduceTransparencyChangedNotification` does not help either. Tried on iOS 26.5,
+recorded here so it is not tried twice.
+
 They are looked at by hand, and the glass chrome is the reason to bother:
 
 1. In the simulator, **Settings → Accessibility → Display & Text Size**.
