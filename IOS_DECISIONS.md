@@ -1633,6 +1633,15 @@ background contributes nothing. Measured on iOS 26.5, the same two controls in
 Those are the drawn boxes, exactly — the targets were gone, not merely reduced.
 `MailUITests.testTheChipAndTheBackChevronAreBothAtLeast44Points` caught it.
 
+**The effect is not uniform, and the limit of the claim is worth writing down.**
+2a's ask-field submit circle is 38 pt drawn and leans on the same overflow, and
+it keeps its 44 inside a `safeAreaBar` — checked by putting 2a's bar back and
+watching `testTheAskFieldsSubmitCircleIsStill44InsideTheGlassBar` stay green.
+So "safeAreaBar clips" is established for the two controls above and is not
+established as a general rule about every control in every bar. It did not need
+to be: one clipped hit target is enough to disqualify the API for a codebase
+whose 44 pt rule is built entirely on overflow.
+
 The alternative was to pay for the target in layout — `.frame(minHeight: 44)` on
 every control in a bar — which grows every header band and moves the pixels D28
 went out of its way not to move. `safeAreaInset` costs nothing and keeps both
@@ -1641,12 +1650,17 @@ properties; it applies no material, so `nadeChromeBar()` carries the glass.
 **A convenience API that composes three behaviours can be wrong for one of
 them.** Taking the three apart cost one modifier and kept a requirement.
 
-### D100. Tearing a tab down is not the same as hiding it, and one model appended
+### D100. State survived the shell swap; the lifecycle did not, and one model appended
 
 The old shell kept all four screens in the tree and toggled their opacity (D29),
-so `.onDisappear` never fired on a tab switch and `.task` never re-fired.
-`TabView` really does tear the outgoing tab down. Both halves of that pair now
-run on every departure and every return.
+so `.onDisappear` never fired on a tab switch and `.task` never re-fired. Under
+`TabView` the outgoing tab leaves the screen and both halves of that pair run on
+every departure and every return.
+
+Be precise about what changed, because the bug below depends on it: **`@State`
+is not lost.** `ShellStateUITests` proves the counters survive, and `AskModel`
+was the same instance on the way back — which is exactly why there was a
+complete answer sitting there to append to.
 
 Every `start()` in the app was already guarded by `!observation.isRunning` and
 every `refresh()` was a re-fetch — except `AskModel`, whose only guard was

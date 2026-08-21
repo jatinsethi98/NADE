@@ -51,8 +51,9 @@ struct MailListView: View {
             rows
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        // No `.scrollEdgeEffectStyle` here, and it was tried. `.soft` on the
-        // top edge produced a screenshot byte-comparable to the one without it:
+        // No `.scrollEdgeEffectStyle` here, and it was tried. `.soft` on the top
+        // edge produced a scrolled screenshot with the **same SHA-256** as the
+        // one without it — checked, not eyeballed:
         // the effect exists to keep content legible under a *system* bar, and
         // this bar carries its own glass through `nadeChromeBar()`, which
         // already covers the region the effect would fade. A modifier that

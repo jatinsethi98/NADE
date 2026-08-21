@@ -83,9 +83,8 @@ final class HomeFeedModel {
         await sync.drainOutbox()
         // The feed and the agents share no data, and 2a's `.task` runs on every
         // arrival at the Ask tab — at launch, because Ask is the opening tab,
-        // and again on every return to it since D98 (`TabView` rebuilds the
-        // tab it shows). Serialising them cost an avoidable round trip on a
-        // path that is now walked more than once.
+        // and again on every return to it since D98. Serialising them cost an
+        // avoidable round trip on a path that is now walked more than once.
         async let feed = sync.loadFeed(resetting: true)
         async let agents: Void = sync.loadAgents()
         _ = await (feed, agents)

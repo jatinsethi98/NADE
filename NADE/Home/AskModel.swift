@@ -32,9 +32,15 @@ final class AskModel {
     /// `AskView` pairs `.task { model.start() }` with
     /// `.onDisappear { model.cancel() }`. Under the old shell that pair fired
     /// once each, because all four screens stayed in the view tree and a tab
-    /// switch only changed their opacity (D29). D98's native `TabView` really
-    /// does remove the outgoing tab's content, so leaving the Ask tab now calls
-    /// `cancel()` — which clears `task` — and returning calls `start()` again.
+    /// switch only changed their opacity (D29). Under D98's native `TabView`
+    /// the outgoing tab leaves the screen, so both halves fire on every
+    /// departure and every return: `cancel()` clears `task`, and the next
+    /// `start()` sees no reason not to run.
+    ///
+    /// Note what is **not** lost. SwiftUI keeps the tab's `@State`, so this
+    /// model is the same instance on the way back — which is precisely why the
+    /// second run had a full `prose` to append to. State survives; lifecycle
+    /// repeats.
     ///
     /// With `task == nil` as the only guard, the second run re-asked the same
     /// question and `apply(.token)` **appended** to prose that was already

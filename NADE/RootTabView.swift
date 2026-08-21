@@ -24,10 +24,15 @@
 //
 //  * **All four screens stay alive.** The old shell held them in a `ZStack` of
 //    four `opacity`-toggled children because a `switch` would destroy the
-//    outgoing screen's `@State`, scroll position, `NavigationStack` path and
-//    running `.task`. `TabView` keeps each `Tab`'s content identity for the
-//    same reason, so the property is preserved rather than reimplemented —
-//    but *preserved* is a claim, and `ShellStateUITests` is what checks it.
+//    outgoing screen's `@State`, scroll position and `NavigationStack` path.
+//    `TabView` keeps each `Tab`'s content identity, so the property is
+//    preserved rather than reimplemented — but *preserved* is a claim, and
+//    `ShellStateUITests` is what checks it.
+//
+//    What the old shell also preserved, and this does not, is the **lifecycle**:
+//    an off-screen tab used to keep running its `.task` and never saw
+//    `.onDisappear`. Now both fire on every switch. Every model's `start()` was
+//    already idempotent — except `AskModel`, which appended (D100).
 //  * **Tab-bar visibility on 1f.** It used to be computed in the shell from
 //    `AppNavigation.showsTabBar`. A system bar is hidden by the screen that
 //    wants it hidden, so the rule moved to the destination — see

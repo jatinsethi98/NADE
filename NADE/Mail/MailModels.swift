@@ -6,15 +6,15 @@
 //  come from the store through `ValueObservation`, so a refresh that changes
 //  nothing costs one query and no redraw.
 //
-//  **They start on first visit, and again on every return.** This used to read
-//  "at launch, not at tab selection": `RootTabView` held all four screens in
-//  the tree at once (D29) and only changed their opacity, so `.task` ran for
+//  **They start on first appearance, and again on every return.** This used to
+//  read "at launch, not at tab selection": `RootTabView` held all four screens
+//  in the tree at once (D29) and only changed their opacity, so `.task` ran for
 //  Mail while Ask was on screen and never ran twice.
 //
-//  D98's native `TabView` builds a tab's content the first time that tab is
-//  selected and tears it down when you leave, so both halves of that sentence
-//  changed: Mail's observations now begin when Mail is first opened, and every
-//  `.task` here re-fires each time the tab comes back.
+//  Under D98's native `TabView` a tab's content leaves the screen when you
+//  leave it, so every `.task` here re-fires each time the tab comes back. The
+//  models themselves are unaffected — they have process lifetime and are built
+//  in the composition root, not by the views.
 //
 //  The requirement on this file survived the change and got stricter. Every
 //  `start()` below has to be cheap and **idempotent** — each is guarded by

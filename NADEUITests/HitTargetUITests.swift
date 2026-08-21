@@ -102,6 +102,47 @@ final class HitTargetUITests: XCTestCase {
         )
     }
 
+    // MARK: - Controls inside a glass chrome bar (D99)
+
+    /// 2a's submit circle is 38 pt drawn and depends on `.nadeHitTarget()`'s
+    /// overflowing background for all six of its missing points. D99 put it
+    /// inside a chrome bar and under a `.glassEffect`, either of which could
+    /// have clipped that background away. This is the guard that says neither
+    /// does.
+    ///
+    /// **It is a guard, not a reproduction, and the difference was checked.**
+    /// Swapping 2a's bar back to the `safeAreaBar` that broke 1e leaves this
+    /// test green — so whatever `safeAreaBar` clips, it did not reach this
+    /// control. The reproduction lives in
+    /// `MailUITests.testTheChipAndTheBackChevronAreBothAtLeast44Points`, which
+    /// is where the failure actually appeared (D99 has the measurements).
+    ///
+    /// Kept anyway, and D39 is the reason it is worth being explicit about
+    /// which of the two this is: a test nobody has seen fail is not evidence of
+    /// the bug it names. It is still evidence for the property — the circle is
+    /// the only control that moved into a bar and is watched by nothing else —
+    /// and this comment is what stops the next reader mistaking one for the
+    /// other.
+    ///
+    /// Not in the gallery, deliberately: the gallery's copy would prove the
+    /// component works somewhere, and what is in question is whether it works
+    /// *in a bar*.
+    func testTheAskFieldsSubmitCircleIsStill44InsideTheGlassBar() {
+        let app = XCUIApplication.nade(seed: .fixtures, screen: "2a")
+        let submit = app.buttons["ask.field.submit"]
+        XCTAssertTrue(submit.waitForExistence(timeout: 10), "2a's ask field has no submit button")
+
+        let frame = submit.frame
+        XCTAssertGreaterThanOrEqual(
+            frame.height, Self.minimum,
+            "the submit circle is \(frame.height) pt tall — its overflowing target is being clipped"
+        )
+        XCTAssertGreaterThanOrEqual(
+            frame.width, Self.minimum,
+            "the submit circle is \(frame.width) pt wide — its overflowing target is being clipped"
+        )
+    }
+
     // `testTabBarColumnsInTheGalleryAreAlso44` stood here. It asserted that
     // the gallery's copy of `NTabBar` had the same 44 pt columns as the shell's,
     // so a regression would show up twice. Both copies are gone (D98): the
