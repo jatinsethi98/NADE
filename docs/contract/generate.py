@@ -76,9 +76,17 @@ def compact(value):
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
 
-def byte_size(value):
-    """Size of a journalled tool result: the bytes actually stored."""
-    return len(compact(value).encode("utf-8"))
+def tool_fingerprint(tool):
+    """`sha256:<hex>` over a tool's interface, as the engine records it.
+
+    The real value hashes the tool's name, description, version and schema
+    (`nade_agent_sdk::tool_fingerprint`); the fixture derives a stable
+    stand-in from the name alone, so the shape and the per-tool stability are
+    both real without duplicating the Rust hasher here. Like `PAIR_TOKEN`, it
+    is an example value, not a value any build will reproduce.
+    """
+    return "sha256:" + hashlib.sha256(
+        ("nade.tool/%s@v1" % tool).encode("utf-8")).hexdigest()
 
 
 def cursor(ts, id_):
@@ -127,9 +135,6 @@ SERVER_VERSION = "0.1.0"
 # `nade_` + 64 lowercase hex (API.md section 0). Example value only: a real
 # device token exists exactly once, in the pair response, and is never stored.
 PAIR_TOKEN = "nade_" + "cfa3abd9e2174b0d8f6c5a1e93b7d420615c8ae7f9d3b26041a8c7e5d90b3f16"
-
-MODEL_TRIAGE = "claude-haiku-4-5-20251001"
-MODEL_RUN = "claude-sonnet-4-5-20250929"
 
 # v1's entire tool set (API.md section 5.1).
 V1_TOOLS = ["search_mail", "read_thread", "write_note", "draft_reply"]
@@ -288,8 +293,8 @@ TS = {
     "m1": "2026-08-16T09:12:04Z",
     "r5_start": "2026-08-16T09:12:06Z",
     "r5_think": "2026-08-16T09:12:09Z",
-    "r5_step_failed": "2026-08-16T09:12:30Z",
-    "r5_failed": "2026-08-16T09:12:31Z",
+    "r5_step_error": "2026-08-16T09:12:30Z",
+    "r5_cancel": "2026-08-16T09:12:31Z",
     "t2_mail": "2026-08-16T12:55:31Z",
     "m2": "2026-08-16T14:31:09Z",
     "r2_start": "2026-08-16T14:38:20Z",
@@ -754,7 +759,15 @@ def agent_full(agent):
 # --------------------------------------------------------------------------
 
 class Journal(object):
-    """Appends journal entries and hands back the seq it assigned.
+    """Appends journal entries exactly as the SDK engine writes them.
+
+    The vocabulary and every payload shape are transcribed from
+    `backend/crates/nade-agent-sdk/src/journal.rs` (API.md section 6.1):
+    `run_journal` is written ONLY by the engine, through the host's Journal
+    driver, so these fixtures are engine output, never host output. Fields the
+    SDK omits when absent (serde `skip_serializing_if`) are omitted here too --
+    the one place API.md section 0's "nothing is ever omitted" rule does not
+    apply. Key order follows the Rust struct declarations.
 
     `seq` starts at 1 and increases by one with no gaps (API.md section 6.1),
     enforced here by construction rather than typed out -- `(run_id, seq)` is a
@@ -762,10 +775,11 @@ class Journal(object):
 
     A *step* is identified by the seq of the entry that **opened** it: the
     `step_started` for an ungated call, the `approval_requested` for a gated
-    one. `step_started`, `step_done` and `step_failed` all carry that seq as
-    `step_seq`, so a step is correlated by pointer rather than by guessing at
-    the nearest preceding open with the same tool -- which is ambiguous the
-    moment an agent calls a tool twice, which is ordinary.
+    one. `step_started` and `step_done` carry that seq as `step_seq`, so a
+    step is correlated by pointer rather than by guessing at the nearest
+    preceding open with the same tool -- which is ambiguous the moment an
+    agent calls a tool twice, which is ordinary. A tool failure is a
+    `step_done` with `is_error: true`; there is no separate failure kind.
 
     `effect_id` derives from the opening seq and nothing else, so a gated step
     keeps the id minted at `approval_requested` through approval and execution.
@@ -774,6 +788,10 @@ class Journal(object):
     def __init__(self, run_id):
         self.run_id = run_id
         self.entries = []
+        self.turns = 0
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.executed = set()   # step_seqs whose execution has started
 
     def add(self, kind, payload, at):
         seq = len(self.entries) + 1
@@ -788,65 +806,138 @@ class Journal(object):
     def effect(self, seq):
         return effect_id(self.run_id, seq)
 
-    def open_step(self, tool, tool_args, at):
+    def start(self, system, user_text, at):
+        """`run_started`: the run's input plus the journal-format stamp."""
+        self.add("run_started", {
+            "input": {
+                "system": system,
+                "messages": [{"role": "user", "text": user_text}],
+            },
+            "journal_format": 1,
+        }, at)
+
+    def think(self, text, tokens_in, tokens_out, at, calls=()):
+        """`model_response`: one model turn.
+
+        `calls` is a list of `(call_id, tool, args)`. `tool_calls` is omitted
+        when the turn requested none, and `stop_reason` follows: `tool_use`
+        with calls, `end_turn` without. There is no per-entry model name --
+        that is a post-v1 SDK field (API.md section 6.1).
+        """
+        self.turns += 1
+        self.tokens_in += tokens_in
+        self.tokens_out += tokens_out
+        payload = {"turn": self.turns, "text": text}
+        if calls:
+            payload["tool_calls"] = [
+                {"id": call_id, "name": tool, "arguments": tool_args}
+                for call_id, tool, tool_args in calls
+            ]
+        payload["stop_reason"] = "tool_use" if calls else "end_turn"
+        payload["usage"] = {"input_tokens": tokens_in,
+                            "output_tokens": tokens_out}
+        self.add("model_response", payload, at)
+
+    def open_step(self, call_id, tool, tool_args, at):
         """An ungated call: the `step_started` entry opens its own step."""
-        seq = self.add("step_started", None, at)
-        self.entries[seq - 1]["payload"] = {
+        seq = len(self.entries) + 1
+        self.executed.add(seq)
+        self.add("step_started", {
             "step_seq": seq,
+            "call_id": call_id,
             "tool": tool,
             "args": tool_args,
             "args_hash": args_hash(tool_args),
             "effect_id": self.effect(seq),
-        }
+            "attempt": 1,
+            "opened_at": at,
+            "tool_fingerprint": tool_fingerprint(tool),
+            "replay_policy": "retry",
+        }, at)
         return seq
 
-    def request_approval(self, tool, feed_item_id, summary, at):
+    def request_approval(self, call_id, tool, tool_args, at):
         """Open a gated step. The id minted here is what the feed item
-        publishes, before the effect exists."""
-        seq = self.add("approval_requested", None, at)
-        self.entries[seq - 1]["payload"] = {
+        publishes, before the effect exists.
+
+        `expires_at` is absent on purpose: NADE runs the engine with
+        `approval_ttl = None` -- the host's 7-day sweep and the approve tx's
+        410 own expiry (PLAN P4), and double enforcement would expire a timely
+        approval whose resume job lagged. The feed item, its token and its
+        deadline are host rows -- the journal never names them.
+        """
+        seq = len(self.entries) + 1
+        self.add("approval_requested", {
+            "step_seq": seq,
+            "call_id": call_id,
             "tool": tool,
-            "feed_item_id": feed_item_id,
+            "args": tool_args,
+            "args_hash": args_hash(tool_args),
             "effect_id": self.effect(seq),
-            "summary": summary,
-        }
+            "requested_at": at,
+            "tool_fingerprint": tool_fingerprint(tool),
+            "replay_policy": "retry",
+        }, at)
         return seq
 
-    def execute_gated_step(self, tool, tool_args, step_seq, at):
-        """Run the step an earlier `approval_requested` opened, keeping its id."""
+    def resolve(self, step_seq, decision, at):
+        """`approval_resolved`: how the gate was settled, written by
+        `Engine::resume` when the host's job delivers the human's answer --
+        never by the approve/skip transaction itself. `reason` is omitted: it
+        appears only when the engine itself decided (`ttl_expired`), which a
+        host that owns expiry never triggers."""
+        self.add("approval_resolved", {
+            "step_seq": step_seq,
+            "decision": decision,
+            "resolved_at": at,
+        }, at)
+
+    def execute_gated_step(self, call_id, tool, tool_args, step_seq, at):
+        """Run the step an earlier `approval_requested` opened, keeping its
+        id, its args and its `opened_at` (the approval's `requested_at`)."""
+        gate = self.entries[step_seq - 1]
+        self.executed.add(step_seq)
         self.add("step_started", {
             "step_seq": step_seq,
+            "call_id": call_id,
             "tool": tool,
             "args": tool_args,
             "args_hash": args_hash(tool_args),
             "effect_id": self.effect(step_seq),
+            "attempt": 1,
+            "opened_at": gate["payload"]["requested_at"],
+            "tool_fingerprint": tool_fingerprint(tool),
+            "replay_policy": "retry",
         }, at)
 
-    def close_step(self, tool, result, step_seq, at, truncated=False):
+    def close_step(self, call_id, tool, result, step_seq, at,
+                   is_error=False, truncated=False):
         self.add("step_done", {
             "step_seq": step_seq,
+            "call_id": call_id,
             "tool": tool,
             "result": result,
-            "result_bytes": byte_size(result),
+            "is_error": is_error,
             "truncated": truncated,
         }, at)
 
-    def fail_step(self, tool, error, step_seq, at):
-        self.add("step_failed", {
-            "step_seq": step_seq,
-            "tool": tool,
-            "error": error,
-        }, at)
+    def end(self, status, at, output=None, reason=None):
+        """`run_ended`: the terminal state, recorded once, always last.
 
-
-def llm(model, stop_reason, tokens_in, tokens_out, text):
-    return {
-        "model": model,
-        "stop_reason": stop_reason,
-        "tokens_in": tokens_in,
-        "tokens_out": tokens_out,
-        "text": text,
-    }
+        `steps` and `usage` are the run's own totals, accumulated here the
+        same way the engine accumulates them, so they cannot disagree with
+        the entries above. `output` (the model's closing prose) rides only on
+        `done`; `reason` only on `failed`.
+        """
+        payload = {"status": status}
+        if output is not None:
+            payload["output"] = output
+        if reason is not None:
+            payload["reason"] = reason
+        payload["steps"] = len(self.executed)
+        payload["usage"] = {"input_tokens": self.tokens_in,
+                            "output_tokens": self.tokens_out}
+        self.add("run_ended", payload, at)
 
 
 READ_T1_ARGS = {"thread_id": T1}
@@ -854,31 +945,51 @@ READ_T3_ARGS = {"thread_id": T3}
 READ_T4_ARGS = {"thread_id": T4}
 READ_T6_ARGS = {"thread_id": T6}
 
+# The system prompt the host assembles for a run is the agent's compiled
+# instruction. What exactly P4 wraps around it is the host's business; the
+# journal records whatever it was, verbatim, in `run_started.input`.
+A_INSTRUCTION = AGENT_BY_ID[AGENT_A]["spec"]["instruction"]
+B_INSTRUCTION = AGENT_BY_ID[AGENT_B]["spec"]["instruction"]
+C_INSTRUCTION = AGENT_BY_ID[AGENT_C]["spec"]["instruction"]
+
+KETTLE_MAIL = (
+    'New mail from priya@kettle.com on the thread '
+    '"Staff Product Designer at Kettle".'
+)
+
 
 # -- RUN_FAILED: Agent A on M1, killed by Gmail -----------------------------
+#
+# The tool's upstream died: `step_done` records the structured error
+# (`is_error: true`), and the host -- not the engine -- then ended the run
+# loudly with `Engine::cancel`, which appends `run_ended {status: "failed",
+# reason: {cap: "cancelled"}}`. That is the loud-fail path PLAN P4 mandates
+# for a run that cannot make progress; a cap breach would have written
+# `cap_breached` first instead.
 
 _j5 = Journal(RUN_FAILED)
-_j5.add("run_started", {"trigger_kind": "mail", "trigger_ref": M1}, TS["r5_start"])
-_j5.add("llm_response",
-        llm(MODEL_RUN, "tool_use", 1786, 88, "I'll read the thread first."),
-        TS["r5_think"])
-_seq = _j5.open_step("read_thread", READ_T1_ARGS, TS["r5_think"])
-_j5.fail_step("read_thread",
-              "Gmail returned 503 for messages.get after 5 attempts.",
-              _seq, TS["r5_step_failed"])
-_j5.add("run_failed", {
-    "error": "Gmail was unavailable, so the thread could not be read.",
-}, TS["r5_failed"])
+_j5.start(A_INSTRUCTION, KETTLE_MAIL, TS["r5_start"])
+_j5.think("I'll read the thread first.", 1786, 88, TS["r5_think"],
+          calls=[("call_1_1", "read_thread", READ_T1_ARGS)])
+_seq = _j5.open_step("call_1_1", "read_thread", READ_T1_ARGS, TS["r5_think"])
+_j5.close_step("call_1_1", "read_thread", {
+    "error": "Gmail returned 503 for messages.get after 5 attempts.",
+}, _seq, TS["r5_step_error"], is_error=True)
+_j5.end("failed", TS["r5_cancel"], reason={
+    "cap": "cancelled",
+    "detail": "Gmail was unavailable, so the thread could not be read.",
+})
 
 # -- RUN_DRAFTED: Agent C, run once by hand, approved, wrote a draft --------
 
 _j2 = Journal(RUN_DRAFTED)
-_j2.add("run_started", {"trigger_kind": "manual", "trigger_ref": None}, TS["r2_start"])
-_j2.add("llm_response",
-        llm(MODEL_RUN, "tool_use", 1104, 61, "Reading the thread before drafting."),
-        TS["r2_think"])
-_seq = _j2.open_step("read_thread", READ_T1_ARGS, TS["r2_think"])
-_j2.close_step("read_thread", {
+_j2.start(C_INSTRUCTION,
+          'Run once now, on the thread "Staff Product Designer at Kettle".',
+          TS["r2_start"])
+_j2.think("Reading the thread before drafting.", 1104, 61, TS["r2_think"],
+          calls=[("call_1_1", "read_thread", READ_T1_ARGS)])
+_seq = _j2.open_step("call_1_1", "read_thread", READ_T1_ARGS, TS["r2_think"])
+_j2.close_step("call_1_1", "read_thread", {
     "thread_id": T1,
     "subject": "Staff Product Designer at Kettle",
     "message_count": 2,
@@ -889,10 +1000,6 @@ _j2.close_step("read_thread", {
         "body_text": snippet_of(M2_TEXT),
     },
 }, _seq, TS["r2_read_done"])
-_j2.add("llm_response",
-        llm(MODEL_RUN, "tool_use", 2418, 174,
-            "Priya asked which afternoon works. I'll draft a reply naming Tuesday."),
-        TS["r2_think2"])
 
 DRAFT_ARGS = {
     "thread_id": T1,
@@ -904,42 +1011,40 @@ DRAFT_ARGS = {
         "\nJatin"
     ),
 }
+_j2.think("Priya asked which afternoon works. I'll draft a reply naming Tuesday.",
+          2418, 174, TS["r2_think2"],
+          calls=[("call_2_1", "draft_reply", DRAFT_ARGS)])
 # The gated step's identity is the seq of this `approval_requested` entry, not
 # of the `step_started` that eventually executes it. That is what lets the
 # server publish `data.draft_id` in the feed item before the draft exists.
-R2_GATE_SEQ = _j2.request_approval(
-    "draft_reply", FEED_RESOLVED,
-    "Draft a reply to Priya proposing Tuesday or Thursday afternoon.",
-    TS["r2_ask"])
+# The feed item itself is a host row: the journal never names it.
+R2_GATE_SEQ = _j2.request_approval("call_2_1", "draft_reply", DRAFT_ARGS,
+                                   TS["r2_ask"])
 DRAFT_ID = _j2.effect(R2_GATE_SEQ)
-_j2.add("approval_granted", {"feed_item_id": FEED_RESOLVED}, TS["r2_granted"])
-_j2.add("resumed", {"after": "approval"}, TS["r2_granted"])
+_j2.resolve(R2_GATE_SEQ, "approve", TS["r2_granted"])
 # Executes under the id the approval minted: re-running this step upserts the
 # same row rather than creating a second draft.
-_j2.execute_gated_step("draft_reply", DRAFT_ARGS, R2_GATE_SEQ, TS["r2_write"])
-_j2.close_step("draft_reply", {
+_j2.execute_gated_step("call_2_1", "draft_reply", DRAFT_ARGS, R2_GATE_SEQ,
+                       TS["r2_write"])
+_j2.close_step("call_2_1", "draft_reply", {
     "draft_id": DRAFT_ID,
     "to": ["priya@kettle.com"],
     "subject": "Re: Staff Product Designer at Kettle",
 }, R2_GATE_SEQ, TS["r2_write"])
-_j2.add("llm_response",
-        llm(MODEL_RUN, "end_turn", 2691, 42, "Draft saved. Nothing was sent."),
-        TS["r2_done"])
-_j2.add("run_done", {
-    "summary": "Drafted a reply to Priya proposing Tuesday or Thursday afternoon.",
-}, TS["r2_done"])
+_j2.think("Drafted a reply to Priya proposing Tuesday or Thursday afternoon.",
+          2691, 42, TS["r2_done"])
+_j2.end("done", TS["r2_done"],
+        output="Drafted a reply to Priya proposing Tuesday or Thursday afternoon.")
 
 # -- RUN_NOTED: Agent B on schedule, no approval needed, wrote a note -------
 
 _j3 = Journal(RUN_NOTED)
-_j3.add("run_started", {"trigger_kind": "schedule", "trigger_ref": None}, TS["r3_start"])
-_j3.add("llm_response",
-        llm(MODEL_TRIAGE, "tool_use", 942, 54,
-            "Looking for threads in To Reply that are still waiting."),
-        TS["r3_think"])
+_j3.start(B_INSTRUCTION, "Scheduled run for Sunday 16 August.", TS["r3_start"])
 SEARCH_ARGS = {"q": "label:\"To Reply\" newer_than:7d", "limit": 25}
-_seq = _j3.open_step("search_mail", SEARCH_ARGS, TS["r3_think"])
-_j3.close_step("search_mail", {
+_j3.think("Looking for threads in To Reply that are still waiting.", 942, 54,
+          TS["r3_think"], calls=[("call_1_1", "search_mail", SEARCH_ARGS)])
+_seq = _j3.open_step("call_1_1", "search_mail", SEARCH_ARGS, TS["r3_think"])
+_j3.close_step("call_1_1", "search_mail", {
     "count": 6,
     "threads": [
         {"id": T1, "subject": THREAD_DETAIL_T1["subject"]},
@@ -947,9 +1052,6 @@ _j3.close_step("search_mail", {
         {"id": T4, "subject": ROW_T4["subject"]},
     ],
 }, _seq, TS["r3_search_done"])
-_j3.add("llm_response",
-        llm(MODEL_RUN, "tool_use", 3104, 231, "Six threads. Writing the list."),
-        TS["r3_think2"])
 
 NOTE_TITLE = "To-do — 16 Aug"
 NOTE_BODY = (
@@ -963,32 +1065,42 @@ NOTE_BODY = (
     "- [ ] Close the Föhn return window on Tuesday\n"
 )
 NOTE_ARGS = {"title": NOTE_TITLE, "body_md": NOTE_BODY, "thread_id": None}
+_j3.think("Six threads. Writing the list.", 3104, 231, TS["r3_think2"],
+          calls=[("call_2_1", "write_note", NOTE_ARGS)])
 # Agent B does not require approval, so this step opens itself and its id comes
 # from its own seq.
-R3_WRITE_SEQ = _j3.open_step("write_note", NOTE_ARGS, TS["r3_write"])
+R3_WRITE_SEQ = _j3.open_step("call_2_1", "write_note", NOTE_ARGS, TS["r3_write"])
 NOTE_ID = _j3.effect(R3_WRITE_SEQ)
-_j3.close_step("write_note", {
+_j3.close_step("call_2_1", "write_note", {
     "note_id": NOTE_ID,
     "title": NOTE_TITLE,
 }, R3_WRITE_SEQ, TS["r3_write"])
-_j3.add("llm_response",
-        llm(MODEL_RUN, "end_turn", 3389, 38, "Saved."),
-        TS["r3_done"])
-_j3.add("run_done", {
-    "summary": "Six threads still waiting on a reply. Saved as a note.",
-}, TS["r3_done"])
+_j3.think("Six threads still waiting on a reply. Saved as a note.", 3389, 38,
+          TS["r3_done"])
+_j3.end("done", TS["r3_done"],
+        output="Six threads still waiting on a reply. Saved as a note.")
 
 # -- RUN_PENDING: Agent A on M3, waiting on the live write_note approval ----
 
+PENDING_NOTE_ARGS = {
+    "title": "Kettle — next steps",
+    "body_md": (
+        "# Kettle — next steps\n"
+        "\n"
+        "- [ ] 30-minute intro with the head of design\n"
+        "- [ ] Portfolio session the week after\n"
+    ),
+    "thread_id": T1,
+}
+
 _j1 = Journal(RUN_PENDING)
-_j1.add("run_started", {"trigger_kind": "mail", "trigger_ref": M3}, TS["r1_start"])
-_j1.add("llm_response",
-        llm(MODEL_RUN, "tool_use", 1840, 96, "I'll read the thread first."),
-        TS["r1_think"])
-_seq = _j1.open_step("read_thread", READ_T1_ARGS, TS["r1_think"])
+_j1.start(A_INSTRUCTION, KETTLE_MAIL, TS["r1_start"])
+_j1.think("I'll read the thread first.", 1840, 96, TS["r1_think"],
+          calls=[("call_1_1", "read_thread", READ_T1_ARGS)])
+_seq = _j1.open_step("call_1_1", "read_thread", READ_T1_ARGS, TS["r1_think"])
 # A long thread: the result was capped, and says so in the value rather than
 # being silently trimmed.
-_j1.close_step("read_thread", {
+_j1.close_step("call_1_1", "read_thread", {
     "thread_id": T1,
     "subject": "Staff Product Designer at Kettle",
     "message_count": 3,
@@ -1002,14 +1114,11 @@ _j1.close_step("read_thread", {
         ),
     },
 }, _seq, TS["r1_read_done"], truncated=True)
-_j1.add("llm_response",
-        llm(MODEL_RUN, "tool_use", 3210, 184,
-            "Two concrete next steps. Both need approval before I save them."),
-        TS["r1_think2"])
-R1_GATE_SEQ = _j1.request_approval(
-    "write_note", FEED_LIVE,
-    "Two next steps found — a 30-minute intro and a portfolio session.",
-    TS["r1_ask"])
+_j1.think("Two concrete next steps. Both need approval before I save them.",
+          3210, 184, TS["r1_think2"],
+          calls=[("call_2_1", "write_note", PENDING_NOTE_ARGS)])
+R1_GATE_SEQ = _j1.request_approval("call_2_1", "write_note", PENDING_NOTE_ARGS,
+                                   TS["r1_ask"])
 PENDING_NOTE_ID = _j1.effect(R1_GATE_SEQ)
 
 # -- RUN_PENDING_DRAFT: Agent C, waiting on the live draft_reply approval ---
@@ -1020,13 +1129,24 @@ PENDING_NOTE_ID = _j1.effect(R1_GATE_SEQ)
 # created", the only edit path v1 has, so without this item the phone would
 # have to draw an Edit button it had never decoded.
 
+PENDING_DRAFT_ARGS = {
+    "thread_id": T3,
+    "to": ["kamran@northbound.co"],
+    "subject": "Re: Design review — Thursday",
+    "body_text": (
+        "Hi Kamran,\n\nThursday works. I'll bring the composer flows and "
+        "answers to the two open questions from Monday.\n\nJatin"
+    ),
+}
+
 _j7 = Journal(RUN_PENDING_DRAFT)
-_j7.add("run_started", {"trigger_kind": "manual", "trigger_ref": None}, TS["r7_start"])
-_j7.add("llm_response",
-        llm(MODEL_RUN, "tool_use", 1188, 58, "Reading the design review thread."),
-        TS["r7_think"])
-_seq = _j7.open_step("read_thread", READ_T3_ARGS, TS["r7_think"])
-_j7.close_step("read_thread", {
+_j7.start(C_INSTRUCTION,
+          'Run once now, on the thread "Re: Design review — Thursday".',
+          TS["r7_start"])
+_j7.think("Reading the design review thread.", 1188, 58, TS["r7_think"],
+          calls=[("call_1_1", "read_thread", READ_T3_ARGS)])
+_seq = _j7.open_step("call_1_1", "read_thread", READ_T3_ARGS, TS["r7_think"])
+_j7.close_step("call_1_1", "read_thread", {
     "thread_id": T3,
     "subject": ROW_T3["subject"],
     "message_count": 4,
@@ -1036,26 +1156,34 @@ _j7.close_step("read_thread", {
         "body_text": ROW_T3["snippet"],
     },
 }, _seq, TS["r7_read_done"])
-_j7.add("llm_response",
-        llm(MODEL_RUN, "tool_use", 2530, 166,
-            "Kamran needs a time. Asking before I save the draft."),
-        TS["r7_think2"])
-R7_GATE_SEQ = _j7.request_approval(
-    "draft_reply", FEED_EDITABLE,
-    "Draft a reply to Kamran confirming Thursday and listing the two open "
-    "questions.",
-    TS["r7_ask"])
+_j7.think("Kamran needs a time. Asking before I save the draft.", 2530, 166,
+          TS["r7_think2"],
+          calls=[("call_2_1", "draft_reply", PENDING_DRAFT_ARGS)])
+R7_GATE_SEQ = _j7.request_approval("call_2_1", "draft_reply",
+                                   PENDING_DRAFT_ARGS, TS["r7_ask"])
 PENDING_DRAFT_ID = _j7.effect(R7_GATE_SEQ)
 
 # -- RUN_SKIPPED: Agent A on M4, approval skipped ---------------------------
 
+SKIPPED_NOTE_ARGS = {
+    "title": "Halcyon — next steps",
+    "body_md": (
+        "# Halcyon — next steps\n"
+        "\n"
+        "- [ ] 45-minute screen with the design team\n"
+    ),
+    "thread_id": T4,
+}
+
 _j4 = Journal(RUN_SKIPPED)
-_j4.add("run_started", {"trigger_kind": "mail", "trigger_ref": M_T4}, TS["r4_start"])
-_j4.add("llm_response",
-        llm(MODEL_RUN, "tool_use", 1502, 71, "Reading the Halcyon thread."),
-        TS["r4_think"])
-_seq = _j4.open_step("read_thread", READ_T4_ARGS, TS["r4_think"])
-_j4.close_step("read_thread", {
+_j4.start(A_INSTRUCTION,
+          'New mail from talent@halcyon.io on the thread '
+          '"Senior Product Designer — Halcyon".',
+          TS["r4_start"])
+_j4.think("Reading the Halcyon thread.", 1502, 71, TS["r4_think"],
+          calls=[("call_1_1", "read_thread", READ_T4_ARGS)])
+_seq = _j4.open_step("call_1_1", "read_thread", READ_T4_ARGS, TS["r4_think"])
+_j4.close_step("call_1_1", "read_thread", {
     "thread_id": T4,
     "subject": ROW_T4["subject"],
     "message_count": 1,
@@ -1066,25 +1194,38 @@ _j4.close_step("read_thread", {
         "body_text": ROW_T4["snippet"],
     },
 }, _seq, TS["r4_read_done"])
-_j4.add("llm_response",
-        llm(MODEL_RUN, "tool_use", 2044, 118, "One next step. Asking before I save."),
-        TS["r4_think2"])
-R4_GATE_SEQ = _j4.request_approval(
-    "write_note", FEED_SKIPPED,
-    "One next step found — a 45-minute screen with Halcyon.",
-    TS["r4_ask"])
+_j4.think("One next step. Asking before I save.", 2044, 118, TS["r4_think2"],
+          calls=[("call_2_1", "write_note", SKIPPED_NOTE_ARGS)])
+R4_GATE_SEQ = _j4.request_approval("call_2_1", "write_note", SKIPPED_NOTE_ARGS,
+                                   TS["r4_ask"])
 SKIPPED_NOTE_ID = _j4.effect(R4_GATE_SEQ)
-_j4.add("approval_skipped", {"feed_item_id": FEED_SKIPPED}, TS["r4_skip"])
+# The human said no. `Engine::resume` records the decision and ends the run;
+# the gated step never executes, so the note is never written.
+_j4.resolve(R4_GATE_SEQ, "skip", TS["r4_skip"])
+_j4.end("skipped", TS["r4_skip"])
 
 # -- RUN_EXPIRED: Agent A on M6, approval never answered --------------------
 
+EXPIRED_NOTE_ARGS = {
+    "title": "Vale Robotics — next steps",
+    "body_md": (
+        "# Vale Robotics — next steps\n"
+        "\n"
+        "- [ ] Systems interview\n"
+        "- [ ] Paid trial week\n"
+    ),
+    "thread_id": T6,
+}
+
 _j6 = Journal(RUN_EXPIRED)
-_j6.add("run_started", {"trigger_kind": "mail", "trigger_ref": M_T6}, TS["r6_start"])
-_j6.add("llm_response",
-        llm(MODEL_RUN, "tool_use", 1611, 79, "Reading the Vale Robotics thread."),
-        TS["r6_think"])
-_seq = _j6.open_step("read_thread", READ_T6_ARGS, TS["r6_think"])
-_j6.close_step("read_thread", {
+_j6.start(A_INSTRUCTION,
+          'New mail from nadia@valerobotics.com on the thread '
+          '"Design Lead — Vale Robotics".',
+          TS["r6_start"])
+_j6.think("Reading the Vale Robotics thread.", 1611, 79, TS["r6_think"],
+          calls=[("call_1_1", "read_thread", READ_T6_ARGS)])
+_seq = _j6.open_step("call_1_1", "read_thread", READ_T6_ARGS, TS["r6_think"])
+_j6.close_step("call_1_1", "read_thread", {
     "thread_id": T6,
     "subject": ROW_T6["subject"],
     "message_count": 2,
@@ -1095,15 +1236,17 @@ _j6.close_step("read_thread", {
         "body_text": ROW_T6["snippet"],
     },
 }, _seq, TS["r6_read_done"])
-_j6.add("llm_response",
-        llm(MODEL_RUN, "tool_use", 2260, 141, "Two next steps. Asking before I save."),
-        TS["r6_think2"])
-R6_GATE_SEQ = _j6.request_approval(
-    "write_note", FEED_EXPIRED,
-    "Two next steps found — a systems interview and a paid trial week.",
-    TS["r6_ask"])
+_j6.think("Two next steps. Asking before I save.", 2260, 141, TS["r6_think2"],
+          calls=[("call_2_1", "write_note", EXPIRED_NOTE_ARGS)])
+R6_GATE_SEQ = _j6.request_approval("call_2_1", "write_note", EXPIRED_NOTE_ARGS,
+                                   TS["r6_ask"])
 EXPIRED_NOTE_ID = _j6.effect(R6_GATE_SEQ)
-_j6.add("approval_expired", {"feed_item_id": FEED_EXPIRED}, TS["r6_sweep"])
+# The host's hourly sweep found the 7-day deadline passed and delivered
+# `Resolution::Expire`; the engine records it as any other resolution. No
+# `reason` field: `ttl_expired` appears only when the engine's own TTL check
+# converted a late approve, and NADE runs with `approval_ttl = None`.
+_j6.resolve(R6_GATE_SEQ, "expire", TS["r6_sweep"])
+_j6.end("expired", TS["r6_sweep"])
 
 
 RUNS = [
@@ -1166,7 +1309,7 @@ RUNS = [
         "summary": None,
         "error": "Gmail was unavailable, so the thread could not be read.",
         "created_at": TS["r5_start"],
-        "updated_at": TS["r5_failed"],
+        "updated_at": TS["r5_cancel"],
         "journal": _j5.entries,
     },
     {

@@ -11,20 +11,39 @@
       "seq": 1,
       "kind": "run_started",
       "payload": {
-        "trigger_kind": "mail",
-        "trigger_ref": "18f2554a3b2c1d0e"
+        "input": {
+          "system": "Read the thread. Extract every concrete next step the sender proposes -- calls, take-homes, intro meetings, deadlines -- with its date if one is given. Write them to a note titled after the company. If there are no concrete next steps, do nothing.",
+          "messages": [
+            {
+              "role": "user",
+              "text": "New mail from talent@halcyon.io on the thread \"Senior Product Designer — Halcyon\"."
+            }
+          ]
+        },
+        "journal_format": 1
       },
       "created_at": "2026-08-15T18:20:03Z"
     },
     {
       "seq": 2,
-      "kind": "llm_response",
+      "kind": "model_response",
       "payload": {
-        "model": "claude-sonnet-4-5-20250929",
+        "turn": 1,
+        "text": "Reading the Halcyon thread.",
+        "tool_calls": [
+          {
+            "id": "call_1_1",
+            "name": "read_thread",
+            "arguments": {
+              "thread_id": "18f2554a3b2c1d0e"
+            }
+          }
+        ],
         "stop_reason": "tool_use",
-        "tokens_in": 1502,
-        "tokens_out": 71,
-        "text": "Reading the Halcyon thread."
+        "usage": {
+          "input_tokens": 1502,
+          "output_tokens": 71
+        }
       },
       "created_at": "2026-08-15T18:20:06Z"
     },
@@ -33,12 +52,17 @@
       "kind": "step_started",
       "payload": {
         "step_seq": 3,
+        "call_id": "call_1_1",
         "tool": "read_thread",
         "args": {
           "thread_id": "18f2554a3b2c1d0e"
         },
         "args_hash": "sha256:9cd2fad14c44618505d53625bc00d13d92c2417914e7fbc04fe539e5c44cd309",
-        "effect_id": "cb1641dd-a9b7-5a6b-aba4-bef475ba6d8b"
+        "effect_id": "cb1641dd-a9b7-5a6b-aba4-bef475ba6d8b",
+        "attempt": 1,
+        "opened_at": "2026-08-15T18:20:06Z",
+        "tool_fingerprint": "sha256:26844ddc62a6b01f632e3c825a5f756b3f63943980fe3ec531f5928eb976975a",
+        "replay_policy": "retry"
       },
       "created_at": "2026-08-15T18:20:06Z"
     },
@@ -47,6 +71,7 @@
       "kind": "step_done",
       "payload": {
         "step_seq": 3,
+        "call_id": "call_1_1",
         "tool": "read_thread",
         "result": {
           "thread_id": "18f2554a3b2c1d0e",
@@ -59,20 +84,33 @@
             "body_text": "We're building out the design team and your name came up twice this week. Would you be open to a 45-minute screen?"
           }
         },
-        "result_bytes": 329,
+        "is_error": false,
         "truncated": false
       },
       "created_at": "2026-08-15T18:20:08Z"
     },
     {
       "seq": 5,
-      "kind": "llm_response",
+      "kind": "model_response",
       "payload": {
-        "model": "claude-sonnet-4-5-20250929",
+        "turn": 2,
+        "text": "One next step. Asking before I save.",
+        "tool_calls": [
+          {
+            "id": "call_2_1",
+            "name": "write_note",
+            "arguments": {
+              "title": "Halcyon — next steps",
+              "body_md": "# Halcyon — next steps\n\n- [ ] 45-minute screen with the design team\n",
+              "thread_id": "18f2554a3b2c1d0e"
+            }
+          }
+        ],
         "stop_reason": "tool_use",
-        "tokens_in": 2044,
-        "tokens_out": 118,
-        "text": "One next step. Asking before I save."
+        "usage": {
+          "input_tokens": 2044,
+          "output_tokens": 118
+        }
       },
       "created_at": "2026-08-15T18:20:10Z"
     },
@@ -80,18 +118,42 @@
       "seq": 6,
       "kind": "approval_requested",
       "payload": {
+        "step_seq": 6,
+        "call_id": "call_2_1",
         "tool": "write_note",
-        "feed_item_id": "c0000003-0000-4000-8000-000000000003",
+        "args": {
+          "title": "Halcyon — next steps",
+          "body_md": "# Halcyon — next steps\n\n- [ ] 45-minute screen with the design team\n",
+          "thread_id": "18f2554a3b2c1d0e"
+        },
+        "args_hash": "sha256:46835c2ef266d9ef9808a5a0d40343a7fabd777f8e5183ac708ed49ad2796d94",
         "effect_id": "3ce08559-47f9-57d5-a0e2-e880eae828f0",
-        "summary": "One next step found — a 45-minute screen with Halcyon."
+        "requested_at": "2026-08-15T18:20:11Z",
+        "tool_fingerprint": "sha256:404a19c0544523e3060bc0aa6143878b665a733d6d83ddbbb29adba2d6acc225",
+        "replay_policy": "retry"
       },
       "created_at": "2026-08-15T18:20:11Z"
     },
     {
       "seq": 7,
-      "kind": "approval_skipped",
+      "kind": "approval_resolved",
       "payload": {
-        "feed_item_id": "c0000003-0000-4000-8000-000000000003"
+        "step_seq": 6,
+        "decision": "skip",
+        "resolved_at": "2026-08-15T19:41:52Z"
+      },
+      "created_at": "2026-08-15T19:41:52Z"
+    },
+    {
+      "seq": 8,
+      "kind": "run_ended",
+      "payload": {
+        "status": "skipped",
+        "steps": 1,
+        "usage": {
+          "input_tokens": 3546,
+          "output_tokens": 189
+        }
       },
       "created_at": "2026-08-15T19:41:52Z"
     }

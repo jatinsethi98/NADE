@@ -219,11 +219,16 @@ Pill input + circular 1 pt accent button, gap 10, both `align-items: center`.
 | 2a feed (pinned top) | min-height **38**, pad `8 / 15`, 13.5 pt | divider | 38 | `sparkles` 16 | "Ask, search, or describe an agent" |
 | 2a focus / 2b (centred) | min-height **44**, pad `10 / 16`, 14 pt | **accent** | 44 | `arrow.up` 18 | same |
 | 1a (docked bottom) | min-height **40**, pad `9 / 15`, 14 pt | divider | 40 | `arrow.up` 17 | same |
-| 1f thread (bottom bar) | pad `10 / 15`, 13.5 pt, no min-height | divider | 38 | `sparkles` 16 | "Reply, or ask for a draft…" |
+| 1f thread (bottom bar) | pad `10 / 15`, 13.5 pt, no min-height | divider | 38 | `sparkles` 16 | `v1 →` "Ask for a draft or an answer…" |
+
+`v1 →` 1f's placeholder replaces the mockup's "Reply, or ask for a draft…":
+"Reply" promises the one thing §4's own rule forbids — v1 sends nothing — so
+the field must not open with it (deviation 58).
 
 2b's static render pads `11 / 16` with no min-height; 2a's live input is the one
 v1 builds. Submitting from any of them posts `POST /ask` (PLAN §Ask routing); on
-1f the `thread_id` goes with it.
+1f the `thread_id` goes with it, and the response renders as the 1a states in a
+sheet over 1f (P6; deviation 61).
 
 ---
 
@@ -385,8 +390,18 @@ buttons**, which are not pinned.
    margin-bottom 14; the sentence 16 pt line-height **2**; hint italic 12 pt
    `ink60` top 14: "Tap any underline to edit, or open a section below."
 
-   The sentence is **composed, not parsed**:
-   `When {when_span}, {do_span}.` followed by `{trailing}` in `ink60` when
+   The sentence is **composed, not parsed**, and the composition branches on
+   `spec.trigger.kind`:
+
+   - **schedule** — `{When_span}, {do_span}.` with **no "When" prefix**: the
+     span itself opens the sentence, its first letter capitalised. The
+     authority is the mockup's own 1d parent sentence ("Every weekday at 8:00,
+     build today's to-do list…" — see §1d), and "When every weekday at 08:00,
+     …" is not English. This rule resolves what used to be a
+     self-contradiction between this section and §1d (deviation 59).
+   - **everything else** (`mail`, `manual`) — `When {when_span}, {do_span}.`
+
+   Either way the sentence is followed by `{trailing}` in `ink60` when
    non-null. Both spans are underlined 1 pt accent with padding-bottom 2, and
    each is independently tappable. All three fields come from
    `GET /agents/{id}` (`API.md` §5) and are the same ones the `/ask` draft
@@ -900,10 +915,14 @@ an addition the mockup does not contain; the rest are substitutions.
 | 48 | 1k | **+** `PairingView`, assembled from DS parts | §1k gives the row and no pixels beyond it |
 | 49 | all | iPhone portrait only (`TARGETED_DEVICE_FAMILY = 1`) | the design defines one 402 × 874 frame; iPad and landscape had no render and no criterion |
 | 50 | 1c | the Invocation radios are **read-only** | `PATCH /agents/{id}` accepts no trigger kind (`API.md` §5); it is compiled from the sentence, like the filter table beside it, so a writable radio would be a control with nothing behind it |
-| 51 | 1a | `answer` citation rows are **not tappable** | §1a says tapping opens the thread, but `API.md` §4 gives a source `gmail_id` and `subject` "and nothing else" — a *message* id, which `GET /threads/{id}` rejects. Revisit at P6 when `/ask` goes live |
+| 51 | 1a | `answer` citation rows are **not tappable** | §1a says tapping opens the thread, but `API.md` §4 gives a source `gmail_id` and `subject` "and nothing else" — a *message* id, which `GET /threads/{id}` rejects. **Closure scheduled**: PLAN P6 adds `thread_id` to `done.sources` (fixture-first at P6); the rows become tappable then |
 | 52 | 1a | the draft card's spans edit **locally**, before saving | the card is pre-save, so there is no agent id to `PATCH`; the recomposed sentence is what `POST /agents` sends, which is what makes the lead line's "Tap anything underlined" true |
 | 53 | 2a | `{new_count} NEW` renders at zero too | §2a's header is a fixed row; hiding it moved the date's baseline the moment the last approval was answered |
 | 54 | 2a | the `edit` button takes the **approve** action | PLAN §Approval semantics: "approve creates/updates the draft; `PATCH /drafts/{id}` edits it after". There is no pre-approval edit flow in v1 and no drafts surface until P7, so Edit saves and the editing lands later |
 | 55 | 2a | pull-down ⇄ swipe-up is a **tap** on the grabber | §2a lists the drag as P7 "time-allowing"; both states and the transition ship now, the gesture does not |
 | 56 | 1f | **+** "View original" toggle, and attachments are tappable | PLAN P3's iOS line. The WKWebView is locked: no JS, CSP `default-src 'none'` with `img-src nade-inline:` and no `http(s):` source of any kind, link previews off, non-persistent store, and every navigation but the first `about:` load cancelled |
 | 57 | 1f | inline images load over a private `nade-inline:` scheme | this is what actually closes 47. The server rewrites `cid:` to a relative `/v1/messages/…/attachments/…` before the client sees it, so an `img-src cid:` allowance matched **nothing** and the relative URL resolved against `about:blank` — every inline image was a broken box. `WKWebView` cannot attach a bearer to a subresource, so a `WKURLSchemeHandler` fetches the bytes through the authenticated client and sniffs the type from the bytes rather than trusting the message |
+| 58 | 1f | ask-bar placeholder → "Ask for a draft or an answer…" | the mockup's "Reply, or ask for a draft…" promises replying, which §4's own rule forbids for v1 (no outbound actions) |
+| 59 | 1c/1d | schedule-triggered agents compose `{When_span}, {do_span}.` with **no "When" prefix**, span capitalised | the mockup's 1d parent sentence ("Every weekday at 8:00, build…") is the authority; §1c's unconditional "When {when_span}, …" contradicted §1d, and "When every weekday at 08:00" is not English. Mail/manual agents keep `When {when_span}, {do_span}.` |
+| 60 | 2a/1f | **+** minimal draft sheet (P7): editable `body_text` over `PATCH /drafts/{id}`, from the feed card's Edit and the thread agent card | the mockup draws no draft editor, yet Edit = "approve, then edit the draft" is v1's only edit path — without a surface it dead-ends |
+| 61 | 1f | **+** thread-scoped ask renders the 1a states in a sheet over 1f (P6) | the mockup gives 1f an ask bar and no response surface; the 1a states already exist, so they are reused rather than a new vocabulary invented |

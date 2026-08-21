@@ -17,6 +17,32 @@ Draft 3 folds in a third adversarial review (findings C1–C10, appendix) and tw
 Green at `8b05de1`: 785 Rust tests, 258 iOS unit, 46 iOS UI, each twice
 consecutively. 38 screenshots in `docs/screens/`, all distinct by hash.
 
+**2026-08-21 architecture checkpoint.** Three corrections landed before P4
+opened. The multi-account **resolution layer** is in: accounts are
+device-bound, and quota buckets, the triage scheduler, webhook routing and
+settings all resolve per account — v1 still ships **one mailbox per device**;
+what changed is that nothing assumes a singleton anymore. The **journal
+contract was rewritten to the SDK's own vocabulary** (`API.md` §6.1: the ten
+`journal.rs` kinds, payloads verbatim, engine as the journal's only author —
+the previous §6.1 described entries no engine would ever write and the P5
+approve tx would have appended a kind SDK replay refuses as corrupt). And the
+**P4–P8 phase lists below were completed** with the work other documents
+already assigned them — the Anthropic adapter, the `llm_calls` ledger,
+`/settings` and the P7 screens, the P6 `done.sources.thread_id` fix — so no
+lane discovers its scope mid-phase.
+
+A Codex cross-model review of the finished diff returned nine findings; seven
+were folded — a persisted `gmail_tokens.generation` so a stale refresh cannot
+undo a fresh re-consent (migration 0004, D49), revocation checked inside the
+consent tx, the deviceless dev-consent guard, whole-second engine stamps
+(`Entry::new`), `validate.py` forbidding `approval_requested.expires_at`, the
+iOS stale-detail clear in `observe(id:)`, and the retired singleton language in
+these docs — and two rejected: byte-identical 409 page copy (the new sentence
+states the new rule) and pre-computing real tool fingerprints (P4 owns that,
+named below). Checkpoint gates: **800** Rust tests and **334 + 46** iOS tests,
+each green twice consecutively; `validate.py` green twice. The iOS perf pass
+of the same checkpoint is D98–D105.
+
 ## Caveats — read before you test
 
 - **The Ask tab shows fixtures, not your mail.** 2a, 1a, 1b, 1c and 1d are
@@ -52,7 +78,7 @@ consecutively. 38 screenshots in `docs/screens/`, all distinct by hash.
 3. A task is done when its acceptance command passes twice consecutively (flake check) and the checklist is committed next to the code (`// EDGE:` comments or a test per case).
 4. Scope discipline: build to the testable level, no further. Dev caps below are law.
 
-**Dev caps (config, enforced in code):** sync window `newer_than:30d`, `MAX_SYNC_MESSAGES=2000`, triage ≤20 msgs/agent/day, LLM spend ceiling $1/day default, run `max_steps=12`, per-run token budget 50k.
+**Dev caps (config, enforced in code):** sync window `newer_than:30d`, `MAX_SYNC_MESSAGES=2000`, triage ≤20 msgs/agent/day, LLM spend ceiling $1/day default, run `max_steps=12`, per-run token budget 50k. The spend ceiling and the triage cap are **per account** — they read the per-account `llm_calls` ledger (P4), not a process-wide counter.
 
 ---
 
@@ -72,11 +98,11 @@ v1 takes **no outbound actions**. Agents observe, search, take notes, and prepar
 | Notes tab, agent-written notes (1h/1i) | **Live read-only**: list + markdown detail from `GET /notes` (agents write via `write_note`); no editing | Post-v1 editor |
 | Calendar tab (1j) | Stub. **No endpoint exists**; the tab renders `NADE/Fixtures/calendar.json`, bundled in the app. "Add event" hidden | Post-v1 |
 | Schedule sheet (1d) has no time or timezone control | v1 **adds an "At" time row** — the model carries `at` and the parent sentence renders "at 8:00", so the mockup simply has a gap. Timezone is captured from the device; still no control | Post-v1 tz picker |
-| Notes rows show three metadata shapes and a gold rule that means "selected" in the live mockup | One shape, and the gold rule means **an agent edit you have not opened** — which is what the mockup's own caption says. `GET /notes` gained `agent_name` and `unread` to make it renderable | — |
+| Notes rows show four metadata shapes and a gold rule that means "selected" in the live mockup | One shape, and the gold rule means **an agent edit you have not opened** — which is what the mockup's own caption says. `GET /notes` gained `agent_name` and `unread` to make it renderable | — |
 | Settings shows a global approval default and a Run log with no API behind them | `GET/PATCH /settings` and `GET /runs` added | — |
 | Thread footer reads "Filed in {mailbox} · {account}" with no source | `GET /threads/{id}` gained `mailbox_name` and `account_email` | — |
 | Settings footer: "mail stays on device between runs" | **False for v1.** Replaced by the server-supplied `disclosure` string, so the honest sentence cannot drift from what the server does | Permanent |
-| Tools: Notion, Slack, Web (1c) | v1 tools are mail-internal: `search_mail`, `read_thread`, `write_note`, `draft_reply`. Builder shows only real tools | Post-v1 integrations |
+| Tools: Notion, Slack, Web access, Calendar (1c) | v1 tools are mail-internal: `search_mail`, `read_thread`, `write_note`, `draft_reply`. Builder shows only real tools | Post-v1 integrations |
 | "Approve" forwards/sends (2a, 1f) | Approve confirms **local** effects (save draft / write note). Card copy says what happens: "Save draft", never "Send" | Post-v1 send upgrade |
 | Lucide icons (DS) | SF Symbols, nearest glyph per icon | Recorded deviation; swap pass post-v1 |
 | Cormorant Garamond + Lora via Google CSS | Same faces, OFL TTFs downloaded into the repo at P1 and bundled | Permanent |
@@ -85,22 +111,22 @@ v1 takes **no outbound actions**. Agents observe, search, take notes, and prepar
 
 - Server startup prints a one-time 6-digit pairing code (also `just pair` reprints). `POST /v1/auth/pair {code, device_name}` → `{token}`. Code is single-use, 10-min TTL. Tokens are opaque 32-byte, hashed at rest, revocable (`devices` row).
 - Dev shortcut: `NADE_TOKEN` env accepted when `NADE_ENV=dev`.
-- Gmail OAuth (web client) uses **PKCE + state** via the `oauth2` crate; the callback binds the resulting Gmail account to the single `accounts` row.
+- Gmail OAuth (web client) uses **PKCE + state** via the `oauth2` crate; the callback upserts the Gmail account's `accounts` row and **binds the initiating device to it** (`devices.account_id`). One mailbox per device; a bound device is refused a different mailbox.
 
 ### Approval semantics (atomic, fetch-through-session)
 
 - APNs payload carries **only** `feed_item_id` + alert text. No capability tokens in push.
 - Deep link: `GET /v1/feed/{id}` (authenticated) returns the item incl. `approval_token` while status=`new`.
-- `POST /feed/{id}/approve {approval_token}` runs ONE transaction: validate+consume token → run `pending_approval→queued` with approved `pending_action` → feed item `resolved` → audit row → job enqueued. 409 `token_consumed` on replay (client treats as success), 410 when expired.
+- `POST /feed/{id}/approve {approval_token}` runs ONE transaction, five writes: validate+consume token → run `pending_approval→queued` with approved `pending_action` → feed item `resolved` (+`resolved_note`) → audit row → job enqueued. **The tx never touches `run_journal`** — the journal's only author is the engine (API.md §6.1), and `approval_resolved` lands when the resume job runs `Engine::resume`. 409 `token_consumed` on replay (client treats as success), 410 when expired.
 - Edit path (design's Edit button): approve creates/updates the draft; `PATCH /v1/drafts/{id}` edits it after; thread card links to the draft. No separate pre-approval edit flow in v1.
 
 ### Schedule model (was next_run_at only)
 
-`agents.schedule` jsonb: `{"freq":"day"|"week"|"month","interval":1,"byweekday":["mon",…],"at":"08:00","tz":"America/Phoenix","ends":{"kind":"never"|"on"|"after","date"?,"count"?},"runs_done":0}`. `next_run_at` is derived: computed with `chrono-tz` in the schedule's tz, wall-clock semantics (DST: keep local time; skipped/ambiguous instants roll to next valid). Recomputed after each run; `ends` enforced (`after` counts `runs_done`, then agent→`paused`). API exposes the jsonb verbatim; the 1d sheet maps 1:1.
+`agents.schedule` jsonb: `{"freq":"day"|"week"|"month","interval":1,"byweekday":["mon",…],"bymonthday":1,"at":"08:00","tz":"America/Phoenix","ends":{"kind":"never"|"on"|"after","date"?,"count"?},"runs_done":0}`. `bymonthday` is freq=month only, capped at 28 so a monthly schedule never silently skips February, `-1` = the actual last day; semantics in API.md §5.2. `next_run_at` is derived: computed with `chrono-tz` in the schedule's tz, wall-clock semantics (DST: keep local time; skipped/ambiguous instants roll to next valid). Recomputed after each run; `ends` enforced (`after` counts `runs_done`, then agent→`paused`). API exposes the jsonb verbatim; the 1d sheet maps 1:1.
 
 ### Ask routing (one field, three intents)
 
-Everything from the unified field goes to `POST /v1/ask`. Server classifies (heuristics first: quoted strings / `from:` → search; imperative "when…"/"every…" → agent; else cheap model) and streams a typed SSE session: first event `route {"kind":"answer"|"results"|"agent_draft"}`, then `token`/`done` for answers, `results {threads:[…]}` + `done` for searches, or `draft {name, nl_definition, spec_preview}` + `done` for agent drafts — client renders the 1a states accordingly; saving the draft POSTs `/v1/agents`. `GET /v1/search` remains as the whole-mailbox search endpoint. **It has no
+Everything from the unified field goes to `POST /v1/ask`. Server classifies (heuristics first: quoted strings / `from:` → search; imperative "when…"/"every…" → agent; else cheap model) and streams a typed SSE session: first event `route {"kind":"answer"|"results"|"agent_draft"}`, then `token`/`done` for answers, `results {threads:[…]}` + `done` for searches, or `draft {name, nl_definition, when_span, do_span, trailing, tool, approval_required, status}` + `done` for agent drafts (API.md §4 — the two spans are separate fields because the design underlines exactly them) — client renders the 1a states accordingly; saving the draft POSTs `/v1/agents`. `GET /v1/search` remains as the whole-mailbox search endpoint. **It has no
 screen in v1**: `DESIGN.md` §1e draws no search field on the mail list, and the
 mockup's only search pill is 1h Notes'. The sentence that used to promise "the
 Mail tab's plain search box" described a screen that does not exist in the
@@ -172,16 +198,18 @@ system labels become mailboxes and under what display names.
 NADE/
 ├── NADE.xcodeproj, NADE/          # iOS app
 ├── backend/                       # Cargo workspace
-│   ├── crates/nade-agent-sdk/     # generic: llm.rs, adapters/, tool.rs, journal.rs,
-│   │                              #   engine.rs, pause.rs, journal_pg.rs (feature "postgres")
+│   ├── crates/nade-agent-sdk/     # generic: llm.rs, tool.rs, journal.rs, engine.rs,
+│   │                              #   ids.rs — no HTTP, no DB, no runtime (its own manifesto)
 │   └── crates/nade-server/        # axum: api/, gmail/, mail/parse.rs, sync/,
-│                                  #   agents/{compile,triggers,tools/}, runtime/, jobs.rs, push.rs, migrations/
+│                                  #   agents/{compile,triggers,tools/}, runtime/ (journal.rs =
+│                                  #   the Journal impl over run_journal), llm/ (anthropic.rs),
+│                                  #   jobs.rs, push.rs, migrations/
 ├── docs/PLAN.md, docs/contract/   # this plan + shared fixtures
 ├── docs/MockUps/                  # design source (Email App.dc.html + Classical DS)
 └── docker-compose.yml             # P8 only; dev uses postgresql_embedded
 ```
 
-SDK rule: compiles with zero NADE types. Engine caps per run: `max_steps`, token budget; breach → `failed` + feed item.
+SDK rule: compiles with zero NADE types, and equally with zero infrastructure — no HTTP client, no database, no runtime. The Postgres `Journal` driver and the LLM adapters are therefore **host code in `nade-server`** (`runtime/journal.rs`, `llm/anthropic.rs`), not SDK features: a `--features postgres` flag on the SDK was the exact per-crate feature trap D27 documents. Engine caps per run: `max_steps`, token budget; breach → `failed` + feed item.
 
 ### Postgres schema
 
@@ -212,7 +240,7 @@ Two rules the DDL cannot express, so they live here:
 
 ### Exactly-once side effects (★ new)
 
-Journal-before-effect protocol: (1) append `step_started {seq, tool, args_hash}` — committed; (2) execute the tool; effect rows use deterministic ids `uuid5(run_id‖seq)` so re-execution upserts; (3) append `step_done {seq, result}`. Resume: skip seqs with `step_done`; re-execute `step_started`-only seqs (safe — upsert). Long steps heartbeat the job lease; the reaper reclaims only expired leases, never live runs. Every tool result is size-capped before journaling.
+Journal-before-effect protocol: (1) append `step_started {step_seq, tool, args, args_hash, effect_id, …}` — committed; (2) execute the tool; effect rows use deterministic ids `uuid5(run_id‖step_seq)` so re-execution upserts; (3) append `step_done {step_seq, result, is_error, …}`. Resume: skip steps with `step_done`; re-execute `step_started`-only steps (safe — upsert). Long steps heartbeat the job lease; the reaper reclaims only expired leases, never live runs. Every tool result is size-capped before journaling.
 
 ### Gmail sync (quota-correct, test-scoped)
 
@@ -226,7 +254,7 @@ fallback.
 Quota: 250 units/user/s; `messages.get`=5 units → ceiling 50 gets/s. Token bucket debits true cost; 429/403 → exponential backoff 1→60 s.
 
 1. **OAuth** `oauth2` crate, PKCE + state; persist every refresh (rotation). `invalid_grant` → `needs_reauth`, pause jobs, feed + push alert; recover via `/auth/gmail/start`.
-2. **Initial sync** `getProfile` historyId first (overlap, not gap). `messages.list q="newer_than:30d"`, cap `MAX_SYNC_MESSAGES=2000`; batch `format=raw` 45/batch ≤1/s; `mail-parser` (RFC 2047, QP, charsets). Parse failure → metadata row + audit; never abort. **~1–2 min for a 30-day window.**
+2. **Initial sync** `getProfile` historyId first (overlap, not gap). `messages.list q="newer_than:30d"`, cap `MAX_SYNC_MESSAGES=2000`; batch `format=raw` 10/batch ≤1/s (the 45/batch figure predated the live-tested 10); `mail-parser` (RFC 2047, QP, charsets). Parse failure → metadata row + audit; never abort. **~3.5 min for a 30-day window** (2000 msgs ÷ 10/batch × ~1 s/batch pacer).
 3. **Incremental** webhook → `history.list` all 4 historyTypes; per-page transaction; advance per page; enqueue `triage_message` per add. Ingest never calls an LLM.
 4. **404 recovery** re-run 30-day sync + reconciliation sweep (ids diff → deletes; per-label membership rebuild).
 5. **Watch** daily renewal job; polling fallback if no webhook 30 min (covers dev without tunnel).
@@ -265,7 +293,7 @@ answered everything older with a silent empty result.
 
 ### iOS app
 
-MVVM + `@Observable`, iOS 17 target, GRDB 7 pinned, MainActor-default isolation with `Sendable` records. No Xcode GUI steps: pbxproj/Info.plist/entitlements/xcscheme edited as files, verified by `xcodebuild`. `NADE_BASE_URL`/`NADE_TOKEN` via launch env; Settings overrides into Keychain (pairing-code entry screen ships in Settings).
+MVVM + `@Observable`, iOS 18 target, GRDB 7 pinned, MainActor-default isolation with `Sendable` records. No Xcode GUI steps: pbxproj/Info.plist/entitlements/xcscheme edited as files, verified by `xcodebuild`. `NADE_BASE_URL`/`NADE_TOKEN` via launch env; Settings overrides into Keychain (pairing-code entry screen ships in Settings).
 
 GRDB mirrors the wire: `thread` per contract; `thread_mailbox` join; cursors in `mailbox_sync`; `feed_item` enums verbatim; `pending_action` outbox (409=success). `note`/`draft` tables mirror their endpoints. No local FTS.
 
@@ -306,7 +334,7 @@ backing already existed. What moved, and what deliberately did **not**:
 |---|---|
 | HTTP client, error envelope, `Retry-After`, `409 needs_reauth` | Feed, approve/skip round-trip, outbox — *built* at P3 against fixtures, *live* at **P5** |
 | Pairing + Keychain + server URL | Home feed, Ask states, agents, schedule sheet (**P3**) |
-| 1k **CONNECTION** and **ACCOUNT** only | 1k **AGENTS**, **READING**, `disclosure` footer (**P7** — no `/settings` or `/runs` route exists) |
+| 1k **CONNECTION** and **ACCOUNT** only | 1k **AGENTS**, **READING**, `disclosure` footer (**P7**; `/runs` lands at P4, `/settings` at P7) |
 | The Gmail link flow (`POST /auth/gmail/link`) | Attachments proxy, "View original" WKWebView (**P3**) |
 | Offline degradation + the unreachable-host XCUITest | Push, SSE, `/ask` — including 1f's ask bar (**P6**) |
 
@@ -388,30 +416,80 @@ gives it one.
   accepts no trigger kind).
 
   **1k's remaining sections are P7, not P3.** AGENTS, READING and the served
-  `disclosure` footer need `GET/PATCH /settings` and `GET /runs`, and neither
-  route exists before P7. The footer especially: its point is that the sentence
-  is server-supplied so it cannot drift, which a bundled copy would defeat.
+  `disclosure` footer need `GET/PATCH /settings` and `GET /runs` — `/runs`
+  lands at P4, `/settings` at P7, and the screens that consume both are P7's.
+  The footer especially: its point is that the sentence is server-supplied so
+  it cannot drift, which a bundled copy would defeat.
 
-**P4 — First runs. ← next. [sdk] → [backend] (gate: P1 [sdk] green)**
-- [sdk] Postgres journal driver; kill-mid-run resume test; deterministic-id upsert test (kill between execute and step_done → no duplicate note). ✓ `cargo test --features postgres` green.
-- [backend] Tools ×4, compile-at-save, manual trigger, runs API, notes/drafts endpoints + thread join, **spend ceiling + per-agent caps enforced from this phase**. ✓ POST /agents compiles a real sentence; run journal shows ≥1 tool call; draft in GET /drafts; PATCH edits it; ceiling test trips.
+**P4 — First runs. ← next. [backend] (gate: P1 [sdk] green)**
+
+The SDK stays as it is — no HTTP, no DB, no runtime, per its own manifesto.
+Everything below is host code in `nade-server`; every line item is named here
+so none is discovered mid-lane.
+
+- [backend] `runtime/journal.rs`: the `Journal` impl over `run_journal` —
+  append-only, durable before `Ok`, `created_at` stored byte-faithfully, never
+  the database's clock — tested with the existing embedded-PG harness.
+  Kill-mid-run resume test; deterministic-id upsert test (kill between execute
+  and step_done → no duplicate note).
+- [backend] `llm/anthropic.rs`: the Anthropic Messages `Llm` adapter, plus the
+  env plumbing — `ANTHROPIC_API_KEY`, `NADE_LLM_MODEL`,
+  `NADE_LLM_COMPILE_MODEL` into `config::ENV_VARS` **and** `.env.example`
+  (the config test fails in both directions otherwise).
+- [backend] `llm_calls` spend ledger, keyed **per account**: ts, purpose
+  `run|compile|triage|ask`, `agent_id` (nullable), model, tokens in/out,
+  cost_usd. The $1/day ceiling and the ≤20/agent/day triage cap read this
+  table. A mid-run breach → `Engine::cancel` loud-fail
+  (`run_ended {reason.cap: "cancelled"}`) + a feed `info` item — never the job
+  retry path, which would re-spend.
+- [backend] Engine host config: **`approval_ttl = None`** — the SDK defaults
+  to 7 days and must be overridden. The host's hourly sweep and the approve
+  tx's 410 own expiry (API.md §7); double enforcement would expire a timely
+  approval whose resume job lagged.
+- [backend] Pause plumbing: persist the full `ApprovalRequest` into
+  `agent_runs.pending_action`; when P5 raises the feed item, `step_seq` + the
+  effect id go into `feed_items.data` — the approve path needs `step_seq` to
+  build `Resolution::Approve`.
+- [backend] Tools ×4, compile-at-save, manual trigger, runs API (`GET /runs` +
+  `GET /runs/{id}` serving the journal verbatim, `agent_runs.summary` served —
+  the column lands in migration 0003), notes/drafts endpoints + thread join
+  (`notes.unread` served, also 0003; flips false on `GET /notes/{id}`),
+  **run-fixture fingerprints made real** (`docs/contract/run*.json` carry
+  stand-in `tool_fingerprint`s the generator admits no build reproduces — once
+  the four tools exist, compute the real hashes via the SDK's
+  `tool_fingerprint` and regenerate, fixture-first),
+  **spend ceiling + per-agent caps enforced from this phase**.
+- [backend] `DELETE /agents/{id}` cancels non-terminal runs
+  (`Engine::cancel`) before the delete: the FK cascade removes `run_journal`
+  with the agent, and a live run must not have its log yanked from under it
+  (API.md §5 — cancel, don't orphan).
+- [backend] Contract completeness: a test asserts every fixture in
+  `docs/contract/` is referenced by some contract test, with an allowlist for
+  request-body and SSE fixtures.
+- ✓ POST /agents compiles a real sentence; a run journal shows ≥1 tool call in
+  the SDK vocabulary (API.md §6.1); draft in GET /drafts; PATCH edits it;
+  ceiling test trips; kill-mid-run resumes. The gate is `cargo test` at the
+  **workspace root**, green twice (D27 — a per-crate feature gate is the exact
+  trap it documents).
 
 **P5 — The loop closes. [backend] then GATE then [ios] live.**
-- [backend] Mail triggers + capped triage, approval pause (server token, 7-day expiry cron), feed producer, **atomic approve tx**, GET /feed/{id}, audit, 10 injection red-team fixtures in CI. ✓ H8 email → feed item with token; approve resumes to done in ONE tx (test asserts all four writes or none); replayed webhook → no second run; replay approve → 409; expiry flips; red-team fixtures all end pending_approval or no-op.
+- [backend] Mail triggers + capped triage, approval pause (server token, 7-day expiry cron), feed producer, **atomic approve tx**, GET /feed/{id}, **POST /feed/seen** (the built app already calls it), audit, 10 injection red-team fixtures in CI. ✓ H8 email → feed item with token; approve → queued in ONE tx and the resume job carries it to done (test asserts all **five** writes land or none, **and that the tx leaves `run_journal` untouched** — `approval_resolved` arrives only via `Engine::resume`); replayed webhook → no second run; replay approve → 409; expiry flips; red-team fixtures all end pending_approval or no-op.
 - **GATE** then [ios] live against local backend: **feed** live, approve/skip
   round-trip, outbox replay. ✓ XCUITest e2e green. (Mailboxes and threads went
   live at P2; this gate is now about the approval loop, not first contact.)
 
 **P6 — Ask + push. [backend] ∥ [ios], join.**
-- [backend] /ask with route classification + retrieval spec; APNs sender (slim payload; feature-flagged without H9); push on new approval items. ✓ `curl -N /ask` streams route→…→done for all three intents (fixture queries); `cargo test ask::` green.
-- [ios] SSE client incl. route event; Ask live (answer/results/draft states); APPROVAL category fetches via GET /feed/{id} then approves; device registration. ✓ SSE tests green; `simctl push` banner → APPROVE → run status flips.
+- [backend] /ask with route classification + retrieval spec. Classifier = heuristics + `route_hint`; **ambiguous → `answer`** (a cheap-model fallback is optional and may be cut). **`done.sources` gains `thread_id`** — fixture-first at P6 — so 1a's citation rows become tappable; closes DESIGN deviation 51. **POST /devices** + the APNs payload constant; push on new approval items, with the **ES256 sender deferred behind the existing feature flag until H9 is decided** — simulator acceptance is `simctl push` and needs no key. ✓ `curl -N /ask` streams route→…→done for all three intents (fixture queries); `cargo test ask::` green.
+- [ios] SSE client incl. route event; Ask live (answer/results/draft states); **thread-scoped ask from 1f renders the 1a states in a sheet over 1f** — the response surface DESIGN never specified (deviation 61); APPROVAL category fetches via GET /feed/{id} then approves; device registration (POST /devices). ✓ SSE tests green; `simctl push` banner → APPROVE → run status flips.
 
 **P7 — Schedules + Notes + polish. [backend] ∥ [ios]**
-- [backend] Schedule jsonb → next_run_at (chrono-tz, DST rules), ends enforcement, waiting/wake_at timers. ✓ +2-min agent runs exactly once (test clock); DST boundary test (skipped hour) passes; `after 2` pauses after 2 runs.
-- [ios] Notes tab live read-only (list + markdown detail), schedule sheet wired to schedule jsonb, focus pull-down (2b) time-allowing, cut-list copy audit (no UI promises v1 can't keep). ✓ build test green; screenshot set complete vs design renders.
+- [backend] Schedule jsonb → next_run_at (chrono-tz, DST rules), ends enforcement, waiting/wake_at timers; **GET/PATCH /settings, per account** — the singleton `settings` table is gone in migration 0003. ✓ +2-min agent runs exactly once (test clock); DST boundary test (skipped hour) passes; `after 2` pauses after 2 runs.
+- [ios] Notes tab live read-only (list + markdown detail); schedule sheet wired to schedule jsonb; **1k's AGENTS + READING sections and the served `disclosure` footer**; **the Run log screen** over `GET /runs` (the route lands at P4; the screen is here); **the Calendar tab stub** rendering `NADE/Fixtures/calendar.json` per the parity map — promised there and, until now, scheduled nowhere; **a minimal draft sheet** — editable `body_text` over `PATCH /drafts/{id}`, presented from the feed card's Edit and from the thread agent card (v1's only edit path otherwise dead-ends with no surface; DESIGN deviation 60); focus pull-down (2b) time-allowing; cut-list copy audit (no UI promises v1 can't keep). ✓ build test green; screenshot set complete vs design renders.
 
 **P8 — Deploy. [backend], needs H10.**
 - Docker image + compose, VPS, Caddy TLS, prod push subscription, phone re-consent, nightly pg_dump + restore test; optional `nade backfill --all`. ✓ https healthz; H8 → feed ≤60 s on prod; restore rebuilds scratch DB.
+- **Prod starts empty.** Re-pair, re-consent, resync — mail is re-derivable from Gmail, so nothing migrates. `pg_dump` agents/notes/drafts across from the dev box if wanted; that is the whole data story.
+- The **sqlx 0.8→0.9 collapse** belongs here: it removes the duplicate dependency tree, which starts to matter exactly when cold builds do.
 
 **Post-v1:** send scopes + CASA · multi-account · smart mailboxes · OTP feed kind · Notes editing · Calendar · external tools (Notion/Slack) · `http_fetch` guarded · Lucide swap · crates.io publish · full 63k backfill by default · inline cid images.
 
@@ -432,6 +510,10 @@ account — nothing panics, `body_text` is never empty — with the messages
 gitignored. `docs/PARSER.md` records the validated recipe and the three traps a
 probe already found (synthesised `body_html`, destroyed 8-bit headers,
 last-wins duplicate `Subject`).
+
+**`nade-gmail-sim` is frozen**: no new sim endpoints, no new sim features. A
+new fake uses wiremock unless statefulness is the very thing under test; the
+sim's forward value is the P4 `search_mail` harness and the P6 ask harness.
 
 Engine: scripted Llm — pause/resume/kill/replay/caps/deterministic-id upserts.
 Sync: wiremock incl. 429, rotation, history 404. Contract: generated fixtures
@@ -463,7 +545,7 @@ Rounds: B (backend review, 15), I (iOS review, 15) — all fixed in v2, disposit
 | C2 | BLOCKER | Compliance wording fixed: v1 = "no outbound actions", server storage + LLM processing disclosed in-app; CASA applies to readonly at ANY public distribution, stated in §Product contract. |
 | C3 | BLOCKER | Auth bootstrap designed: one-time pairing code → bearer (hashed, revocable), dev env shortcut, PKCE + state on Gmail OAuth. |
 | C4 | BLOCKER | Exactly-once: journal-before-effect, deterministic uuid5(run_id‖seq) effect ids (upsert on replay), lease heartbeats, reaper reclaims only expired leases; kill-between-execute-and-journal test required (P4). |
-| C5 | MAJOR | Approval completed: GET /feed/{id} deep link, atomic 4-write approve tx (tested), PATCH /drafts for Edit, APNs payload slimmed to feed_item_id only — no capabilities in push. |
+| C5 | MAJOR | Approval completed: GET /feed/{id} deep link, atomic approve tx (tested; write list finalised 2026-08-21 as five writes with `run_journal` excluded — §Approval semantics), PATCH /drafts for Edit, APNs payload slimmed to feed_item_id only — no capabilities in push. |
 | C6 | MAJOR | Schedule model: persisted jsonb recurrence (freq/interval/byweekday/at/tz/ends), chrono-tz wall-clock DST rules, ends enforcement, API exposure; DST boundary test in P7. |
 | C7 | MAJOR | Ask routing contract: route SSE event with three kinds, heuristics-then-cheap-model classification, client state mapping; /search stays for Mail tab. |
 | C8 | MAJOR | Design adherence made executable: mockups live at docs/MockUps (verified), ios-plan folded into this file, OFL TTFs downloaded into repo at P1 with font-load test; SF-Symbols-for-Lucide recorded as deviation in the parity map. |

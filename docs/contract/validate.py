@@ -80,10 +80,6 @@ def args_hash(args):
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def byte_size(value):
-    return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-
-
 # ==========================================================================
 # 2. Primitive formats (API.md section 0)
 # ==========================================================================
@@ -100,6 +96,7 @@ CURSOR_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 BEARER_RE = re.compile(r"^nade_[0-9a-f]{64}$")
 HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 def parse_ts(value):
@@ -124,12 +121,27 @@ def NUL(spec):
     return ("null", spec)
 
 
+def OPT(spec):
+    """A key the writer omits when absent, never sets to null.
+
+    Journal payloads only: they are the SDK engine's own serialization,
+    byte-faithful, with serde `skip_serializing_if` on optional fields -- the
+    one place API.md section 0's "nothing is ever omitted" rule does not
+    apply (API.md section 6.1). Everywhere else, absence stays a violation.
+    """
+    return ("opt", spec)
+
+
 def ARR(spec):
     return ("arr", spec)
 
 
 def OBJ(pairs):
-    """Exact key set: a missing key and an extra key are both violations."""
+    """Exact key set: a missing key and an extra key are both violations.
+
+    A key whose spec is wrapped in `OPT` may be absent; when present it is
+    checked against the wrapped spec.
+    """
     return ("obj", pairs)
 
 
@@ -150,6 +162,8 @@ def check_shape(value, spec, path):
         if value is None:
             return
         check_shape(value, spec[1], path)
+    elif kind == "opt":
+        check_shape(value, spec[1], path)
     elif kind == "arr":
         if not isinstance(value, list):
             fail(path, "expected an array, got %s" % type_name(value))
@@ -161,8 +175,10 @@ def check_shape(value, spec, path):
             fail(path, "expected an object, got %s" % type_name(value))
             return
         expected = set(spec[1].keys())
+        required = set(key for key, inner in spec[1].items()
+                       if not (isinstance(inner, tuple) and inner[0] == "opt"))
         actual = set(value.keys())
-        for key in sorted(expected - actual):
+        for key in sorted(required - actual):
             fail(path, "missing field %r" % key)
         for key in sorted(actual - expected):
             fail(path, "unexpected field %r (API.md does not declare it)" % key)
@@ -236,6 +252,9 @@ def check_primitive(value, kind, path):
     elif kind == "hhmm":
         if not isinstance(value, str) or not HHMM_RE.match(value):
             fail(path, "%r is not HH:MM" % (value,))
+    elif kind == "sha256":
+        if not isinstance(value, str) or not SHA256_RE.match(value):
+            fail(path, "%r is not sha256:<64 hex>" % (value,))
     elif kind == "date":
         if not isinstance(value, str) or not DATE_RE.match(value):
             fail(path, "%r is not YYYY-MM-DD" % (value,))
@@ -426,16 +445,59 @@ RUN_ROW = OBJ({
     "updated_at": "ts",
 })
 
-# API.md section 6.1, one row per journal kind. The payload key set is exact:
-# an extra key here is a shape change nobody agreed to.
+# API.md section 6.1, one row per journal kind. The vocabulary and every
+# payload shape are the SDK engine's own, transcribed from
+# `backend/crates/nade-agent-sdk/src/journal.rs` -- `run_journal` is written
+# ONLY by the engine, through the host's Journal driver, so a host-invented
+# kind or field here is a contract violation. The key set is exact; `OPT`
+# marks the fields serde omits when absent, which is the one licensed
+# exception to "nothing is ever omitted".
+
+# The statuses `run_ended` can record: `RunStatus::is_terminal`. `queued` and
+# `running` are host states a journal never carries.
+TERMINAL_RUN_STATUSES = ["done", "failed", "skipped", "expired"]
+
+TOKEN_USAGE = OBJ({"input_tokens": "int", "output_tokens": "int"})
+
+# `nade_agent_sdk::ToolCall`, as the engine journals it: ids already
+# normalised, `context` absent (it is attached at dispatch, after journaling).
+TOOL_CALL = OBJ({"id": "str", "name": ENUM(V1_TOOLS), "arguments": "any"})
+
+# `nade_agent_sdk::Message`, tagged by `role`.
+SDK_MESSAGE = UNION("role", {
+    "system": OBJ({"role": ENUM(["system"]), "text": "str"}),
+    "user": OBJ({"role": ENUM(["user"]), "text": "str"}),
+    "assistant": OBJ({"role": ENUM(["assistant"]), "text": OPT("str"),
+                      "tool_calls": OPT(ARR(TOOL_CALL))}),
+    "tool": OBJ({"role": ENUM(["tool"]), "call_id": "str", "name": "str",
+                 "result": "any", "is_error": OPT("bool")}),
+})
+
+# `nade_agent_sdk::FailureReason`, internally tagged on `cap`.
+FAILURE_REASON = UNION("cap", {
+    "step_cap_exceeded": OBJ({"cap": ENUM(["step_cap_exceeded"]),
+                              "limit": "int", "taken": "int"}),
+    "token_budget_exceeded": OBJ({"cap": ENUM(["token_budget_exceeded"]),
+                                  "limit": "int", "spent": "int"}),
+    "ambiguous_effect": OBJ({"cap": ENUM(["ambiguous_effect"]),
+                             "tool": ENUM(V1_TOOLS), "step_seq": "int",
+                             "effect_id": "uuid"}),
+    "cancelled": OBJ({"cap": ENUM(["cancelled"]), "detail": "str"}),
+})
+
 JOURNAL_PAYLOADS = {
-    "run_started": OBJ({"trigger_kind": ENUM(TRIGGER_KINDS), "trigger_ref": NUL("str")}),
-    "llm_response": OBJ({
-        "model": "str",
-        "stop_reason": ENUM(["tool_use", "end_turn", "max_tokens"]),
-        "tokens_in": "int",
-        "tokens_out": "int",
-        "text": "str",
+    "run_started": OBJ({
+        "input": OBJ({"system": OPT("str"), "messages": ARR(SDK_MESSAGE)}),
+        "journal_format": "int",
+    }),
+    # No per-entry model name: post-v1 SDK field, not a second vocabulary.
+    "model_response": OBJ({
+        "turn": "int",
+        "text": OPT("str"),
+        "tool_calls": OPT(ARR(TOOL_CALL)),
+        "stop_reason": ENUM(["end_turn", "tool_use", "max_tokens",
+                             "stop_sequence", "content_filter"]),
+        "usage": TOKEN_USAGE,
     }),
     # `step_seq` points at the entry that OPENED this step -- the `step_started`
     # itself for an ungated call, the `approval_requested` for a gated one.
@@ -443,41 +505,61 @@ JOURNAL_PAYLOADS = {
     # the moment an agent calls a tool twice, which is ordinary.
     "step_started": OBJ({
         "step_seq": "int",
+        "call_id": "str",
         "tool": ENUM(V1_TOOLS),
         "args": "any",
-        "args_hash": "str",
+        "args_hash": "sha256",
         "effect_id": "uuid",
+        "attempt": "int",
+        "opened_at": "ts",
+        "tool_fingerprint": OPT("sha256"),
+        "replay_policy": ENUM(["retry", "halt"]),
     }),
+    # A tool failure is `is_error: true`; there is no separate failure kind.
     "step_done": OBJ({
         "step_seq": "int",
+        "call_id": "str",
         "tool": ENUM(V1_TOOLS),
         "result": "any",
-        "result_bytes": "int",
+        "is_error": "bool",
         "truncated": "bool",
+        "wake_at": OPT("ts"),
     }),
-    "step_failed": OBJ({
-        "step_seq": "int",
-        "tool": ENUM(V1_TOOLS),
-        "error": "str",
-    }),
+    # No feed_item_id and no summary: the feed item is a host row raised from
+    # the engine's ApprovalRequest outcome, and the journal never names it.
+    # `expires_at` is FORBIDDEN, not optional: NADE runs `approval_ttl = None`
+    # (the host sweep and the approve tx's 410 own expiry), so a fixture that
+    # carries it is describing an engine configured wrong. The SDK type has the
+    # field; this file checks NADE's fixtures, which are narrower than the SDK
+    # grammar on purpose (four tools, no replay attempts) — a live journal may
+    # legally contain what a fixture must not.
     "approval_requested": OBJ({
+        "step_seq": "int",
+        "call_id": "str",
         "tool": ENUM(V1_TOOLS),
-        "feed_item_id": "uuid",
+        "args": "any",
+        "args_hash": "sha256",
         "effect_id": "uuid",
-        "summary": "str",
+        "requested_at": "ts",
+        "tool_fingerprint": OPT("sha256"),
+        "replay_policy": ENUM(["retry", "halt"]),
     }),
-    "approval_granted": OBJ({"feed_item_id": "uuid"}),
-    "approval_skipped": OBJ({"feed_item_id": "uuid"}),
-    "approval_expired": OBJ({"feed_item_id": "uuid"}),
-    "waiting": OBJ({"wake_at": "ts"}),
-    "resumed": OBJ({"after": ENUM(["approval", "timer", "crash"])}),
-    "cap_exceeded": OBJ({
-        "cap": ENUM(["max_steps", "token_budget", "spend_ceiling"]),
-        "limit": "int",
-        "actual": "int",
+    "approval_resolved": OBJ({
+        "step_seq": "int",
+        "decision": ENUM(["approve", "skip", "expire"]),
+        "resolved_at": "ts",
+        "reason": OPT(ENUM(["ttl_expired"])),
     }),
-    "run_done": OBJ({"summary": NUL("str")}),
-    "run_failed": OBJ({"error": "str"}),
+    "run_waiting": OBJ({"step_seq": "int", "wake_at": "ts"}),
+    "run_woken": OBJ({"step_seq": "int", "woken_at": "ts"}),
+    "cap_breached": OBJ({"reason": FAILURE_REASON}),
+    "run_ended": OBJ({
+        "status": ENUM(TERMINAL_RUN_STATUSES),
+        "output": OPT("str"),
+        "reason": OPT(FAILURE_REASON),
+        "steps": "int",
+        "usage": TOKEN_USAGE,
+    }),
 }
 
 JOURNAL_ENTRY = OBJ({
@@ -1046,14 +1128,20 @@ def walk(node, path):
 # 9. Journal protocol
 # ==========================================================================
 
-TERMINAL_KIND_TO_STATUS = {
-    "run_done": "done",
-    "run_failed": "failed",
-    "approval_requested": "pending_approval",
-    "approval_skipped": "skipped",
-    "approval_expired": "expired",
-    "waiting": "waiting",
-}
+# How a run's wire status is read off its journal's last entry. `run_ended`
+# carries the terminal status itself; the two parked states are implied by
+# what the run is parked on. Anything else settles nothing and no fixture may
+# end on it.
+def status_from_journal(journal):
+    last = journal[-1]
+    if last["kind"] == "run_ended":
+        payload = last["payload"]
+        return payload.get("status") if isinstance(payload, dict) else None
+    if last["kind"] == "approval_requested":
+        return "pending_approval"
+    if last["kind"] == "run_waiting":
+        return "waiting"
+    return None
 
 
 def check_journals(world):
@@ -1083,17 +1171,30 @@ def check_journals(world):
                 fail(path, "payload carries its own seq; the outer seq is the step "
                            "identity (API.md section 6.1)")
 
+        # run_started is first, is the only one, and stamps the format this
+        # build writes. The trigger is NOT here: trigger_kind and trigger_ref
+        # are host columns on the run row -- the journal records the engine's
+        # input, not the host's dispatch decision.
         if journal[0]["kind"] != "run_started":
             fail(name, "journal must open with run_started, got %s"
                  % journal[0]["kind"])
         else:
             payload = journal[0]["payload"]
-            if payload.get("trigger_kind") != detail["trigger_kind"]:
-                fail(name, "run_started.trigger_kind %r != the run's %r"
-                     % (payload.get("trigger_kind"), detail["trigger_kind"]))
-            if payload.get("trigger_ref") != detail["trigger_ref"]:
-                fail(name, "run_started.trigger_ref %r != the run's %r"
-                     % (payload.get("trigger_ref"), detail["trigger_ref"]))
+            if isinstance(payload, dict) and payload.get("journal_format") != 1:
+                fail(name, "run_started.journal_format is %r; this contract "
+                           "pins format 1" % payload.get("journal_format"))
+        for entry in journal[1:]:
+            if entry["kind"] == "run_started":
+                fail(name, "run_started is recorded once, at seq 1; seq %d "
+                           "repeats it" % entry["seq"])
+
+        # run_ended is recorded once and nothing follows it.
+        ended = [e["seq"] for e in journal if e["kind"] == "run_ended"]
+        if len(ended) > 1:
+            fail(name, "run_ended is recorded once, got seqs %s" % ended)
+        elif ended and ended[0] != journal[-1]["seq"]:
+            fail(name, "%d entr(ies) follow run_ended; it is always last"
+                 % (journal[-1]["seq"] - ended[0]))
 
         # Timestamps never go backwards.
         previous = None
@@ -1112,28 +1213,67 @@ def check_journals(world):
 def check_step_pairing(name, run_id, journal):
     """Steps correlate by `step_seq`, not by position.
 
-    `step_seq` names the entry that opened the step. It must be that entry's
-    own seq for an ungated call, or an earlier `approval_requested` for a gated
-    one -- and every started step must be closed exactly once, by a
-    `step_done` or `step_failed` carrying the same `step_seq` at a later seq.
+    `step_seq` names the entry that opened the step: its own seq for an
+    ungated `step_started` and for every `approval_requested` (a gate opens
+    its own step), or the earlier `approval_requested` for the `step_started`
+    that executes an approved gate. Every started step is closed exactly once,
+    by a `step_done` carrying the same `step_seq` at a later seq -- a failed
+    tool closes with `is_error: true`; there is no separate failure kind. An
+    approval is resolved at most once, and its step executes only on
+    `decision: "approve"`.
     """
     by_seq = dict((e["seq"], e) for e in journal)
     started = {}                      # step_seq -> the step_started entry
-    closed = {}                       # step_seq -> the closing entry
+    closed = {}                       # step_seq -> the closing step_done
+    resolved = {}                     # step_seq -> the approval_resolved entry
 
-    for entry in journal:
-        kind = entry["kind"]
-        if kind not in ("step_started", "step_done", "step_failed"):
-            continue
+    def payload_of(entry, *keys):
         # A malformed payload was already reported by the shape check; skip it
         # rather than crashing, so the rest of the report still arrives.
         if not isinstance(entry["payload"], dict):
-            continue
-        if "step_seq" not in entry["payload"] or "tool" not in entry["payload"]:
-            continue
-        step_seq = entry["payload"]["step_seq"]
+            return None
+        if any(key not in entry["payload"] for key in keys):
+            return None
+        step_seq = entry["payload"].get("step_seq")
         if not isinstance(step_seq, int) or isinstance(step_seq, bool):
+            return None
+        return entry["payload"]
+
+    for entry in journal:
+        kind = entry["kind"]
+        if kind == "approval_requested":
+            payload = payload_of(entry, "step_seq", "tool")
+            if payload is None:
+                continue
+            # An approval opens its own step; its step_seq is its own seq.
+            if payload["step_seq"] != entry["seq"]:
+                fail(name, "seq %d (approval_requested) has step_seq %d; a "
+                           "gate opens its own step" % (entry["seq"],
+                                                        payload["step_seq"]))
             continue
+
+        if kind == "approval_resolved":
+            payload = payload_of(entry, "step_seq", "decision")
+            if payload is None:
+                continue
+            step_seq = payload["step_seq"]
+            opener = by_seq.get(step_seq)
+            if opener is None or opener["kind"] != "approval_requested":
+                fail(name, "seq %d resolves step %d, which is not an "
+                           "approval_requested" % (entry["seq"], step_seq))
+                continue
+            if step_seq in resolved:
+                fail(name, "step %d is resolved twice (seq %d and seq %d)"
+                     % (step_seq, resolved[step_seq]["seq"], entry["seq"]))
+            resolved[step_seq] = entry
+            continue
+
+        if kind not in ("step_started", "step_done"):
+            continue
+        payload = payload_of(entry, "step_seq", "tool")
+        if payload is None:
+            continue
+        step_seq = payload["step_seq"]
         opener = by_seq.get(step_seq)
         if opener is None:
             fail(name, "seq %d has step_seq %d, which is not an entry in this run"
@@ -1145,6 +1285,7 @@ def check_step_pairing(name, run_id, journal):
             continue
 
         if kind == "step_started":
+            gate = None
             if step_seq == entry["seq"]:
                 pass                  # ungated: the step opens itself
             elif opener["kind"] != "approval_requested":
@@ -1152,10 +1293,36 @@ def check_step_pairing(name, run_id, journal):
                            "opened by its own step_started or by an "
                            "approval_requested"
                      % (entry["seq"], step_seq, opener["kind"]))
-            elif opener["payload"]["tool"] != entry["payload"]["tool"]:
-                fail(name, "seq %d runs %s but the approval at seq %d gated %s"
-                     % (entry["seq"], entry["payload"]["tool"], step_seq,
-                        opener["payload"]["tool"]))
+            else:
+                gate = opener["payload"] if isinstance(opener["payload"], dict) else {}
+            if gate is not None:
+                # The executing entry re-records the gate's facts verbatim: a
+                # step never executes as anything but what the human was shown.
+                for field in ("tool", "call_id", "args", "args_hash", "effect_id"):
+                    if payload.get(field) != gate.get(field):
+                        fail(name, "seq %d executes gate %d but its %s differs "
+                                   "from the approval's"
+                             % (entry["seq"], step_seq, field))
+                if payload.get("opened_at") != gate.get("requested_at"):
+                    fail(name, "seq %d opened_at %r; a gated step opens when "
+                               "the approval was requested (%r)"
+                         % (entry["seq"], payload.get("opened_at"),
+                            gate.get("requested_at")))
+                if step_seq not in resolved:
+                    fail(name, "seq %d executes gate %d before any "
+                               "approval_resolved" % (entry["seq"], step_seq))
+                elif resolved[step_seq]["payload"].get("decision") != "approve":
+                    fail(name, "seq %d executes gate %d whose decision was %r"
+                         % (entry["seq"], step_seq,
+                            resolved[step_seq]["payload"].get("decision")))
+            # journal.rs: no step claims to have opened after the entry
+            # recording it was made.
+            opened = parse_ts(payload.get("opened_at", ""))
+            created = parse_ts(entry["created_at"])
+            if opened and created and opened > created:
+                fail(name, "seq %d claims to have opened at %s, after the entry "
+                           "recording it (%s)"
+                     % (entry["seq"], payload["opened_at"], entry["created_at"]))
             if step_seq in started:
                 fail(name, "step %d is started twice (seq %d and seq %d)"
                      % (step_seq, started[step_seq]["seq"], entry["seq"]))
@@ -1171,16 +1338,24 @@ def check_step_pairing(name, run_id, journal):
             if entry["seq"] <= started[step_seq]["seq"]:
                 fail(name, "seq %d must close step %d at a *later* seq"
                      % (entry["seq"], step_seq))
-            if entry["payload"]["tool"] != started[step_seq]["payload"]["tool"]:
-                fail(name, "seq %d closes step %d but names %s, not %s"
-                     % (entry["seq"], step_seq, entry["payload"]["tool"],
-                        started[step_seq]["payload"]["tool"]))
+            for field in ("tool", "call_id"):
+                if payload.get(field) != started[step_seq]["payload"].get(field):
+                    fail(name, "seq %d closes step %d but its %s is %r, not %r"
+                         % (entry["seq"], step_seq, field, payload.get(field),
+                            started[step_seq]["payload"].get(field)))
             closed[step_seq] = entry
 
     for step_seq, entry in sorted(started.items()):
         if step_seq not in closed:
             fail(name, "step %d (%s, started at seq %d) was never closed"
                  % (step_seq, entry["payload"]["tool"], entry["seq"]))
+
+    # A settled gate that was not approved never executes.
+    for step_seq, entry in sorted(resolved.items()):
+        decision = entry["payload"].get("decision")
+        if decision in ("skip", "expire") and step_seq in started:
+            fail(name, "gate %d was settled as %r yet a step_started executes it"
+                 % (step_seq, decision))
 
 
 def check_effect_ids(name, run_id, journal):
@@ -1196,9 +1371,9 @@ def check_effect_ids(name, run_id, journal):
         # Malformed payloads are the shape check's business, not this one's.
         if not isinstance(payload, dict):
             continue
-        required = {"approval_requested": ("effect_id",),
+        required = {"approval_requested": ("effect_id", "args"),
                     "step_started": ("step_seq", "effect_id", "args"),
-                    "step_done": ("result", "result_bytes", "truncated")}.get(kind)
+                    "step_done": ("result", "truncated")}.get(kind)
         if required and any(key not in payload for key in required):
             continue
         if kind == "approval_requested":
@@ -1207,6 +1382,10 @@ def check_effect_ids(name, run_id, journal):
             if payload.get("effect_id") != expected:
                 fail(name, "seq %d effect_id %s should be %s"
                      % (entry["seq"], payload.get("effect_id"), expected))
+            recomputed = args_hash(payload["args"])
+            if payload.get("args_hash") != recomputed:
+                fail(name, "seq %d args_hash %s should be %s"
+                     % (entry["seq"], payload.get("args_hash"), recomputed))
         elif kind == "step_started":
             step_seq = payload["step_seq"]
             expected = effect_id(run_id, step_seq)
@@ -1220,10 +1399,6 @@ def check_effect_ids(name, run_id, journal):
                 fail(name, "seq %d args_hash %s should be %s"
                      % (entry["seq"], payload.get("args_hash"), recomputed))
         elif kind == "step_done":
-            recomputed = byte_size(payload["result"])
-            if payload.get("result_bytes") != recomputed:
-                fail(name, "seq %d result_bytes %s should be %d (the stored size)"
-                     % (entry["seq"], payload.get("result_bytes"), recomputed))
             marker = "[truncated " in json.dumps(payload["result"], ensure_ascii=False)
             if payload["truncated"] and not marker:
                 fail(name, "seq %d is truncated but carries no "
@@ -1236,22 +1411,17 @@ def check_effect_ids(name, run_id, journal):
 def check_run_status(name, detail, journal, world):
     """A run's status agrees with its journal's last entry. This is the exact
     bug that produced a run which was simultaneously pending and completed."""
-    last = journal[-1]["kind"]
-    expected = TERMINAL_KIND_TO_STATUS.get(last)
+    expected = status_from_journal(journal)
     if expected is None:
         fail(name, "journal ends on %r, which settles nothing; a run's last "
-                   "entry must fix its status" % last)
+                   "entry must fix its status" % journal[-1]["kind"])
     elif detail["status"] != expected:
         fail(name, "status is %r but the journal ends on %s, which means %r"
-             % (detail["status"], last, expected))
+             % (detail["status"], journal[-1]["kind"], expected))
 
     if (detail["error"] is not None) != (detail["status"] == "failed"):
         fail(name, "error is %r for status %r; error is set exactly when a run "
                    "failed" % (detail["error"], detail["status"]))
-    if detail["status"] == "failed":
-        run_failed = [e for e in journal if e["kind"] == "run_failed"]
-        if run_failed and not run_failed[-1]["payload"]["error"]:
-            fail(name, "run_failed carries no error text")
 
     # The list row and the detail describe one run.
     row = world.runs.get(detail["id"])
@@ -1287,6 +1457,78 @@ def check_run_status(name, detail, journal, world):
                 fail(name, "seq %d calls %s, which is not in %s's allowed_tools %s"
                      % (entry["seq"], tool, agent["name"],
                         agent.get("allowed_tools", [])))
+
+    check_engine_accounting(name, journal)
+
+
+def check_engine_accounting(name, journal):
+    """The facts the engine derives must agree with the entries they summarise.
+
+    journal.rs's replay validation, applied to the fixtures: model turns count
+    1..n in order; an opening entry's tool and arguments are the ones the
+    model actually asked for, resolved by `call_id` to the nearest preceding
+    `model_response`; and `run_ended`'s `steps` and `usage` are the totals of
+    what the journal above them records.
+    """
+    turns = 0
+    tokens_in = 0
+    tokens_out = 0
+    current_calls = {}                # call_id -> {"name", "arguments"}
+    executed = set()                  # step_seqs whose execution started
+
+    for entry in journal:
+        kind = entry["kind"]
+        payload = entry["payload"]
+        if not isinstance(payload, dict):
+            continue
+        if kind == "model_response":
+            turns += 1
+            if payload.get("turn") != turns:
+                fail(name, "seq %d is model turn %r; turns count 1..n in order"
+                     % (entry["seq"], payload.get("turn")))
+            usage = payload.get("usage") or {}
+            if isinstance(usage, dict):
+                tokens_in += usage.get("input_tokens", 0) or 0
+                tokens_out += usage.get("output_tokens", 0) or 0
+            current_calls = dict(
+                (call.get("id"), call)
+                for call in payload.get("tool_calls", [])
+                if isinstance(call, dict)
+            )
+        elif kind in ("step_started", "approval_requested"):
+            if kind == "step_started":
+                step_seq = payload.get("step_seq")
+                if isinstance(step_seq, int):
+                    executed.add(step_seq)
+            call = current_calls.get(payload.get("call_id"))
+            if call is None:
+                fail(name, "seq %d answers call %r, which the current model "
+                           "turn never made" % (entry["seq"],
+                                                payload.get("call_id")))
+                continue
+            if call.get("name") != payload.get("tool"):
+                fail(name, "seq %d runs %r but the model called %r"
+                     % (entry["seq"], payload.get("tool"), call.get("name")))
+            if call.get("arguments") != payload.get("args"):
+                fail(name, "seq %d's args differ from the arguments the model "
+                           "gave call %r" % (entry["seq"], payload.get("call_id")))
+        elif kind == "run_ended":
+            usage = payload.get("usage") or {}
+            recorded = (usage.get("input_tokens"), usage.get("output_tokens"))
+            if recorded != (tokens_in, tokens_out):
+                fail(name, "run_ended.usage %r; the model turns above total "
+                           "(%d, %d)" % (usage, tokens_in, tokens_out))
+            if payload.get("steps") != len(executed):
+                fail(name, "run_ended.steps is %r but %d step(s) started "
+                           "executing" % (payload.get("steps"), len(executed)))
+            status = payload.get("status")
+            if (status == "failed") != ("reason" in payload):
+                fail(name, "run_ended carries reason=%r for status %r; reason "
+                           "rides exactly on failed"
+                     % (payload.get("reason"), status))
+            if status != "done" and "output" in payload:
+                fail(name, "run_ended carries output for status %r; the "
+                           "model's closing prose rides only on done" % status)
 
 
 # ==========================================================================
@@ -1585,10 +1827,12 @@ def check_feed(world):
                  % approve.get("run_id"))
         else:
             granted = [e for e in detail[1]["journal"]
-                       if e["kind"] == "approval_granted"]
+                       if e["kind"] == "approval_resolved"
+                       and isinstance(e["payload"], dict)
+                       and e["payload"].get("decision") == "approve"]
             if not granted:
-                fail("approve.json", "run %s never recorded an approval_granted"
-                     % approve["run_id"])
+                fail("approve.json", "run %s never recorded an approval_resolved "
+                                     "with decision approve" % approve["run_id"])
 
 
 def check_feed_item(world, item):
@@ -1676,19 +1920,32 @@ def check_feed_item(world, item):
         if kind == "approval" and run["status"] not in expected_status[status]:
             fail(where, "is %r but its run is %r; the two move together"
                  % (status, run["status"]))
-        # The journal entry that raised the item names it back.
+        # The journal never names the feed item -- the item is a host row
+        # raised from the engine's ApprovalRequest outcome (API.md section
+        # 6.1), so the tie runs the other way: the run's gate must exist, the
+        # item is stamped with the moment the engine asked, and the effect id
+        # the item publishes is the one the gate minted.
         detail = world.run_details.get(run_id)
-        if detail is not None:
-            named = [e for e in detail[1]["journal"]
-                     if isinstance(e["payload"], dict)
-                     and e["payload"].get("feed_item_id") == item["id"]]
-            if kind == "approval" and not named:
-                fail(where, "run %s's journal never mentions this feed item"
-                     % run_id)
-            asked = [e for e in named if e["kind"] == "approval_requested"]
-            if asked and asked[0]["created_at"] != item["created_at"]:
-                fail(where, "created_at %s but the approval was requested at %s"
-                     % (item["created_at"], asked[0]["created_at"]))
+        if detail is not None and kind == "approval":
+            gates = [e for e in detail[1]["journal"]
+                     if e["kind"] == "approval_requested"]
+            if not gates:
+                fail(where, "run %s never requested an approval" % run_id)
+            else:
+                gate = gates[-1]
+                if gate["created_at"] != item["created_at"]:
+                    fail(where, "created_at %s but the approval was requested "
+                                "at %s" % (item["created_at"],
+                                           gate["created_at"]))
+                payload = gate["payload"] if isinstance(gate["payload"], dict) else {}
+                data = item["data"] or {}
+                eid = data.get("note_id") or data.get("draft_id")
+                if eid is not None and payload.get("effect_id") != eid:
+                    fail(where, "publishes effect %s but the run's gate minted "
+                                "%s" % (eid, payload.get("effect_id")))
+                if data.get("action") != payload.get("tool"):
+                    fail(where, "data.action %r but the gate holds %r"
+                         % (data.get("action"), payload.get("tool")))
 
 
 def check_no_outbound_copy(world):

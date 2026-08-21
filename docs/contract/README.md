@@ -33,7 +33,10 @@ run.
   Never an offset, never fractional seconds.
 - **Nullability is explicit.** A field marked `|null` is always present and may
   be null. Nothing is ever omitted, so both sides can use non-optional decoding
-  wherever the contract says non-null.
+  wherever the contract says non-null. **One licensed exception:** journal
+  payloads are the SDK engine's own serialization, byte-faithful, and the
+  fields the SDK omits when absent (serde `skip_serializing_if`) are absent,
+  not null — API.md §6.1 marks them "may be absent".
 - **Pagination is per-endpoint.** `next_cursor: string|null` appears **if and
   only if** the endpoint is paginated. Bounded collections — mailboxes, agents,
   settings — carry no cursor field at all. Cursors are opaque base64url keyset
@@ -43,14 +46,24 @@ run.
   16 lowercase hex; label ids are `INBOX`-style or `Label_<n>` (both the short
   `Label_12` and long `Label_1901000275082506782` forms appear on purpose).
   Bearer tokens are `nade_` + 64 hex, 69 characters total.
+- **The journal is the SDK engine's, verbatim.** `run_journal` has one author
+  — the engine, via the host's `Journal` driver — so the run fixtures carry
+  the SDK vocabulary (`run_started`, `model_response`, `step_started`,
+  `step_done`, `approval_requested`, `approval_resolved`, `run_waiting`,
+  `run_woken`, `cap_breached`, `run_ended`) with payloads exactly as
+  `nade-agent-sdk/src/journal.rs` serialises them. Host facts — the feed item,
+  its token, its deadline — never appear in a journal; an approval reaches it
+  only as an engine-written `approval_resolved`. A failed tool call is a
+  `step_done` with `is_error: true`; there is no separate failure kind.
 - **Journal steps are identified by `step_seq`.** Every entry has its own
   `seq`, +1, no gaps — `(run_id, seq)` is a primary key, so sharing one was
   never possible. A *step* is identified by the seq of the entry that
   **opened** it: the `step_started` itself for an ungated call, the
-  `approval_requested` for a gated one. `step_started`, `step_done` and
-  `step_failed` all carry that seq as `step_seq`, so steps correlate by
-  pointer — guessing at "the nearest preceding open with the same tool" breaks
-  the moment an agent calls a tool twice, which is ordinary.
+  `approval_requested` for a gated one (each carries its own seq as
+  `step_seq`). `step_done` and the `step_started` that executes an approved
+  gate carry that opening seq as `step_seq`, so steps correlate by pointer —
+  guessing at "the nearest preceding open with the same tool" breaks the
+  moment an agent calls a tool twice, which is ordinary.
 - **Effect ids are `uuid5`.** `uuid5(EFFECT_NAMESPACE, "<run-id>:<seq>")` under
   the frozen namespace `6e616465-5f65-6666-6563-745f6e737631` — the ASCII bytes
   of `nade_effect_nsv1`, defined in
@@ -113,8 +126,8 @@ recomputes the id rather than trusting it.
 | `runs.json`, `runs_empty.json` | `GET /runs` — all six runs, newest first |
 | `run.json` | `GET /runs/{id}` — `pending_approval`, gated on `write_note` |
 | `run_pending_draft.json` | `pending_approval`, gated on `draft_reply` — the Edit card's run |
-| `run_done.json` | `done` — gated step, approval granted, effect written under the approval's id |
-| `run_failed.json` | `failed` — `step_failed` then `run_failed`, `error` set |
+| `run_done.json` | `done` — gated step, `approval_resolved {decision: approve}`, effect written under the approval's id |
+| `run_failed.json` | `failed` — `step_done {is_error: true}` then `run_ended {reason.cap: cancelled}` (the host's loud-fail), `error` set |
 | `run_skipped.json`, `run_expired.json` | the two runs whose approved effect will never be written |
 | `feed.json` | `GET /feed` — two live approvals, unseen info, resolved, skipped, expired; `new_count` counted |
 | `feed_empty.json` | same, empty |

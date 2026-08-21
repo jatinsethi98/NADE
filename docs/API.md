@@ -169,9 +169,10 @@ binds the consent to this browser. Requires the `cap` from
 `POST /auth/gmail/link`; without a live one it renders a `403` page rather than
 redirecting, and that page is identical whether or not a mailbox is already
 connected. The callback (`/v1/auth/gmail/callback`) requires the same cookie,
-binds the returned account to the single `accounts` row, and renders a plain
-"you can close this tab" page. Used both for first connection and for
-re-consent.
+upserts the returned account's `accounts` row, **binds the initiating device to
+it**, and renders a plain "you can close this tab" page. Used both for first
+connection and for re-consent. A device already bound to a different mailbox is
+refused with the same page either way.
 
 ---
 
@@ -555,8 +556,11 @@ compile time and are null when `spec` is null.
 `PATCH` accepts any subset of
 `nl_definition`, `status`, `allowed_tools`, `approval_required`, `schedule`.
 Changing `nl_definition` recompiles `spec`. `runs_done` is server-maintained
-and is **ignored** if sent. `DELETE` → `204`; in-flight runs are left to finish
-and their feed items remain readable.
+and is **ignored** if sent. `DELETE` → `204`; **non-terminal runs are
+cancelled first** (`Engine::cancel`, a loud `run_ended` with
+`reason.cap: "cancelled"`), then the delete cascades — the FK cascade removes
+`run_journal` with the agent, so a run left in flight would have its log
+yanked out from under it mid-step. Feed items already raised remain readable.
 
 ### 5.1 The compiled `spec`
 
@@ -648,24 +652,54 @@ one-message thread, where Gmail gives the thread the same id as its first
 message, and very visible on the fourth reply. It is null for `schedule` and
 `manual`.
 
-### 6.1 Journal entry kinds
+### 6.1 The journal
+
+**`run_journal` is written by exactly one author: the SDK engine**
+(`nade-agent-sdk`), through the host's `Journal` driver. The server never
+appends a row of its own — host events reach the journal only as
+engine-written entries. An approval granted in the app arrives as an
+`approval_resolved` written by `Engine::resume` when the resume job delivers
+the decision; the expiry sweep arrives the same way, as `decision: "expire"`.
+The table is append-only and byte-faithful, and `GET /runs/{id}` serves it
+verbatim — so the vocabulary below is the SDK's
+(`backend/crates/nade-agent-sdk/src/journal.rs`), transcribed, not a second
+one for the wire. A kind or field this section does not list is a bug in
+whoever wrote it.
+
+**Payloads are the SDK's own serialization**, which carries one licensed
+exception to §0's "nothing is ever omitted": fields the SDK omits when absent
+(serde `skip_serializing_if`) are **absent, not null**. They are marked
+"may be absent" below; clients must decode them as optional. Everything else
+in this document keeps the explicit-nullability rule — including §0's second
+precision: the engine stamps every timestamp it journals (`created_at`,
+`opened_at`, `requested_at`, `resolved_at`, `wake_at`) to **whole seconds**
+(`Entry::new`, `Engine::now`), so the verbatim rows never carry a fractional
+part and one date formatter serves the whole wire. Ordering within a run is
+`seq`'s job, never the timestamp's.
 
 **Every entry has its own `seq`.** It starts at **1** and increases by exactly
 one with no gaps — `run_journal`'s primary key is `(run_id, seq)`, so two
-entries cannot share one.
+entries cannot share one. The first entry is always `run_started`, which also
+stamps `journal_format` (this contract pins **1**); `run_ended` is recorded
+once and nothing follows it.
 
-A *step* is therefore identified by the `seq` of the entry that **opened** it,
-and the entries that close it name that seq explicitly:
+A *step* is identified by the `seq` of the entry that **opened** it, and the
+entries about it name that seq explicitly:
 
-- an ordinary call is opened by `step_started`;
-- a gated call is opened by **`approval_requested`** — the `step_started` that
-  eventually executes it is a *later* entry that carries the original opening
-  seq forward.
+- an ordinary call is opened by `step_started`, whose `step_seq` equals its
+  own `seq`;
+- a gated call is opened by **`approval_requested`** (its `step_seq` also
+  equals its own `seq`) — the `step_started` that eventually executes it is a
+  *later* entry that carries the original opening seq forward, re-recording
+  the gate's `tool`, `args`, `args_hash`, `effect_id` and `opened_at`
+  verbatim, so a step never executes as anything but what the human was shown.
 
-`step_done`, `step_failed` and the executing `step_started` all carry
-`step_seq` in their payload, pointing at that opening entry. Correlating by
-"the nearest preceding open with the same tool name" would be ambiguous the
-moment an agent calls one tool twice, which is ordinary.
+`step_done` and the executing `step_started` carry `step_seq` in their
+payload, pointing at that opening entry. Correlating by "the nearest preceding
+open with the same tool name" would be ambiguous the moment an agent calls one
+tool twice, which is ordinary. **A failed tool call is a `step_done` with
+`is_error: true`** and a structured error in `result` — there is no separate
+failure kind; the error is fed back to the model like any other result.
 
 `effect_id` is derived from the **opening** seq and from nothing else, so a
 gated step keeps the id minted at `approval_requested` right through approval
@@ -676,17 +710,48 @@ Three fields exist purely so a resumed run cannot drift from the one that was
 interrupted:
 
 - **`opened_at`** is stamped when the step opens and is replayed, not
-  regenerated. Every attempt at a step therefore sees byte-identical input, so
-  the same `effect_id` implies the same written value.
+  regenerated — for a gated step it equals the approval's `requested_at`.
+  Every attempt at a step therefore sees byte-identical input, so the same
+  `effect_id` implies the same written value.
 - **`tool_fingerprint`** hashes the tool's *interface* — name, description,
   version, schema. It is checked before every dispatch, including after an
   approval, so a step opened under one build cannot execute under another. It
   covers the interface, not the behaviour behind it: a silent behaviour change
   is caught only if the author bumps the tool's version, which is a limit no
-  hash can remove.
+  hash can remove. Absent only when the model named a tool the engine does not
+  have.
 - **`wake_at`** rides on `step_done` rather than in a following entry, so
   completing a step and recording the pause it asked for are one committed
-  write. Split across two, a crash in the gap loses the delay silently.
+  write. Split across two, a crash in the gap loses the delay silently. The
+  `run_waiting` entry that follows is a marker for readers; the `step_done` is
+  the durable fact.
+
+| `kind` | `payload` |
+|---|---|
+| `run_started` | `{"input": {"system": "…", "messages": [{"role": "user", "text": "…"}, …]}, "journal_format": 1}` — the run's input, recorded once; replay uses it, never a later argument. `input.system` may be absent. `input.messages` are SDK `Message` objects tagged by `role` ∈ `system` \| `user` \| `assistant` \| `tool` |
+| `model_response` | `{"turn": 1, "text": "…", "tool_calls": [{"id": "call_1_1", "name": "read_thread", "arguments": {…}}, …], "stop_reason": "tool_use", "usage": {"input_tokens": 1840, "output_tokens": 96}}` — one model turn, with call ids already normalised. `text` may be absent (a turn with no prose), `tool_calls` may be absent (a turn with no calls). `stop_reason` ∈ `end_turn` \| `tool_use` \| `max_tokens` \| `stop_sequence` \| `content_filter`, or `{"other": "…"}` for a provider tag none of those cover |
+| `step_started` | `{"step_seq": 3, "call_id": "call_1_1", "tool": "read_thread", "args": {…}, "args_hash": "sha256:…", "effect_id": "…", "attempt": 1, "opened_at": "…", "tool_fingerprint": "sha256:…", "replay_policy": "retry"}` — `step_seq` equals this entry's own `seq` for an ungated call, or the `approval_requested` seq for a gated one. `tool_fingerprint` may be absent (unknown tool). `replay_policy` ∈ `retry` \| `halt` |
+| `step_done` | `{"step_seq": 3, "call_id": "call_1_1", "tool": "read_thread", "result": {…}, "is_error": false, "truncated": false, "wake_at": "…"}` — `wake_at` may be absent, and is present only when the tool parked the run |
+| `approval_requested` | `{"step_seq": 6, "call_id": "call_2_1", "tool": "write_note", "args": {…}, "args_hash": "sha256:…", "effect_id": "…", "requested_at": "…", "expires_at": "…", "tool_fingerprint": "sha256:…", "replay_policy": "retry"}` — opens its own step. `expires_at` may be absent, and in NADE journals it always is: the engine runs with `approval_ttl = None`, because §7's sweep and the approve tx own expiry |
+| `approval_resolved` | `{"step_seq": 6, "decision": "approve", "resolved_at": "…", "reason": "ttl_expired"}` — `decision` ∈ `approve` \| `skip` \| `expire`. `reason` may be absent, and appears only when the engine itself decided rather than a human |
+| `run_waiting` | `{"step_seq": 9, "wake_at": "…"}` — reader-facing marker that the run is parked on a timer |
+| `run_woken` | `{"step_seq": 9, "woken_at": "…"}` — the timer fired |
+| `cap_breached` | `{"reason": {"cap": "step_cap_exceeded", "limit": 12, "taken": 13}}` — `reason` is tagged by `cap` ∈ `step_cap_exceeded {limit, taken}` \| `token_budget_exceeded {limit, spent}` \| `ambiguous_effect {tool, step_seq, effect_id}` \| `cancelled {detail}` |
+| `run_ended` | `{"status": "done", "output": "…", "reason": {…}, "steps": 2, "usage": {"input_tokens": 6213, "output_tokens": 277}}` — the terminal state, recorded once, always last. `status` ∈ `done` \| `failed` \| `skipped` \| `expired`. `output` (the model's closing prose) may be absent and rides only on `done`; `reason` (same shape as `cap_breached.reason`) may be absent and rides only on `failed`. `steps` and `usage` are the run's lifetime totals |
+
+The run's wire `status` (§6) follows from the last entry: `run_ended` carries
+the terminal status itself; a journal ending on `approval_requested` is
+`pending_approval`; one ending on `run_waiting` is `waiting`. `queued` and
+`running` are host states a journal never records.
+
+`step_done.result` is the tool's return value, size-capped. When capping
+bites, `truncated` is true and the value carries an explicit
+`"…[truncated N bytes]"` marker — never a silent trim.
+
+One thing this vocabulary loses against the old draft of this section: a
+per-entry **model name** (`model_response` records usage, not which model
+answered). A screen that needs it later gets it as a post-v1 SDK field — never
+as a second vocabulary layered on by the host.
 
 ### 6.2 What the runtime actually guarantees
 
@@ -704,27 +769,6 @@ The consequence for NADE: a mutating tool must write its row with
 id. **Human approval is not an idempotency mechanism** — it authorises an
 action, it does not make a re-run of that action harmless. An effect with no
 natural key needs an outbox keyed on `effect_id` regardless of who approved it.
-
-| `kind` | `payload` |
-|---|---|
-| `run_started` | `{"trigger_kind": "mail", "trigger_ref": "…"\|null}` |
-| `llm_response` | `{"model": "…", "stop_reason": "tool_use"\|"end_turn"\|"max_tokens", "tokens_in": 1840, "tokens_out": 96, "text": "…"}` |
-| `step_started` | `{"tool": "read_thread", "step_seq": 3, "opened_at": "…", "args": {…}, "args_hash": "sha256:…", "effect_id": "…", "tool_fingerprint": "sha256:…"\|null}` — `step_seq` equals this entry's own `seq` for an ungated call, or the `approval_requested` seq for a gated one |
-| `step_done` | `{"tool": "read_thread", "step_seq": 3, "result": {…}, "result_bytes": 1204, "truncated": false, "wake_at": "…"\|null}` |
-| `step_failed` | `{"tool": "…", "step_seq": 3, "error": "…"}` |
-| `approval_requested` | `{"tool": "write_note", "feed_item_id": "…", "effect_id": "…", "summary": "…"}` |
-| `approval_granted` | `{"feed_item_id": "…"}` |
-| `approval_skipped` | `{"feed_item_id": "…"}` |
-| `approval_expired` | `{"feed_item_id": "…"}` |
-| `waiting` | `{"wake_at": "…"}` |
-| `resumed` | `{"after": "approval"\|"timer"\|"crash"}` |
-| `cap_exceeded` | `{"cap": "max_steps"\|"token_budget"\|"spend_ceiling", "limit": 12, "actual": 13}` |
-| `run_done` | `{"summary": "…"\|null}` |
-| `run_failed` | `{"error": "…"}` |
-
-`step_done.result` is the tool's return value, size-capped. When capping bites,
-`truncated` is true and the value carries an explicit
-`"…[truncated N bytes]"` marker — never a silent trim.
 
 `effect_id` is `uuid5(EFFECT_NAMESPACE, "<run-id>:<seq>")` with the frozen
 namespace `6e616465-5f65-6666-6563-745f6e737631` (the ASCII bytes of
@@ -830,10 +874,15 @@ The same item shape. This is the push deep-link: the APNs payload carries only
 ```
 
 **One transaction, all of it or none of it:** validate and consume the token →
-move the run `pending_approval → queued` with its `pending_action` intact →
-move the feed item to `resolved` and set `resolved_note` → append
-`approval_granted` to the journal → write an `audit_log` row → enqueue the
-resume job. A test asserts all six writes land together.
+move the run `pending_approval → queued` with its approved `pending_action`
+intact → move the feed item to `resolved` and set `resolved_note` → write an
+`audit_log` row → enqueue the resume job. A test asserts all five writes land
+together.
+
+**The tx leaves `run_journal` untouched** (a P5 test asserts that). The
+journal has one author — the engine (§6.1) — so the approval reaches it only
+when the resume job runs `Engine::resume`, which appends
+`approval_resolved {"decision": "approve"}` and carries the run on from there.
 
 - Replay with the same token → `409 token_consumed`. **The client treats this
   as success** — it means an earlier attempt already won.
@@ -851,9 +900,12 @@ Approvals expire **7 days** after creation. A cron sweeps expired ones hourly.
 ```
 
 Takes the token for the same reason approve does: it is a state change, and a
-push-action tap must not be forgeable. Same transactional guarantee — run →
-`skipped`, item → `skipped`, `approval_skipped` journalled, audit row written.
-Same `409` / `410` / `401` behaviour.
+push-action tap must not be forgeable. Same transactional guarantee — consume
+the token, run → `skipped`, item → `skipped`, audit row written, settle job
+enqueued — and the same rule about the journal: the tx never touches it; the
+engine records `approval_resolved {"decision": "skip"}` and the closing
+`run_ended` when the job settles the run. Same `409` / `410` / `401`
+behaviour.
 
 ### `POST /feed/seen`
 
@@ -966,7 +1018,7 @@ where clients crash.
 | `agents.json`, `agents_empty.json` | `GET /agents` list rows (no `allowed_tools`) |
 | `agent.json`, `agent_scheduled.json`, `agent_draft.json`, `agent_compile_failed.json` | the full agent object: mail-triggered, scheduled, draft-with-`draft_reply`, and a failed compile |
 | `runs.json`, `runs_empty.json` | `GET /runs` |
-| `run.json`, `run_done.json`, `run_failed.json` | journals: gated-and-pending, gated-approved-and-executed, failed |
+| `run.json`, `run_pending_draft.json`, `run_done.json`, `run_failed.json`, `run_skipped.json`, `run_expired.json` | journals: gated-and-pending on `write_note`, gated-and-pending on `draft_reply` (the Edit card's run), gated-approved-and-executed, failed, and the two whose approved effect will never be written |
 | `feed.json`, `feed_empty.json`, `feed_item.json`, `feed_item_info.json`, `feed_item_editable.json` | feed — the last one is the `["approve","edit","skip"]` branch |
 | `approve.json`, `skip.json`, `seen.json` | feed actions |
 | `settings.json` | settings |

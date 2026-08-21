@@ -11,20 +11,39 @@
       "seq": 1,
       "kind": "run_started",
       "payload": {
-        "trigger_kind": "mail",
-        "trigger_ref": "18f2a1b3c4d5e6f7"
+        "input": {
+          "system": "Read the thread. Extract every concrete next step the sender proposes -- calls, take-homes, intro meetings, deadlines -- with its date if one is given. Write them to a note titled after the company. If there are no concrete next steps, do nothing.",
+          "messages": [
+            {
+              "role": "user",
+              "text": "New mail from priya@kettle.com on the thread \"Staff Product Designer at Kettle\"."
+            }
+          ]
+        },
+        "journal_format": 1
       },
       "created_at": "2026-08-16T09:12:06Z"
     },
     {
       "seq": 2,
-      "kind": "llm_response",
+      "kind": "model_response",
       "payload": {
-        "model": "claude-sonnet-4-5-20250929",
+        "turn": 1,
+        "text": "I'll read the thread first.",
+        "tool_calls": [
+          {
+            "id": "call_1_1",
+            "name": "read_thread",
+            "arguments": {
+              "thread_id": "18f2a1b3c4d5e6f7"
+            }
+          }
+        ],
         "stop_reason": "tool_use",
-        "tokens_in": 1786,
-        "tokens_out": 88,
-        "text": "I'll read the thread first."
+        "usage": {
+          "input_tokens": 1786,
+          "output_tokens": 88
+        }
       },
       "created_at": "2026-08-16T09:12:09Z"
     },
@@ -33,30 +52,49 @@
       "kind": "step_started",
       "payload": {
         "step_seq": 3,
+        "call_id": "call_1_1",
         "tool": "read_thread",
         "args": {
           "thread_id": "18f2a1b3c4d5e6f7"
         },
         "args_hash": "sha256:e8c76de6a12df2985a4bf270f77ec35f89766ff3e84acfff7f312527830d2eb8",
-        "effect_id": "f3866d6f-cba8-5662-8b19-2f2d2e2d3d6d"
+        "effect_id": "f3866d6f-cba8-5662-8b19-2f2d2e2d3d6d",
+        "attempt": 1,
+        "opened_at": "2026-08-16T09:12:09Z",
+        "tool_fingerprint": "sha256:26844ddc62a6b01f632e3c825a5f756b3f63943980fe3ec531f5928eb976975a",
+        "replay_policy": "retry"
       },
       "created_at": "2026-08-16T09:12:09Z"
     },
     {
       "seq": 4,
-      "kind": "step_failed",
+      "kind": "step_done",
       "payload": {
         "step_seq": 3,
+        "call_id": "call_1_1",
         "tool": "read_thread",
-        "error": "Gmail returned 503 for messages.get after 5 attempts."
+        "result": {
+          "error": "Gmail returned 503 for messages.get after 5 attempts."
+        },
+        "is_error": true,
+        "truncated": false
       },
       "created_at": "2026-08-16T09:12:30Z"
     },
     {
       "seq": 5,
-      "kind": "run_failed",
+      "kind": "run_ended",
       "payload": {
-        "error": "Gmail was unavailable, so the thread could not be read."
+        "status": "failed",
+        "reason": {
+          "cap": "cancelled",
+          "detail": "Gmail was unavailable, so the thread could not be read."
+        },
+        "steps": 1,
+        "usage": {
+          "input_tokens": 1786,
+          "output_tokens": 88
+        }
       },
       "created_at": "2026-08-16T09:12:31Z"
     }
