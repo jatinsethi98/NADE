@@ -44,21 +44,26 @@ final class InfoPlistTests: XCTestCase {
         XCTAssertNil(ats["NSAllowsArbitraryLoads"], "ATS must not be disabled wholesale")
     }
 
-    /// PLAN.md §iOS app pins the deployment target; 26.5 would refuse to
-    /// install on any phone that is not on the newest iOS.
+    /// PLAN.md §iOS app pins the deployment target. D1 set it to 18.0; the
+    /// Liquid Glass pass raises it to **26.0** because `glassEffect`,
+    /// `GlassEffectContainer`, `safeAreaBar`, `scrollEdgeEffectStyle` and
+    /// `tabBarMinimizeBehavior` are all iOS 26 and the ruling was one code
+    /// path rather than `#available` branches. The cost D1 warned about is
+    /// real and accepted: this build will not install below iOS 26.
     ///
     /// This only sees the configuration the tests were built in — Debug.
-    /// `testEveryBuildConfigurationTargets18` is the one that covers Release.
-    func testTheBuiltConfigurationTargets18() throws {
+    /// `testEveryBuildConfigurationTargets26` is the one that covers Release.
+    func testTheBuiltConfigurationTargets26() throws {
         let minimum = try XCTUnwrap(
             Bundle.main.object(forInfoDictionaryKey: "MinimumOSVersion") as? String
         )
-        XCTAssertEqual(minimum, "18.0")
+        XCTAssertEqual(minimum, "26.0")
     }
 
     /// `MinimumOSVersion` from `Bundle.main` is whatever configuration happened
-    /// to be built. Release could drift to 26.5 — the exact bug D1 records —
-    /// and every test would stay green because tests never run against Release.
+    /// to be built. Release could drift off the pin — the shape of the bug D1
+    /// records, now in the other direction — and every test would stay green
+    /// because tests never run against Release.
     ///
     /// So this reads the project file itself. A test runs inside the simulator
     /// and cannot shell out to `xcodebuild -showBuildSettings`, so the literal
@@ -74,7 +79,7 @@ final class InfoPlistTests: XCTestCase {
     /// previous floor of "at least 6" was arithmetically wrong — the project
     /// plus three targets is four lists, so **eight** settings — and two of
     /// them could be deleted with the test still green.
-    func testEveryBuildConfigurationTargets18() throws {
+    func testEveryBuildConfigurationTargets26() throws {
         let text = try projectFile()
 
         let lists = try NSRegularExpression(pattern: #"isa = XCConfigurationList;"#)
@@ -99,8 +104,8 @@ final class InfoPlistTests: XCTestCase {
             values.append(String(text[r]).trimmingCharacters(in: .whitespaces))
         }
         XCTAssertEqual(
-            Set(values), ["18.0"],
-            "IPHONEOS_DEPLOYMENT_TARGET is not 18.0 in every configuration: \(values)"
+            Set(values), ["26.0"],
+            "IPHONEOS_DEPLOYMENT_TARGET is not 26.0 in every configuration: \(values)"
         )
     }
 
