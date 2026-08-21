@@ -4,6 +4,47 @@ One plan, one executor: a single orchestrating AI agent on this Mac, fanning out
 
 Draft 3 folds in a third adversarial review (findings C1–C10, appendix) and two directives: **test-speed scoping** (sync 30 days, dev caps everywhere, no bloat) and the **execution doctrine** below.
 
+## Where we are — 2026-08-21
+
+| Phase | State |
+|---|---|
+| P1 Foundations | ✅ 2026-08-17 |
+| P2 Mail lands | ✅ 2026-08-19 |
+| P3 Mail stays current | ✅ 2026-08-20 — backend live; the iOS screens run on fixtures until P4/P5 serve them |
+| P4 First runs | next, and unblocked — the Anthropic key is in `backend/.env` |
+| P5–P8 | not started |
+
+Green at `8b05de1`: 785 Rust tests, 258 iOS unit, 46 iOS UI, each twice
+consecutively. 38 screenshots in `docs/screens/`, all distinct by hash.
+
+## Caveats — read before you test
+
+- **The Ask tab shows fixtures, not your mail.** 2a, 1a, 1b, 1c and 1d are
+  built and correct, but `/agents` lands at P4 and `/feed` at P5. Against the
+  live server they say "This server doesn't offer that yet." — loudly and on
+  purpose, rather than showing an empty list.
+- **Push stops whenever the tunnel restarts.** A quick tunnel's hostname is
+  ephemeral and `NADE_PUSH_AUDIENCE` is read once at boot, so after any restart
+  run `just tunnel` and restart the server. Until you do, mail still arrives —
+  just up to 30 minutes late, on the poll fallback.
+- **Gmail consent dies every 7 days.** The OAuth app is in Testing mode.
+  `scripts/bench.sh` prints the re-consent command as soon as `/v1/me` stops
+  being ok, so you find out at the start of a session rather than mid-test.
+- **A new tunnel hostname needs one manual paste** into the OAuth client's
+  redirect URIs — `gcloud` cannot set them. `just tunnel` prints the line. Only
+  the Gmail link flow cares; ordinary sync does not.
+- **Every LLM call is Haiku**, via `NADE_LLM_MODEL` / `NADE_LLM_COMPILE_MODEL`.
+  That puts the spec compiler on the cheap tier on purpose. If compiled specs
+  come out weak on ambiguous sentences, this is the first knob to turn at P4.
+- **Secrets live only in `backend/.env`** (gitignored, mode 0600). A new var
+  added to `.env.example` must also go into `config::ENV_VARS`, or the config
+  test fails in both directions.
+- **`scripts/bench.sh` is the bench**, not `-NADESeed`: one command starts the
+  backend, builds, installs, pairs and deep-links against the *live* server.
+  `docs/BENCH.md`. `cargo` is not on the default PATH.
+- **Simulator only so far.** Nothing has run on a physical phone; H9 (the $99
+  program and an APNs key) is still undecided and only device push needs it.
+
 ## Execution doctrine (applies to every task)
 
 1. Before writing code, the assigned agent writes the task's acceptance criteria AND an edge-case checklist (minimum: empty input, unicode, crash mid-step, duplicate delivery/replay, expiry, pagination boundary, 429/timeout, clock skew where relevant).
@@ -73,15 +114,13 @@ design; the endpoint is reached through Ask and by the agents' `search_mail`.
 
 ## Phase 0 — HUMAN REQUIRED
 
-**Live status lives in `docs/PHASE0.md`.** As of 2026-08-17: H1 (gcloud login),
-H2 (Gmail + Pub/Sub APIs, `gmail-events` topic, Publisher grant) and H3 (Web
-OAuth client with its redirect URI, verified against Google's authorize
-endpoint) are **done**; H6's prerequisites are done (push identity
-`nade-push@deliveriesapp-293223`, `roles/iam.serviceAccountTokenCreator`
-granted to the Pub/Sub service agent) with only the subscription itself waiting
-on a tunnel hostname at P3. Remaining: H5 (weekly consent click), H7 (LLM keys,
-needed at P4), H8 (send a test email, ~3×), H9 (optional, device push only),
-H10 (P8 deploy).
+**Live status lives in `docs/PHASE0.md`.** As of 2026-08-21: H1, H2, H3, H6
+and H7 are **done** — H6's subscription is now created or updated by
+`just tunnel` on every run, and the Anthropic key is in `backend/.env`. H4 was
+**dropped** at P3: a quick tunnel needs no login, at the cost of a hostname
+that changes each session. H8 is done once (the 4-second push proof) and comes
+back at P5. Left: H5 (the weekly consent click), H9 (optional, device push
+only) and H10 (P8 deploy).
 
 The table below is the original definition; `PHASE0.md` supersedes it.
 
@@ -245,7 +284,7 @@ HTML mail: `body_text` native; "View original" = locked WKWebView (JS off, remot
 - [contract] `docs/API.md` written as the canonical contract; `docs/contract/` regenerated from `generate.py` and checked by `validate.py`.
 - **Gate out passed**, plus one extra: an adversarial Codex review of the spec seams found 25 findings, all resolved before P2 opened. Two lanes hit a stall watchdog mid-hardening; their work was already green and the remaining hardening was folded into the review pass.
 
-**P2 — Mail lands. [backend] ∥ [ios]**
+**P2 — Mail lands. ✅ DONE 2026-08-19. [backend] ∥ [ios]**
 - [backend] OAuth PKCE flow, token rotation persistence, `needs_reauth` path, quota-bucket client with real multipart batch, **30-day sync (≤2000 msgs)**, mailboxes/threads/thread/search/me. ✓ wiremock suite green (list/get/batch/history/429/rotation); live: search returns a DB-derived subject's id; fixtures byte-match.
 - [ios] Mailboxes (1g, the tab root), mail list + chips (1e), thread + agent
   card (1f); GRDB store + ValueObservation; **live HTTP client, pairing, and
@@ -307,61 +346,53 @@ are not tappable (proxy at P3), and 1f's ask bar is **chrome**: the mockup's own
 field and circle are `<span>`s, so it renders without being a control until P6
 gives it one.
 
-**P3 — Mail stays current. [backend] ∥ [ios]**
+**P3 — Mail stays current. ✅ DONE 2026-08-20. [backend] ∥ [ios]**
 - [backend] cloudflared quick tunnel (`just tunnel`), webhook + full OIDC,
-  incremental history (all 4 types), 404 sweep, daily watch renewal + 30-min
+  incremental history (all four types), 404 sweep, daily watch renewal, 30-min
   poll fallback. ~~attachments proxy + cid rewrite~~ — **both shipped in P2**
-  (`api/mail.rs`, `mail/html.rs`, criteria O9–O11); P3 owes nothing there.
-  ✓ H8 email visible ≤60 s no restart; forged JWT → 401 in every forgery class;
-  `just ci` green twice, and `cargo test` at the workspace root (D27).
-  `cargo test sync::` alone is **not** the gate — the OIDC suite lives under
-  `api::webhooks::`.
-- [ios] Home feed + focus, ask states, agents list/builder/schedule sheet;
-  attachments tappable and the locked "View original" `WKWebView`; outbox
-  409-semantics. ✓ green. (Pairing entry and the offline XCUITest moved to P2.)
+  (`api/mail.rs`, `mail/html.rs`, criteria O9–O11); P3 owed nothing there.
+  ✓ proven live: real mail arrived at 01:22:21 and the authenticated webhook
+  landed at 01:22:25 — **4 s** against a ≤60 s criterion, no restart. Forged
+  JWTs 401 in every forgery class. The gate is `cargo test` at the workspace
+  root (D27); `cargo test sync::` alone misses the OIDC suite, which lives
+  under `api::webhooks::`.
+- [ios] 2a (feed ⇄ focus), 1a's three route states, 1b, 1c and 1d, plus
+  `NAskField` and the `FlowLayout` the wrapping tag row needed. Attachments
+  tappable, "View original" in a locked `WKWebView`, outbox 409 semantics.
+  Built against the DEBUG fixture world because the endpoints behind these
+  screens land at P4–P6; they go live with no rewrite.
 
-  Built against the DEBUG fixture world, because the endpoints these screens
-  read land at P4–P6. They go live with no rewrite.
+  Three review passes ran on the finished lane — adversarial Codex, an unbiased
+  subagent, then `/simplify`. The defects worth remembering:
 
-  **Done 2026-08-20.** 2a (feed ⇄ focus), 1a's three route states, 1b, 1c and
-  1d all ship, plus `NAskField` and a `FlowLayout` the wrapping tag row needed.
-  The live push loop was proven at the same time: real mail arrived at 01:22:21
-  and the authenticated webhook landed at 01:22:25 — **4 s**, against the ≤60 s
-  criterion. An adversarial Codex review of the finished lane returned 23
-  findings; the ones that mattered are closed and each has a test:
-
-  - the locked `WKWebView` still allowed **link previews**, which bypass
-    `decidePolicyFor` entirely and fetch a remote URL on long press — the exact
-    tracking callback the CSP exists to stop;
-  - the **outbox was never drained** on launch, foreground or pairing, though
-    its own doc comment claimed all three: a kill between the durable write and
-    the request stranded an approval until the user tapped another one;
-  - `ends.date` round-tripped through an absolute `Date`, so a calendar-only
-    date **moved a day** in either direction depending on the device's offset;
-  - two in-flight agent `PATCH`es both derived `allowed_tools` from the same
-    pre-edit object, so the second **undid** the first;
-  - a mid-stream SSE `error` erased the partial answer that had already arrived;
+  - link previews bypassed `decidePolicyFor` entirely, fetching a remote URL on
+    long press — the exact tracking callback the CSP exists to stop;
+  - the outbox was never drained on launch, foreground or pairing, so a kill
+    between the durable write and the request stranded an approval;
+  - `ends.date` moved a day in either direction, because a calendar-only date
+    round-tripped through an absolute `Date`;
+  - two in-flight agent `PATCH`es both derived from the same pre-edit object,
+    so the second undid the first;
+  - a mid-stream SSE `error` erased the partial answer already on screen;
   - the fixture world returned canned successes for approve/skip, so the
-    outbox's own refetch **restored the card it had just resolved** — a
-    consumed token could be replayed forever;
-  - a sentence edit kept the old compiled spans, making every edit look like it
-    had failed;
-  - and `nadeIsBlank`, because U+200B is not whitespace and a paste of it lit
-    the ask field's submit button.
+    outbox's refetch restored the card it had just resolved and a consumed
+    token could replay forever;
+  - the models rebuilt empty on every tab tap, and 1b's "New" popped the screen
+    instead of opening the builder;
+  - `.submitLabel(.send)` printed "Send" on the keyboard — a C1/C2 violation no
+    gallery guard could see.
 
-  Recorded as deviations 50–56 in `DESIGN.md`. Two are worth reading before P6:
-  1a's citation rows are **not tappable** (the contract gives a message id where
-  the thread route needs a thread id) and 1c's Invocation radios are read-only
-  (`PATCH` accepts no trigger kind).
+  Recorded as deviations 50–57 in `DESIGN.md`. Two matter at P6: 1a's citation
+  rows are **not tappable** (the contract returns a message id where the thread
+  route needs a thread id) and 1c's Invocation radios are read-only (`PATCH`
+  accepts no trigger kind).
 
-  **1k's remaining sections are P7, not P3.** This line used to say "settings
-  beyond the CONNECTION + ACCOUNT sections", which contradicts P2's own scope
-  table above: AGENTS, READING and the served `disclosure` footer need
-  `GET/PATCH /settings` and `GET /runs`, and neither route exists before P7.
-  The footer especially — its whole point is that the sentence is server-supplied
-  so it cannot drift, which a bundled copy would defeat.
+  **1k's remaining sections are P7, not P3.** AGENTS, READING and the served
+  `disclosure` footer need `GET/PATCH /settings` and `GET /runs`, and neither
+  route exists before P7. The footer especially: its point is that the sentence
+  is server-supplied so it cannot drift, which a bundled copy would defeat.
 
-**P4 — First runs. [sdk] → [backend] (gate: P1 [sdk] green)**
+**P4 — First runs. ← next. [sdk] → [backend] (gate: P1 [sdk] green)**
 - [sdk] Postgres journal driver; kill-mid-run resume test; deterministic-id upsert test (kill between execute and step_done → no duplicate note). ✓ `cargo test --features postgres` green.
 - [backend] Tools ×4, compile-at-save, manual trigger, runs API, notes/drafts endpoints + thread join, **spend ceiling + per-agent caps enforced from this phase**. ✓ POST /agents compiles a real sentence; run journal shows ≥1 tool call; draft in GET /drafts; PATCH edits it; ceiling test trips.
 
