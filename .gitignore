@@ -34,3 +34,6 @@ DerivedData/
 
 # scripts/bench.sh's detached server and tunnel logs
 backend/.bench/
+
+# Agent worktrees (git worktree add .claude/worktrees/<name>)
+.claude/worktrees/
