@@ -50,7 +50,7 @@ struct MailListView: View {
             MailListHeader(
                 title: selected?.name ?? "",
                 accountEmail: accountEmail,
-                back: { navigation.mailPath.removeLast() }
+                back: { navigation.popMail() }
             )
             chipRow
             Hairline()

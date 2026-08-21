@@ -438,6 +438,45 @@ nonisolated final class MailStore: Sendable {
         }
     }
 
+    /// Replace the agent list wholesale.
+    ///
+    /// A replace and not a merge: `GET /agents` is unpaginated (`API.md` §5), so
+    /// the response *is* the list, and an agent deleted on the server has to
+    /// disappear here. The one rule borrowed from `replaceMailboxes` does not
+    /// apply - there is no "empty means still syncing" case for agents, because
+    /// zero agents is the state every new account is in.
+    func saveAgents(_ rows: [WireAgentRow]) async throws {
+        try await writer.write { db in
+            try AgentRecord.deleteAll(db)
+            for (index, row) in rows.enumerated() {
+                try AgentRecord(row, position: index).insert(db)
+            }
+        }
+    }
+
+    /// One agent, from the response to a write.
+    ///
+    /// `POST`/`PATCH /agents` return the full object, so a write does not need a
+    /// `GET /agents` behind it. A new agent goes on the **end**: `API.md` §5
+    /// orders the list oldest first, and `position` is what preserves that.
+    func upsertAgent(_ agent: WireAgent) async throws {
+        let row = WireAgentRow(id: agent.id, name: agent.name, nlDefinition: agent.nlDefinition,
+                               status: agent.status, triggerSummary: agent.triggerSummary,
+                               schedule: agent.schedule, lastRunAt: agent.lastRunAt,
+                               approvalRequired: agent.approvalRequired)
+        try await writer.write { db in
+            let existing = try AgentRecord.fetchOne(db, key: agent.id)?.position
+            let next = try Int.fetchOne(
+                db, sql: "select coalesce(max(position) + 1, 0) from agent"
+            ) ?? 0
+            try AgentRecord(row, position: existing ?? next).save(db)
+        }
+    }
+
+    func removeAgent(id: String) async throws {
+        _ = try await writer.write { db in try AgentRecord.deleteOne(db, key: id) }
+    }
+
     /// The feed as the screens see it, read once rather than observed.
     /// Used by tests and by the outbox's post-`409` refetch check.
     func feedForTests() async throws -> [WireFeedItem] {
@@ -446,6 +485,27 @@ nonisolated final class MailStore: Sendable {
 
     /// One item, refreshed on its own — what the outbox does after a `409`,
     /// and what P6's push deep link will do.
+    /// `POST /feed/seen`'s local half: the rows stop being new, and the badge
+    /// takes the server's own `new_count`.
+    ///
+    /// **One transaction**, because `observeFeed` fires per commit and each fire
+    /// re-decodes the whole feed. The count comes from the response rather than
+    /// from counting local rows, which would undercount as soon as the feed has
+    /// more than one page.
+    func markFeedItemsSeen(ids: [String], newCount: Int) async throws {
+        try await writer.write { db in
+            for id in ids {
+                guard var item = try FeedItemRecord.fetchOne(db, key: id) else { continue }
+                item.status = FeedStatus.resolved.rawValue
+                try item.update(db)
+            }
+            if var record = try FeedSyncRecord.fetchOne(db, key: 1) {
+                record.newCount = newCount
+                try record.update(db)
+            }
+        }
+    }
+
     func saveFeedItem(_ item: WireFeedItem) async throws {
         try await writer.write { db in try Self.upsertFeedItem(item, in: db) }
     }
@@ -532,7 +592,15 @@ nonisolated final class MailStore: Sendable {
     ///
     /// One row per feed item: tapping Approve twice is one intention, and the
     /// server answers the second attempt `409 token_consumed` regardless.
-    func enqueue(_ action: PendingActionRecord) async throws {
+    /// - Returns: false when a pending action for that card already exists.
+    ///
+    /// The caller needs the answer. `on conflict do nothing` is what stops a
+    /// double tap becoming two requests — but the optimistic UI move used to run
+    /// regardless, so tapping Save then Skip quickly left the *first* row queued
+    /// while the card said "skipped". The server would save the note and the
+    /// screen would claim the opposite.
+    @discardableResult
+    func enqueue(_ action: PendingActionRecord) async throws -> Bool {
         try await writer.write { db in
             try db.execute(
                 sql: """
@@ -546,6 +614,7 @@ nonisolated final class MailStore: Sendable {
                     action.approvalToken, action.createdAt,
                 ]
             )
+            return db.changesCount > 0
         }
     }
 

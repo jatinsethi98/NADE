@@ -1433,3 +1433,151 @@ the table found a real gap: `thread_html_only.json` is filed under
 "Subscriptions", which no page backed, so the one fixture exercising an emoji
 subject, a synthesised `body_text` and `to: []` had no list row and could not be
 opened at all.
+
+### D93. P3's screens, and the six things the review found underneath them
+
+The Ask tab's whole lane — 2a feed ⇄ focus, 1a's three route states, 1b, 1c,
+1d — plus tappable attachments and the locked "View original". The screens
+themselves are `DESIGN.md` transcribed; what is worth writing down is what an
+adversarial Codex review found *beneath* them, because five of the six were
+invisible from the screen and none would have been caught by looking.
+
+**The outbox was never drained.** `OutboxDriver.drain`'s own doc comment said it
+ran "on app foreground, when the feed appears, and after a successful pair", and
+the only caller was `enqueue`. A queue whose sole trigger is a new enqueue is not
+a queue: kill the app between the durable write and the request — the exact
+window the durable write exists for — and the approval sat there until the user
+happened to tap another one. `MailSync.drainOutbox` now owns the three triggers
+the comment always claimed. **A comment that describes behaviour is a claim, and
+an unasserted claim rots.**
+
+**A calendar date is not an instant.** `ends.date` is `"YYYY-MM-DD"` with no time
+and no zone, and it was being parsed to a `Date` at UTC midnight, shown through a
+local-zone formatter and written back. An existing `2027-01-06` displayed as
+5 January in New York, and a date picked near local midnight in a positive offset
+serialised as the day before — pausing an agent a day early. It is
+`DateComponents` now, and the wire string is built with `String(format:)` rather
+than a `DateFormatter`, so there is no instant anywhere on the path. The test
+runs the round trip through four zones on both sides of UTC.
+
+**Two writes derived from one read.** Every agent `PATCH` builds its payload from
+the `agent` in hand, so two in flight at once both read the pre-edit object:
+toggling two tools quickly sent two full `allowed_tools` arrays and the second,
+built before the first returned, put the first tool back. Writes are chained
+through one `Task` now. The general rule: **a read-modify-write over a remote
+object needs serialising even when each half looks atomic.**
+
+**Dismiss-then-save loses the user's work.** Both the sentence editor and the
+schedule sheet closed before awaiting the write, and reopening re-seeds from the
+unchanged agent — so an offline save silently discarded everything typed. They
+close only once the write lands.
+
+**A fixture that always succeeds teaches the wrong lesson.** Approve and skip
+returned canned successes and left `feed.json` untouched, so the outbox's own
+refetch restored the card it had just resolved, token and all: a consumed token
+could be replayed forever, and the 409 path `API.md` §7 is built around was
+unreachable. The fixture world now moves the card, spends the token, and answers
+a replay with `token_consumed`. **A stub that cannot reach the failure state
+cannot exercise the code that handles it.**
+
+**Invisible text is not empty text.** `trimmingCharacters(in: .whitespacesAndNewlines)`
+leaves U+200B, U+FEFF and the rest of Unicode's `Cf` category, so a paste of them
+lit the ask field's submit button and produced a query nobody could see.
+`String.nadeIsBlank` is the one definition the field, the navigation guard and
+agent creation all share.
+
+Two findings became **deviations rather than fixes**, because the contract is the
+limit and not the code (`DESIGN.md` 50–56): 1a's citation rows cannot be tappable
+while `API.md` §4 gives a source a `gmail_id` — a *message* id — where the thread
+route needs a thread id, and 1c's Invocation radios cannot write while `PATCH`
+accepts no trigger kind. Both would have been a 404 and a dead control
+respectively; recording them beats shipping either.
+
+### D94. The `Send` sweep was a coin flip, and the fix made it 19× faster
+
+`testNothingInTheGallerySaysSend` is the C1/C2 guard — the one test standing
+between v1 and a button that promises an outbound action. It pulled
+`allElementsBoundByIndex` for buttons *and* static texts and read `.label` off
+each, which is two cross-process round trips per element over a gallery with
+hundreds. It ran for ~190 s and intermittently killed the app with "Lost
+connection to the application", so every full-suite run was a coin flip on the
+assertion that matters most.
+
+One `NSPredicate` over `descendants(matching: .any)` is evaluated on the far side
+of that boundary: the tree is walked once and only offenders come back. 190 s →
+9.9 s, and strictly broader, because `.any` covers element types the two
+hand-listed queries did not.
+
+The predicate also carries its **own** self-check — five strings it must catch
+and five it must not — because swapping a hand-rolled regex for an anchored ICU
+`MATCHES` is exactly the change that quietly turns an assertion into a tautology.
+A green test that cannot go red is worse than no test.
+
+### D95. What an unbiased reviewer found that two adversarial ones did not
+
+Two review passes had already run over P3 — a Codex pass and a self-review —
+before a reviewer with **no context from either** read the same diff. It found
+two defects that made whole screens unusable, and both were invisible to
+anything the other passes could see.
+
+**1a and 1c were rebuilt empty on every tab tap.** Their models were constructed
+inside a `navigationDestination` / `fullScreenCover` content closure and held in
+a plain `let`. Those closures re-run on any re-render of the parent, and
+`RootTabView.body` reads `navigation.selection` — so *every tab tap* built a
+fresh `AskModel` with no prose, no route and no task. `.id(query)` kept the view
+identity stable, which meant `.task` did **not** re-fire and the new model was
+never started: submit a question, tap Mail, tap Ask, and the answer was gone
+with no way back but retyping. `@State(wrappedValue:)` evaluates once per view
+identity, which is the lifetime a streaming session wants.
+
+The lesson generalises past SwiftUI: **`let` is not ownership.** A reference
+handed in from a closure lives as long as the closure re-runs, not as long as
+the thing that reads it.
+
+**1b's "New" was worse than inert.** It called `ask("")`, which `AppNavigation`
+correctly refuses for an empty query, and then cleared the path anyway — so the
+button's entire effect was to throw the user off 1b having created nothing.
+
+Neither is reachable by reading a diff for correctness, which is what the other
+two passes did well. Both are one tap deep. `NADEUITests/HomeUITests.swift`
+exists because of them: **a screen with forty accessibility identifiers and no
+tap-through is a screen nobody has used.**
+
+The same pass also caught `toggleTool` still losing updates *after* D93 claimed
+it was fixed — serialising the sends was not enough, because the payload was
+derived before the `await`. A comment asserting a fix is not the fix.
+
+### D96. The Send guard could not see the keyboard
+
+`.submitLabel(.send)` on the ask field maps to `UIReturnKeyType.send`, which
+renders the literal word **Send** on the keyboard — live on 2a's two fields and
+1a's docked one. PLAN C1/C2 and DESIGN §4 are absolute that no UI string may
+promise an outbound action, and the project's own guard
+(`testNothingInTheGallerySaysSend`) asserts exactly that.
+
+It missed this because the system keyboard is not in the app's element tree, and
+because the gallery contains no `NAskField`. The guard was never wrong; its
+*reach* was smaller than its name implied. `.go` carries no such promise.
+
+Worth remembering when a rule is enforced by a test: **the test bounds what it
+can see, not what the rule covers.**
+
+### D97. A test that guarded data loss had a time bomb, and was never testing a tie
+
+`sweep::tests::a_truncated_listing_never_sweeps_a_message_tied_with_its_floor`
+is the regression test for one of the two CRITICAL findings the P3 backend
+commit records: the reconciliation sweep deleting a live message whose timestamp
+ties the listing's floor.
+
+It inserted two rows at `Utc::now() - Duration::days(3)` and expected neither to
+be swept. But the re-sync *fetches everything it lists* and writes the fixture's
+`internalDate` over the cached row — a hard-coded `2026-08-16T09:12:04Z`. So the
+listed message silently moved to that instant while the unlisted one kept
+`now() - 3d`, and the two were never tied at all. Whether the test passed was a
+function of which side of 09:12:04Z the clock was on: green until
+`2026-08-19T09:12:04Z`, red after, and asserting nothing about ties in either
+state. It went red partway through a session that had already run it green.
+
+Both rows now take the fixture's own instant, so the tie is real and the result
+does not depend on the day. **A test that mixes a wall clock with a fixed
+fixture is not testing what its name says; it is scheduling a failure.**

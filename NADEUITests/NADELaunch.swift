@@ -38,7 +38,9 @@ extension XCUIApplication {
         thread: String? = nil,
         now: String? = NADELaunch.pinnedNow,
         gallerySection: String? = nil,
-        contentSize: String? = nil
+        contentSize: String? = nil,
+        query: String? = nil,
+        agent: String? = nil
     ) -> XCUIApplication {
         let app = XCUIApplication()
         var options: [String: String] = ["NADEGallery": gallerySection == nil ? "0" : "1"]
@@ -49,6 +51,8 @@ extension XCUIApplication {
         options["NADENow"] = now
         options["NADEGallerySection"] = gallerySection
         options["UIPreferredContentSizeCategoryName"] = contentSize
+        options["NADEQuery"] = query
+        options["NADEAgent"] = agent
 
         app.launchArguments = options
             .sorted { $0.key < $1.key }

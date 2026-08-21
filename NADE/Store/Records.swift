@@ -362,6 +362,26 @@ nonisolated extension FeedItemRecord {
 }
 
 nonisolated extension AgentRecord {
+    /// `position` is the server's order, kept explicitly because `GET /agents`
+    /// carries no sort key and re-sorting locally would reorder the list every
+    /// time an agent was renamed.
+    init(_ row: WireAgentRow, position: Int) {
+        self.init(
+            id: row.id,
+            name: row.name.databaseSafe,
+            nlDefinition: row.nlDefinition.databaseSafe,
+            status: row.status.rawValue,
+            triggerSummary: row.triggerSummary.databaseSafe,
+            // A schedule that will not encode is dropped rather than failing the
+            // whole save: the row is still worth showing, and 1b renders
+            // `trigger_summary`, never the jsonb.
+            scheduleJson: row.schedule.flatMap { try? JSONCodec.encode($0) },
+            lastRunAt: row.lastRunAt,
+            approvalRequired: row.approvalRequired,
+            position: position
+        )
+    }
+
     var wire: WireAgentRow? {
         WireAgentRow(
             id: id,

@@ -303,3 +303,58 @@ nonisolated struct WireAgent: Codable, Hashable, Sendable, Identifiable {
         try container.encode(spec, forKey: .spec)
     }
 }
+
+// MARK: - Writes
+
+/// `API.md` §5: `PATCH /agents/{id}` "accepts any subset of `nl_definition`,
+/// `status`, `allowed_tools`, `approval_required`, `schedule`".
+///
+/// A subset, so every field is optional **and unset fields must not appear on
+/// the wire at all** — this is the one place in the app where `encodeIfPresent`
+/// is right rather than a bug. Everywhere else `API.md` §0 forbids omitting a
+/// nullable; here omission is the whole point, because sending
+/// `"schedule": null` would *clear* a schedule that the caller never touched.
+///
+/// `runs_done` has no field here because the server ignores it if sent, and a
+/// field the server ignores is a control that does nothing (`DESIGN.md` §4).
+nonisolated struct AgentPatch: Codable, Hashable, Sendable {
+    var nlDefinition: String?
+    var status: AgentStatus?
+    var allowedTools: [AgentTool]?
+    var approvalRequired: Bool?
+    var schedule: WireSchedule?
+
+    enum CodingKeys: String, CodingKey {
+        case status, schedule
+        case nlDefinition = "nl_definition"
+        case allowedTools = "allowed_tools"
+        case approvalRequired = "approval_required"
+    }
+
+    /// True when the patch would send `{}`. Callers use it to skip a request
+    /// that could only ever be a no-op round trip.
+    var isEmpty: Bool {
+        nlDefinition == nil && status == nil && allowedTools == nil
+            && approvalRequired == nil && schedule == nil
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(nlDefinition, forKey: .nlDefinition)
+        try container.encodeIfPresent(status, forKey: .status)
+        try container.encodeIfPresent(allowedTools, forKey: .allowedTools)
+        try container.encodeIfPresent(approvalRequired, forKey: .approvalRequired)
+        try container.encodeIfPresent(schedule, forKey: .schedule)
+    }
+}
+
+/// `POST /agents/{id}/run` → `{"run_id": "…"}`. The builder's "Run once now"
+/// needs the id and nothing else; the run itself is read back through `/runs`,
+/// which is P7.
+nonisolated struct WireRunStarted: Codable, Hashable, Sendable {
+    let runID: String
+
+    enum CodingKeys: String, CodingKey {
+        case runID = "run_id"
+    }
+}

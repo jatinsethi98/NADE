@@ -59,7 +59,14 @@ final class OutboxDriver {
     private var draining = false
     /// Honours `Retry-After`. Nothing schedules a wake-up for it; the next
     /// trigger simply finds the window has passed.
-    private var notBefore: Date?
+    ///
+    /// A **monotonic** instant, not a `Date`. `Retry-After` is a duration, and
+    /// measuring it against the wall clock meant an NTP correction or a manual
+    /// clock change moved the window: forward, and the queue retried early into
+    /// a server that had asked it not to; backward, and a 30-second backoff
+    /// could park the queue for hours. `ContinuousClock` keeps counting across
+    /// both, and across suspension.
+    private var notBefore: ContinuousClock.Instant?
 
     /// `onNeedsReauth` is how a dead Gmail credential reaches `MailSync`'s
     /// state machine. Injected rather than referenced, so the outbox does not
@@ -76,7 +83,11 @@ final class OutboxDriver {
         self.onNeedsReauth = onNeedsReauth
     }
 
-    private let onNeedsReauth: (() -> Void)?
+    /// Settable after construction, because `MailSync` owns the driver and
+    /// cannot hand it a closure capturing `self` before its own stored
+    /// properties exist. Still injected rather than referenced: the outbox does
+    /// not know what a `MailSync` is.
+    var onNeedsReauth: (() -> Void)?
 
     /// Queue an approve, and try to send it now.
     func approve(item: WireFeedItem) async {
@@ -114,7 +125,9 @@ final class OutboxDriver {
         // client had. The optimistic move is only honest once the intention is
         // on disk.
         do {
-            try await store.enqueue(action)
+            // A second tap on a card that already has a pending action loses.
+            // Moving the card anyway would let Skip overwrite a queued Save.
+            guard try await store.enqueue(action) else { return }
         } catch {
             lastEnqueueError = error
             return
@@ -131,6 +144,35 @@ final class OutboxDriver {
         await drain()
     }
 
+    /// EDGE: a hostile or broken `Retry-After`.
+    ///
+    /// A negative value would set a window already in the past (harmless) and a
+    /// huge one would strand the queue for the life of the process, so it is
+    /// clamped to an hour — long enough to respect any real rate limit, short
+    /// enough that a bad header cannot become a hang. `NaN`/infinity fall out of
+    /// the clamp too, which `min`/`max` alone would not guarantee.
+    static func clampRetryAfter(_ seconds: TimeInterval) -> TimeInterval {
+        // NaN and anything at or below zero carry no instruction, so the window
+        // is simply open. (`NaN > 0` is false, which is what catches it.)
+        guard seconds > 0 else { return 0 }
+        // An infinite value **is** an instruction — "wait" — just an unusable
+        // one, so it takes the maximum rather than the minimum. Returning 0 here
+        // would answer a server asking us to back off by retrying at once.
+        guard seconds.isFinite else { return maxRetryAfter }
+        return min(seconds, maxRetryAfter)
+    }
+
+    /// Long enough to respect any real rate limit, short enough that a bad
+    /// header cannot become a hang.
+    static let maxRetryAfter: TimeInterval = 3600
+
+    /// The fallback explanation for a card that expired while queued. Replaced
+    /// by the server's own `resolved_note` as soon as the refetch lands.
+    static let expiredNote = String(
+        localized: "This expired before it could be sent.",
+        comment: "Shown on a feed card whose approval window closed while it was queued"
+    )
+
     /// Set when the queue itself could not be written. The feed screen shows it
     /// rather than pretending the tap landed.
     private(set) var lastEnqueueError: Error?
@@ -145,7 +187,7 @@ final class OutboxDriver {
         draining = true
         defer { draining = false }
 
-        if let notBefore, Date() < notBefore {
+        if let notBefore, ContinuousClock.now < notBefore {
             // `Retry-After` is honoured by refusing to ask early, which is the
             // rule `NADE/CRITERIA.md` already states for the read paths. The
             // rows stay queued for the next trigger.
@@ -165,11 +207,17 @@ final class OutboxDriver {
                 await refresh(feedItemID: action.feedItemId)
             case .expired:
                 try? await store.removePendingAction(id: action.id)
+                // `API.md` §7 sets `resolved_note` on expired cards too - "the
+                // last two need it most, or they render an outcome with no
+                // explanation". Refetch so the server's own sentence is what is
+                // shown; the local write below is the fallback for when that
+                // refetch cannot happen either.
                 try? await store.resolveFeedItem(
                     id: action.feedItemId,
                     status: .expired,
-                    note: nil
+                    note: Self.expiredNote
                 )
+                await refresh(feedItemID: action.feedItemId)
             case .unauthorized:
                 // Do not drop the row: it may be the device credential rather
                 // than the token. A refetch that also fails tells us which.
@@ -191,7 +239,8 @@ final class OutboxDriver {
             case .retry(let message, let retryAfter):
                 try? await store.recordPendingFailure(id: action.id, error: message)
                 if let retryAfter {
-                    notBefore = Date().addingTimeInterval(retryAfter)
+                    notBefore = ContinuousClock.now
+                        .advanced(by: .seconds(Self.clampRetryAfter(retryAfter)))
                 }
                 // Whatever stopped this one will stop the next; stop walking.
                 return

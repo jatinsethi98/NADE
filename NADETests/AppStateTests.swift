@@ -73,6 +73,35 @@ private final class ScriptedSource: MailSource, @unchecked Sendable {
     }
     func seen(ids: [String]) async throws -> WireSeenResponse { throw APIFailure.notServedYet("seen") }
     func agents() async throws -> [WireAgentRow] { throw APIFailure.notServedYet("agents") }
+    func agent(id: String) async throws -> WireAgent { throw APIFailure.notServedYet("agent") }
+
+    func createAgent(nlDefinition: String) async throws -> WireAgent {
+        throw APIFailure.notServedYet("create agent")
+    }
+
+    func updateAgent(id: String, patch: AgentPatch) async throws -> WireAgent {
+        throw APIFailure.notServedYet("update agent")
+    }
+
+    func deleteAgent(id: String) async throws { throw APIFailure.notServedYet("delete agent") }
+
+    func runAgent(id: String) async throws -> WireRunStarted {
+        throw APIFailure.notServedYet("run agent")
+    }
+
+    func ask(query: String, threadID: String?, routeHint: AskRoute?)
+        -> AsyncThrowingStream<AskEvent, any Error> {
+        AsyncThrowingStream { $0.finish(throwing: APIFailure.notServedYet("ask")) }
+    }
+
+    func downloadAttachment(gmailID: String, attachmentID: String, filename: String)
+        async throws -> URL {
+        throw APIFailure.notServedYet("attachment")
+    }
+
+    func attachmentData(gmailID: String, attachmentID: String) async throws -> Data {
+        throw APIFailure.notServedYet("attachment bytes")
+    }
 }
 
 @MainActor

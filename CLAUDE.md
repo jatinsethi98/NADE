@@ -52,7 +52,15 @@ cd backend && cargo test                       # the whole workspace; see DECISI
 cd backend && cargo test -p nade-server        # faster, but a per-crate feature set
 xcodebuild -project NADE.xcodeproj -scheme NADE \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro' build test
+
+scripts/bench.sh --screen 1e                   # live app on real mail; see docs/BENCH.md
 ```
+
+**Look at the phase you just built.** `scripts/bench.sh` starts the backend,
+builds, installs, pairs and deep-links in one command, against the *live*
+server — not `-NADESeed`, which only proves the fixture world still renders.
+`docs/BENCH.md` covers the physical-phone path and why mail is ≤30 min stale
+without a tunnel.
 
 Tool locations that are not on the default non-interactive PATH:
 `~/.cargo/bin` (cargo 1.97.1), `~/google-cloud-sdk/bin` (gcloud, project

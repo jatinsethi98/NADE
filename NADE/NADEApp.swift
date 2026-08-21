@@ -144,7 +144,17 @@ private struct Composition {
         let clock = NADEClock.fromLaunchArgumentsOrLive()
 
         guard let seed = LaunchOptions.seed else {
-            return live(navigation: navigation, clock: clock)
+            // A live launch is the shipping composition, so it keeps the
+            // shipping default tab — `-NADEScreen` only moves it when it was
+            // actually passed. Without this the bench could deep-link into the
+            // fixture world but not into the real one, which is backwards: the
+            // live screens are the ones a phase gate has to look at.
+            if LaunchOptions.hasExplicitScreen {
+                LaunchOptions.applyInitialScreen(to: navigation)
+            }
+            let composition = live(navigation: navigation, clock: clock)
+            LaunchOptions.pairIfAsked(composition.sync)
+            return composition
         }
 
         LaunchOptions.applyInitialScreen(to: navigation)
@@ -262,15 +272,92 @@ enum LaunchOptions {
         UserDefaults.standard.string(forKey: "NADESeed").flatMap(Seed.init(rawValue:))
     }
 
+    /// `-NADEPairCode <six digits>` pairs a live launch against the server the
+    /// app already points at, so a reinstall does not need a human to retype a
+    /// code that is only good for ten minutes anyway.
+    ///
+    /// DEBUG-only, and deliberately not a substitute for the real screen: it
+    /// drives the very same `MailSync.pair` the Settings sheet drives, so what
+    /// the bench exercises is the shipping path.
+    static func pairIfAsked(_ sync: MailSync) {
+        guard let code = UserDefaults.standard.string(forKey: "NADEPairCode"),
+              !code.isEmpty else { return }
+        Task { @MainActor in
+            // EDGE: the code is single-use. Relaunching with the same argument
+            // after a successful pair must not spend a second one, and must not
+            // report a failure for a device that is already paired.
+            guard (try? sync.source.isPaired()) != true else { return }
+            do {
+                try await sync.pair(origin: ServerSetting.origin(),
+                                    code: code,
+                                    deviceName: "bench")
+            } catch {
+                // EDGE: wrong, expired or already-spent codes are one 401 by
+                // design. Say so on the console rather than failing silently -
+                // the screen's own "Not paired" is the other half of the signal.
+                print("[NADEPairCode] pairing failed: \(error)")
+            }
+        }
+    }
+
+    /// `-NADEScreen 2a-focus` names 2a's **focus** state.
+    ///
+    /// Read here with the rest of the launch vocabulary, but applied to the
+    /// model rather than to `AppNavigation`: which of 2a's two stacked states is
+    /// showing is one screen's private business, and app-global navigation is
+    /// the wrong place to keep it.
+    static var startsOnFocus: Bool {
+        UserDefaults.standard.string(forKey: "NADEScreen") == "2a-focus"
+    }
+
+    /// Whether `-NADEScreen` was passed at all.
+    ///
+    /// A seeded launch applies the screen unconditionally (its default, 1g, is
+    /// what every `-NADESeed` UI test that names no screen already expects). A
+    /// live launch must not: defaulting there would silently move the shipping
+    /// first screen off the Ask tab.
+    static var hasExplicitScreen: Bool {
+        UserDefaults.standard.string(forKey: "NADEScreen") != nil
+    }
+
     /// `-NADEScreen 1e|1f|1g|1k`, using DESIGN.md's own anchors — the same
     /// vocabulary `docs/screens/` and the deviation register already use.
     /// `-NADEMailbox <label id>` and `-NADEThread <thread id>` say which.
     static func applyInitialScreen(to navigation: AppNavigation) {
         let mailbox = UserDefaults.standard.string(forKey: "NADEMailbox") ?? "INBOX"
+        let screen = UserDefaults.standard.string(forKey: "NADEScreen")
+
+        // The Ask tab's screens (P3). Handled before the Mail block because
+        // that one lights the Mail tab unconditionally, which is right for
+        // every anchor it knows and wrong for all of these.
+        switch screen {
+        case "2a", "2a-focus", "1a", "1b", "1c":
+            navigation.selection = .ask
+            navigation.selectedMailboxID = mailbox
+            switch screen {
+            case "1a":
+                // `-NADEQuery` picks the route the fixture stream answers with,
+                // so all three of 1a's states are reachable from a launch.
+                let query = UserDefaults.standard.string(forKey: "NADEQuery")
+                    ?? "What did I miss from Stripe this week?"
+                navigation.homePath = [.query(query, routeHint: nil)]
+            case "1b":
+                navigation.homePath = [.agents]
+            case "1c":
+                navigation.editingAgentID = UserDefaults.standard.string(forKey: "NADEAgent")
+                    ?? FixtureSeed.defaultAgentID
+            default:
+                navigation.homePath = []
+            }
+            return
+        default:
+            break
+        }
+
         navigation.selection = .mail
         navigation.selectedMailboxID = mailbox
 
-        switch UserDefaults.standard.string(forKey: "NADEScreen") {
+        switch screen {
         case "1e":
             navigation.mailPath = [.threads(mailboxID: mailbox)]
         case "1f":

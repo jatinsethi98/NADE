@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 use wiremock::{
     matchers::{method, path},
@@ -393,7 +393,19 @@ async fn a_truncated_listing_never_sweeps_a_message_tied_with_its_floor() {
     let (db, account) = connected().await;
 
     // Two messages at exactly the same instant; the capped listing returns one.
-    let shared = Utc::now() - Duration::days(3);
+    //
+    // **The instant is the fixture's own**, not `now() - 3 days`. The re-sync
+    // fetches everything it lists and writes the fixture's `internalDate` over
+    // the cached row, so a wall-clock timestamp here meant the two rows were
+    // never actually tied - the listed one silently moved to the fixture's
+    // instant while only the *unlisted* one kept `now() - 3d`. Whether the test
+    // passed then depended on which side of 2026-08-16T09:12:04Z the clock
+    // happened to be: green until 2026-08-19T09:12:04Z and failing after, and
+    // asserting nothing about ties in either state. Reading the instant from
+    // `Fixture` is what makes the tie real and the test independent of the day
+    // it runs on.
+    let shared = DateTime::from_timestamp_millis(crate::sync::tests::Fixture::new(0).internal_ms)
+        .expect("the fixture's internalDate is a valid instant");
     for id in ["listed", "tied"] {
         sqlx::query(
             "insert into messages (account_id, gmail_id, thread_id, internal_ts, label_ids, body_text) \

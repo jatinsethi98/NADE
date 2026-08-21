@@ -43,7 +43,7 @@ struct SettingsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SettingsHeader { navigation.mailPath.removeLast() }
+            SettingsHeader { navigation.popMail() }
             Hairline()
             ScrollView {
                 VStack(spacing: 0) {

@@ -22,6 +22,27 @@ import SwiftUI
 @MainActor
 final class MailGeometryTests: XCTestCase {
 
+    /// One place that knows `ThreadMessageBlock`'s shape.
+    ///
+    /// Four call sites each repeated the same six arguments on a ~160-column
+    /// line, so every signature change touched all four — which is exactly what
+    /// happened twice in this change set.
+    ///
+    /// `attachmentSource` is a real `FixtureMailSource` rather than a stub: the
+    /// measurements below all use messages whose `body_html` is nil, so no
+    /// "View original" button enters the layout and nothing is ever fetched.
+    private func block(
+        _ message: WireMessage,
+        accountEmail: String,
+        now: Date,
+        topGap: CGFloat
+    ) -> ThreadMessageBlock {
+        ThreadMessageBlock(message: message, accountEmail: accountEmail, now: now,
+                           topGap: topGap, showsOriginal: .constant([]),
+                           onOpenAttachment: { _, _ in },
+                           attachmentSource: FixtureMailSource(isEmpty: false))
+    }
+
     /// The design frame, and the two tolerances — all three from
     /// `RenderMeasure`, where `ComponentGeometryTests` derives them too.
     private let width = RenderMeasure.designWidth
@@ -257,8 +278,8 @@ final class MailGeometryTests: XCTestCase {
 
         XCTAssertMeasures(
             RenderMeasure.height(
-                of: ThreadMessageBlock(message: message, accountEmail: "me@nade.local",
-                                       now: now, topGap: 10),
+                of: block(message, accountEmail: "me@nade.local",
+                                     now: now, topGap: 10),
                 width: width - 2 * Theme.Space.screen
             ),
             expected, accuracy: cssBox, "1f message block"
@@ -268,18 +289,20 @@ final class MailGeometryTests: XCTestCase {
     /// The paragraph gap is the mockup's 12, and it is real: the same text as
     /// one paragraph is shorter by exactly `(n − 1) × 12`.
     func testParagraphsAreSeparatedByTheMockupsTwelvePoints() throws {
-        func block(_ text: String) -> CGFloat {
+        // Shadows the outer helper deliberately: this one varies the *text*.
+        func measure(_ text: String) -> CGFloat {
             RenderMeasure.height(
-                of: ThreadMessageBlock(
-                    message: WireMessage(gmailId: "m", fromName: "A", fromEmail: "a@b.c",
-                                         to: [], cc: [], ts: now, bodyText: text,
-                                         bodyHtml: nil, labelIds: [], attachments: []),
-                    accountEmail: "a@b.c", now: now, topGap: 10),
+                of: self.block(
+                    WireMessage(gmailId: "m", fromName: "A", fromEmail: "a@b.c",
+                                to: [], cc: [], ts: now, bodyText: text,
+                                bodyHtml: nil, labelIds: [], attachments: []),
+                    accountEmail: "a@b.c", now: now, topGap: 10
+                ),
                 width: width - 2 * Theme.Space.screen
             )
         }
-        let one = block("One.")
-        let three = block("One.\n\nTwo.\n\nThree.")
+        let one = measure("One.")
+        let three = measure("One.\n\nTwo.\n\nThree.")
         let bodyLine = 14.5 * 1.75
         XCTAssertMeasures(three - one, 2 * (bodyLine + 12), accuracy: cssBox,
                           "the gap between paragraphs is not the design's 12")
@@ -306,7 +329,8 @@ final class MailGeometryTests: XCTestCase {
 
         // And the view renders every one of them, including the empty ones.
         let height = RenderMeasure.height(
-            of: ThreadMessageBlock(message: message, accountEmail: "a@b.c", now: now, topGap: 10),
+            of: block(message, accountEmail: "a@b.c",
+                                     now: now, topGap: 10),
             width: width - 2 * Theme.Space.screen
         )
         let single = WireMessage(
@@ -314,7 +338,8 @@ final class MailGeometryTests: XCTestCase {
             ts: now, bodyText: "last", bodyHtml: nil, labelIds: [], attachments: []
         )
         let shortHeight = RenderMeasure.height(
-            of: ThreadMessageBlock(message: single, accountEmail: "a@b.c", now: now, topGap: 10),
+            of: block(single, accountEmail: "a@b.c",
+                                     now: now, topGap: 10),
             width: width - 2 * Theme.Space.screen
         )
         XCTAssertGreaterThan(height, shortHeight, "the blank paragraphs were dropped")

@@ -29,7 +29,11 @@ pub(crate) struct Fixture {
     pub(crate) id: String,
     pub(crate) thread_id: String,
     labels: Vec<String>,
-    internal_ms: i64,
+    /// `pub(crate)` so a test in a sibling module can anchor to the *same*
+    /// instant instead of re-deriving one from the wall clock — see
+    /// `sweep::tests::a_truncated_listing_never_sweeps_a_message_tied_with_its_floor`,
+    /// which was a time bomb for exactly that reason.
+    pub(crate) internal_ms: i64,
     raw: Vec<u8>,
     /// Answer this sub-request with a 404, as if the user had just deleted it.
     gone: bool,

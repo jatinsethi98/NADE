@@ -126,6 +126,20 @@ nonisolated struct WireThreadPage: Codable, Hashable, Sendable {
     }
 }
 
+/// `from_name` falling back to `from_email`.
+///
+/// `API.md` §2 leaves the call to the UI, so the UI makes it **once**: 1e's row,
+/// 1a's result row and 1f's message header all need it and all had their own
+/// copy, with only `MailRow`'s carrying the reason.
+nonisolated protocol WireSender {
+    var fromName: String { get }
+    var fromEmail: String { get }
+}
+
+nonisolated extension WireSender {
+    var senderDisplayName: String { fromName.isEmpty ? fromEmail : fromName }
+}
+
 nonisolated struct WireThreadRow: Codable, Hashable, Sendable {
     let id: String
     /// `""` when the mail has none — never null.
@@ -295,3 +309,6 @@ extension WireAgentCard {
         try c.encode(feedItemId, forKey: .feedItemId)
     }
 }
+
+extension WireThreadRow: WireSender {}
+extension WireMessage: WireSender {}

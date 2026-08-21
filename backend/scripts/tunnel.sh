@@ -70,16 +70,23 @@ echo "tunnel: $HOST"
 # Prove the tunnel actually reaches us BEFORE pointing Pub/Sub at it. Otherwise
 # a dead tunnel is discovered half an hour later as "no mail arrived", with
 # nothing local to look at.
-echo "checking the tunnel reaches this server ..."
-for attempt in $(seq 1 20); do
-    if curl -fsS "$HOST/v1/healthz" >/dev/null 2>&1; then
+# A quick tunnel's hostname is registered before Cloudflare's edge will route
+# to it, and the gap is routinely 30-60 s. The first version of this waited 20 s
+# and then killed a perfectly healthy tunnel, which reads as "cloudflared is
+# broken" rather than "you were early".
+echo "checking the tunnel reaches this server (edge routing can take ~60 s) ..."
+for attempt in $(seq 1 60); do
+    if curl -fsS --max-time 5 "$HOST/v1/healthz" >/dev/null 2>&1; then
+        echo "tunnel reachable after ~$((attempt * 2)) s"
         break
     fi
-    if [ "$attempt" -eq 20 ]; then
-        echo "the tunnel is up but $HOST/v1/healthz does not answer." >&2
+    if [ "$attempt" -eq 60 ]; then
+        echo "the tunnel is up but $HOST/v1/healthz never answered in 120 s." >&2
+        echo "last 20 lines of $LOG:" >&2
+        tail -20 "$LOG" >&2
         exit 1
     fi
-    sleep 1
+    sleep 2
 done
 
 ENDPOINT="$HOST/v1/webhooks/gmail"

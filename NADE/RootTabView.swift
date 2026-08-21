@@ -86,7 +86,7 @@ struct RootTabView: View {
     @ViewBuilder
     private func screen(for tab: NTab) -> some View {
         switch tab {
-        case .ask: PlaceholderScreen(tab: .ask, note: "Ask, search, or describe an agent.")
+        case .ask: HomeTabRoot(sync: sync, models: models, clock: clock)
         case .mail: MailTabRoot(models: models, clock: clock)
         case .notes: PlaceholderScreen(tab: .notes, note: "Notes your agents write.")
         case .calendar: PlaceholderScreen(tab: .calendar, note: "Six days, each a compressed timeline.")

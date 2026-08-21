@@ -22,26 +22,32 @@ final class ShellStateUITests: XCTestCase {
         XCUIApplication.nade(seed: nil, now: nil)
     }
 
+    /// **Rewritten at P3**, for the reason P2 rewrote the Mail leg below:
+    /// replacing the Ask placeholder with 2a deleted `screen.ask.taps`, and
+    /// deleting the assertion with it would drop the property D29 exists to
+    /// protect. 2a asserts the state it actually has — the feed ⇄ focus mode,
+    /// which lives on `HomeFeedModel` and has process lifetime. That is
+    /// strictly stronger than a tap counter: the mode drives which of two whole
+    /// layouts is on screen.
     func testScreenStateSurvivesLeavingAndReturningToATab() {
         let app = launchApp()
-        let ask = app.buttons["screen.ask.taps"]
-        XCTAssertTrue(ask.waitForExistence(timeout: 10))
-        XCTAssertEqual(ask.label, "Taps: 0")
+        let grabber = app.buttons["home.grabber"]
+        XCTAssertTrue(grabber.waitForHittable(timeout: 10))
 
-        ask.tap()
-        ask.tap()
-        ask.tap()
-        XCTAssertEqual(ask.label, "Taps: 3")
+        // Feed → focus.
+        grabber.tap()
+        XCTAssertTrue(app.staticTexts["home.greeting"].waitForExistence(timeout: 3),
+                      "tapping the grabber did not reach the focus state")
 
         app.buttons["tab.calendar"].tap()
         XCTAssertTrue(app.buttons["screen.calendar.taps"].waitForExistence(timeout: 3))
-        XCTAssertEqual(app.buttons["screen.calendar.taps"].label, "Taps: 0", "the calendar screen should have its own state")
+        XCTAssertEqual(app.buttons["screen.calendar.taps"].label, "Taps: 0",
+                       "the calendar screen should have its own state")
 
         app.buttons["tab.ask"].tap()
-        XCTAssertTrue(ask.waitForExistence(timeout: 3))
-        XCTAssertEqual(
-            ask.label, "Taps: 3",
-            "the Ask screen was rebuilt when the tab changed — its @State, scroll position and running tasks would all be gone"
+        XCTAssertTrue(
+            app.staticTexts["home.greeting"].waitForExistence(timeout: 3),
+            "the Ask screen was rebuilt when the tab changed — its model, scroll position and running tasks would all be gone"
         )
     }
 
@@ -60,7 +66,20 @@ final class ShellStateUITests: XCTestCase {
     func testAllFourScreensKeepTheirOwnStateAcrossAFullRotation() {
         let app = XCUIApplication.nade()
 
-        XCTAssertTrue(app.buttons["screen.ask.taps"].waitForExistence(timeout: 10))
+        // Ask: move off the default state, the same way the test above does.
+        //
+        // **Select the tab first.** A seeded launch applies `-NADEScreen`, whose
+        // default is the Mail tab, and `RootTabView` keeps all four screens in
+        // the tree (D29) with `allowsHitTesting` off for the three that are not
+        // showing. 2a therefore *exists* from launch and is not tappable until
+        // its tab is selected — which is the property this test is about, so
+        // asserting on existence alone would have quietly tested nothing.
+        app.buttons["tab.ask"].tap()
+        XCTAssertTrue(app.staticTexts["home.date"].waitForExistence(timeout: 10))
+        let grabber = app.buttons["home.grabber"]
+        XCTAssertTrue(grabber.waitForHittable(timeout: 10))
+        grabber.tap()
+        XCTAssertTrue(app.staticTexts["home.greeting"].waitForExistence(timeout: 3))
 
         // Mail: push a list and move off the default mailbox.
         app.buttons["tab.mail"].tap()
@@ -69,8 +88,8 @@ final class ShellStateUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["maillist.title"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.staticTexts["maillist.title"].label, "Updates")
 
-        // The other three still carry their placeholder counters.
-        let placeholders = ["ask", "notes", "calendar"]
+        // The two remaining placeholders still carry their counters.
+        let placeholders = ["notes", "calendar"]
         for (index, id) in placeholders.enumerated() {
             app.buttons["tab.\(id)"].tap()
             let counter = app.buttons["screen.\(id).taps"]
@@ -87,10 +106,27 @@ final class ShellStateUITests: XCTestCase {
             XCTAssertEqual(counter.label, "Taps: \(index + 1)", "the \(id) screen lost its state")
         }
 
+        app.buttons["tab.ask"].tap()
+        XCTAssertTrue(app.staticTexts["home.greeting"].waitForExistence(timeout: 3),
+                      "the Ask tab was rebuilt: it fell back to the feed state")
+
         app.buttons["tab.mail"].tap()
         XCTAssertTrue(app.staticTexts["maillist.title"].waitForExistence(timeout: 3),
                       "the Mail tab was rebuilt: its pushed list is gone")
         XCTAssertEqual(app.staticTexts["maillist.title"].label, "Updates",
                        "the Mail tab kept its stack but lost the mailbox it was showing")
+    }
+}
+
+extension XCUIElement {
+    /// Exists **and** can be tapped.
+    ///
+    /// `waitForExistence` answers a weaker question than every caller here
+    /// wants: an element inside a scroll view exists the moment the list does,
+    /// and tapping it before layout settles fails with "not hittable".
+    func waitForHittable(timeout: TimeInterval) -> Bool {
+        let predicate = NSPredicate(format: "exists == true AND isHittable == true")
+        let expectation = XCTNSPredicateExpectation(predicate: predicate, object: self)
+        return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
     }
 }

@@ -78,12 +78,17 @@ Still worth doing on that page: the old Desktop client
 (`730041371062-41hi220o5lf53d7pr1msf6d57900s7s6…`) has its secret sitting in
 iCloud Drive. Rotate it before anything ships publicly.
 
-## H5 — consent clicks (recurring, ~weekly)
+## H5 — consent clicks (recurring, ~weekly) · last done 2026-08-19
 
 When the orchestrator opens the Gmail consent screen, approve it. The OAuth app
 is in Testing mode, so refresh tokens die every 7 days; expect to redo this
 about once a week until verification. The backend surfaces it as a
 `needs_reauth` banner rather than failing silently.
+
+Consent on 2026-08-19 bound `jatinsethi98@gmail.com` and synced 1018 messages /
+919 threads / 22 labels in ~70 s. `scripts/bench.sh` prints the re-consent
+command when `/v1/me` stops being `ok`, so the weekly expiry is self-announcing
+— see `docs/BENCH.md`.
 
 ## H7 — LLM keys (blocks P4)
 
@@ -101,7 +106,7 @@ OPENAI_COMPAT_API_KEY=
 When asked, send an email to jatinsethi98@gmail.com from anywhere. That is how
 the push → sync → agent → feed loop gets proven end to end.
 
-## H9 — *optional*, only for push on a physical phone (P6)
+## H9 — *optional*, only for push on a physical phone (P6) · **undecided**
 
 Apple Developer Program ($99/yr), App ID `fsaas.NADE` with Push Notifications,
 an APNs `.p8` key → `backend/secrets/apns.p8`. **The simulator needs none of

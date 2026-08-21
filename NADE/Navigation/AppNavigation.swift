@@ -44,6 +44,25 @@ nonisolated enum MailRoute: Hashable, Sendable {
     }
 }
 
+/// The Ask tab's stack. Named `Home` and not `Ask` because `AskRoute` is
+/// already the SSE `route` event's three kinds (`WireAsk.swift`) - two
+/// different things called the same word in the same module is exactly the
+/// confusion `MailRoute` avoided by not being called `Route`.
+nonisolated enum HomeRoute: Hashable, Sendable {
+    /// 1a, pushed when the ask field is submitted. The query travels in the
+    /// route for the same reason a thread's mailbox does: the screen is
+    /// constructed from outside the view tree by "Make this an agent", which
+    /// re-asks the same words with a forced route.
+    case query(String, routeHint: AskRoute?)
+    /// 1b, reached from 2a focus's "All →".
+    case agents
+
+    /// `DESIGN.md` §2's map: 1a and 1b both keep the bar with **Ask** lit.
+    /// 1c and 1d are absent here on purpose - they are modals, not pushes, so
+    /// they cover the bar rather than hiding it.
+    var hidesTabBar: Bool { false }
+}
+
 @MainActor
 @Observable
 final class AppNavigation {
@@ -52,6 +71,11 @@ final class AppNavigation {
     /// P2 does.
     var selection: NTab = .ask
     var mailPath: [MailRoute] = []
+    var homePath: [HomeRoute] = []
+
+    /// 1c, the agent builder. A modal rather than a push (`DESIGN.md` §2), so
+    /// it is an identity and not a path entry - and `nil` is "closed".
+    var editingAgentID: String?
 
     /// The mailbox 1e is showing. Owned here rather than by the screen because
     /// 1g sets it on the way in, and because a screenshot launch argument has
@@ -64,9 +88,67 @@ final class AppNavigation {
     var showsTabBar: Bool {
         switch selection {
         case .mail: !(mailPath.last?.hidesTabBar ?? false)
+        case .ask: !(homePath.last?.hidesTabBar ?? false)
         default: true
         }
     }
+
+    /// 1a. A fresh submit replaces whatever query was on screen rather than
+    /// stacking, so "Make this an agent" - which re-asks the same words with a
+    /// forced route - does not leave a back button to a dead intermediate state.
+    func ask(_ query: String, routeHint: AskRoute? = nil) {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        // `nadeIsBlank` covers empty too — a string with no scalars has no
+        // visible one — so this is the whole guard, not half of it.
+        guard !trimmed.nadeIsBlank else { return }
+        homePath = [.query(trimmed, routeHint: routeHint)]
+    }
+
+    func openAgents() {
+        // EDGE: reachable from 2a focus and from 1a's saved-draft line. Pushing
+        // twice would put two identical screens on the stack.
+        if homePath.last != .agents { homePath.append(.agents) }
+    }
+
+    func openAgent(_ id: String) {
+        editingAgentID = id
+    }
+
+    /// Pop one screen off a stack, safely.
+    ///
+    /// `Array.removeLast()` on an empty array is a **fatal error**, and a back
+    /// affordance is exactly the control a user double-taps. This started as a
+    /// guard for 1b alone; the other six back affordances in the app — 1e, 1f,
+    /// 1k and 1a's three dismissals — were all calling `removeLast()` or
+    /// `removeAll()` on the array directly, so the guard covered one of seven.
+    /// Popping is now something `AppNavigation` does, not something each screen
+    /// re-implements.
+    func popHome() { pop(&homePath) }
+    func popMail() { pop(&mailPath) }
+
+    /// 1a's "Clear", "Start over" and back all mean the same thing: leave the
+    /// query behind and return to 2a. One name, so they cannot drift — and so
+    /// the day 1a can be pushed over 1b, `removeAll()` does not silently pop two
+    /// screens.
+    func clearAsk() {
+        homePath.removeAll { if case .query = $0 { return true } else { return false } }
+    }
+
+    private func pop<Route>(_ path: inout [Route]) {
+        guard !path.isEmpty else { return }
+        path.removeLast()
+    }
+
+    /// 1b's "New": back to 2a with the focus state's ask field waiting.
+    /// `wantsFocus` is consumed by 2a on appear, so it cannot latch.
+    func newAgent() {
+        homePath = []
+        selection = .ask
+        wantsAskFocus = true
+    }
+
+    /// Set by `newAgent()`, read once by 2a. A request, not a mode.
+    var wantsAskFocus = false
 
     func openMailbox(_ id: String) {
         selectedMailboxID = id

@@ -46,7 +46,7 @@ struct MailRow: View {
     /// address; the server does not invent one". This is that decision — a row
     /// with a blank sender and a visible subject reads as a bug.
     private var sender: String {
-        row.fromName.isEmpty ? row.fromEmail : row.fromName
+        row.senderDisplayName
     }
 
     /// Formatted once. `body` rendered it and then `spokenLabel` formatted the

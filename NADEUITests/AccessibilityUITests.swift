@@ -77,20 +77,45 @@ final class AccessibilityUITests: XCTestCase {
     /// F24. v1 takes no outbound action (DESIGN.md §4: the primary button
     /// "never" reads "Send"). The gallery exposed "Send" to VoiceOver twice and
     /// printed "send button" as visible copy.
+    /// **Asked as one query, not as two arrays.**
+    ///
+    /// This used to pull `allElementsBoundByIndex` for buttons *and* static
+    /// texts and read `.label` off every one — two cross-process round trips per
+    /// element, over a gallery with hundreds of them. It took ~190 s and
+    /// intermittently killed the app with "Lost connection", which made every
+    /// full-suite run a coin flip. A predicate is evaluated on the other side of
+    /// that boundary, so the whole tree is walked once and only the offenders
+    /// come back. It is also strictly broader: `.any` covers element types the
+    /// two hand-listed queries did not.
     func testNothingInTheGallerySaysSend() {
+        // `MATCHES` is anchored, so the wildcards are part of the pattern. `\\b`
+        // keeps "Sender" and "resend" from matching, exactly as the old
+        // `.regularExpression` search did.
+        let saysSend = NSPredicate(format: "label MATCHES[c] %@",
+                                   ".*\\bsend(s|ing)?\\b.*")
+
+        // **Prove the guard can fail.** Swapping a hand-rolled regex search for
+        // an ICU `MATCHES` is exactly the kind of change that quietly turns an
+        // assertion into a tautology, and a green test that cannot go red is
+        // worse than no test. These run against the predicate itself, so they
+        // cost nothing and fail loudly if the pattern stops meaning what it says.
+        for offender in ["Send", "send draft", "SENDING", "Sends it", "Tap Send now"] {
+            XCTAssertTrue(saysSend.evaluate(with: ["label": offender]),
+                          "\(offender.debugDescription) should have been caught")
+        }
+        for innocent in ["Sender", "Resend", "Save draft", "Save note", "sendest"] {
+            XCTAssertFalse(saysSend.evaluate(with: ["label": innocent]),
+                           "\(innocent.debugDescription) is not an outbound promise")
+        }
+
         for section in ["buttons", "inputs"] {
             let app = launchGallery(section: section)
             XCTAssertTrue(app.staticTexts.firstMatch.waitForExistence(timeout: 10))
 
-            // Both the spoken names and the visible copy.
-            let labels = app.buttons.allElementsBoundByIndex.map(\.label)
-                + app.staticTexts.allElementsBoundByIndex.map(\.label)
-            let offenders = labels.filter {
-                $0.range(of: #"\bsend(s|ing)?\b"#, options: [.regularExpression, .caseInsensitive]) != nil
-            }
-            XCTAssertTrue(
-                offenders.isEmpty,
-                "the \(section) section says \(offenders) — v1 takes no outbound action"
+            let offenders = app.descendants(matching: .any).matching(saysSend)
+            XCTAssertEqual(
+                offenders.count, 0,
+                "the \(section) section says \(offenders.allElementsBoundByIndex.map(\.label)) — v1 takes no outbound action"
             )
         }
     }

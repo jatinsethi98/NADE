@@ -18,6 +18,7 @@
 //    applied again.
 //
 
+import QuickLook
 import SwiftUI
 
 struct ThreadView: View {
@@ -82,6 +83,10 @@ struct ThreadView: View {
     let backTitle: String
     let now: Date
 
+    /// Which messages have their original open. The one genuinely view-shaped
+    /// piece of state here — the download's lifecycle lives on `ThreadModel`.
+    @State private var showsOriginal: Set<String> = []
+
     private var subject: String {
         model.thread?.subject ?? model.row?.subject ?? ""
     }
@@ -89,7 +94,7 @@ struct ThreadView: View {
     var body: some View {
         VStack(spacing: 0) {
             ThreadNavBar(title: model.thread?.mailboxName ?? backTitle) {
-                navigation.mailPath.removeLast()
+                navigation.popMail()
             }
             Hairline()
             body(for: model.thread)
@@ -98,6 +103,16 @@ struct ThreadView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .task(id: threadID) { await model.load(id: threadID, in: mailboxID) }
+        .quickLookPreview(Binding(get: { model.previewURL },
+                                  set: { model.previewURL = $0 }))
+        .onDisappear { model.stopAttachments() }
+        .alert(model.attachmentProblem ?? "",
+               isPresented: Binding(get: { model.attachmentProblem != nil },
+                                    set: { if !$0 { model.dismissAttachmentProblem() } })) {
+            Button(String(localized: "OK", comment: "Dismisses an attachment error")) {
+                model.dismissAttachmentProblem()
+            }
+        }
     }
 
     // MARK: Body
@@ -137,7 +152,12 @@ struct ThreadView: View {
                             message: message,
                             accountEmail: thread.accountEmail,
                             now: now,
-                            topGap: index == 0 ? Metrics.firstMetaTop : Metrics.laterMetaTop
+                            topGap: index == 0 ? Metrics.firstMetaTop : Metrics.laterMetaTop,
+                            showsOriginal: $showsOriginal,
+                            onOpenAttachment: { gmailID, attachment in
+                                model.openAttachment(gmailID: gmailID, attachment: attachment)
+                            },
+                            attachmentSource: model.attachmentSource
                         )
                     }
 
@@ -211,6 +231,12 @@ struct ThreadMessageBlock: View {
     let accountEmail: String
     let now: Date
     let topGap: CGFloat
+    /// Which messages have their original open. Owned by `ThreadView` rather
+    /// than by each block, so a re-render of the list does not collapse one.
+    @Binding var showsOriginal: Set<String>
+    let onOpenAttachment: (String, WireAttachment) -> Void
+    /// Where "View original" gets its inline parts.
+    let attachmentSource: any MailSource
 
     /// Split once, at construction. As a computed property this ran on every
     /// `body` evaluation — and `ThreadView` lays messages out in a plain
@@ -218,11 +244,17 @@ struct ThreadMessageBlock: View {
     /// every render, not just the visible ones.
     private let paragraphs: [String]
 
-    init(message: WireMessage, accountEmail: String, now: Date, topGap: CGFloat) {
+    init(message: WireMessage, accountEmail: String, now: Date, topGap: CGFloat,
+         showsOriginal: Binding<Set<String>>,
+         onOpenAttachment: @escaping (String, WireAttachment) -> Void,
+         attachmentSource: any MailSource) {
         self.message = message
         self.accountEmail = accountEmail
         self.now = now
         self.topGap = topGap
+        self._showsOriginal = showsOriginal
+        self.onOpenAttachment = onOpenAttachment
+        self.attachmentSource = attachmentSource
         self.paragraphs = Self.paragraphs(of: message.bodyText)
     }
 
@@ -253,7 +285,7 @@ struct ThreadMessageBlock: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline, spacing: M.metaGap) {
-                Text(message.fromName.isEmpty ? message.fromEmail : message.fromName)
+                Text(message.senderDisplayName)
                     .foregroundStyle(Theme.Color.ink)
                 if addressedToMe {
                     Text("· to me").foregroundStyle(Theme.Color.ink60)
@@ -287,15 +319,16 @@ struct ThreadMessageBlock: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             if !message.attachments.isEmpty {
-                // Non-interactive: the attachments proxy is P3, and the mockup
-                // draws no `onClick` either.
+                // **Tappable from P3.** The proxy shipped in P2 and the tap
+                // lands here; the mockup draws no `onClick`, but a listed
+                // attachment that cannot be opened is a control that does
+                // nothing (DESIGN.md §4).
                 //
                 // **Inline parts are listed too.** `inline: true` marks a part
-                // the HTML references with `cid:`, and a mail client would
-                // normally hide it because it is already visible in the body.
-                // P2 does not render `body_html` (P3's "View original" does),
-                // so hiding it here would make it invisible everywhere. Revisit
-                // with that screen, not before.
+                // the HTML references with `cid:`, which "View original" now
+                // renders — but the CSP there allows `cid:` and nothing else,
+                // and a reader who wants the file itself still needs a way to
+                // reach it. Deviation 47 stays closed by keeping both.
                 //
                 // The row scrolls: the mockup draws one attachment, real mail
                 // carries several, and two long filenames overflow 375 pt
@@ -303,15 +336,51 @@ struct ThreadMessageBlock: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: M.attachmentsGap) {
                         ForEach(message.attachments, id: \.id) { attachment in
-                            NTag(attachment.name, style: .neutral)
-                            Text(AttachmentSize.string(bytes: attachment.size))
-                                .font(Theme.Font.body(M.attachmentSizeText))
-                                .foregroundStyle(Theme.Color.ink62)
-                                .tabularNumerals()
+                            Button {
+                                onOpenAttachment(message.gmailId, attachment)
+                            } label: {
+                                HStack(spacing: M.attachmentsGap) {
+                                    NTag(attachment.name, style: .neutral)
+                                    Text(AttachmentSize.string(bytes: attachment.size))
+                                        .font(Theme.Font.body(M.attachmentSizeText))
+                                        .foregroundStyle(Theme.Color.ink62)
+                                        .tabularNumerals()
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityIdentifier("thread.attachment.\(attachment.id)")
                         }
                     }
                 }
                 .padding(.top, M.attachmentsTop)
+            }
+
+            // "View original" — only when there is an original to view.
+            // `body_html` is null on plain-text mail, and a button that opened
+            // an empty page would be worse than no button.
+            if let html = message.bodyHtml, !html.isEmpty {
+                Button {
+                    if showsOriginal.contains(message.gmailId) {
+                        showsOriginal.remove(message.gmailId)
+                    } else {
+                        showsOriginal.insert(message.gmailId)
+                    }
+                } label: {
+                    Text(showsOriginal.contains(message.gmailId) ? "Hide original" : "View original")
+                        .font(Theme.Font.body(M.metaSize))
+                        .foregroundStyle(Theme.Color.accent)
+                        .padding(.top, M.attachmentsTop)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("thread.vieworiginal.\(message.gmailId)")
+
+                if showsOriginal.contains(message.gmailId) {
+                    OriginalMessageView(html: html,
+                                        source: attachmentSource,
+                                        gmailID: message.gmailId)
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

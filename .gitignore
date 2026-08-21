@@ -31,3 +31,6 @@ DerivedData/
 .DS_Store
 
 # Screenshots are committed on purpose (docs/screens) — nothing to ignore there.
+
+# scripts/bench.sh's detached server and tunnel logs
+backend/.bench/

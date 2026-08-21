@@ -89,6 +89,9 @@ nonisolated enum Endpoint {
     case mailboxes
     case threads(mailboxID: String, cursor: String?, limit: Int?)
     case thread(id: String)
+    /// The attachments proxy (`API.md` §2). Bytes, not JSON — the server
+    /// streams them from Gmail on demand and caches nothing.
+    case attachment(gmailID: String, attachmentID: String)
     // No `search`: `GET /v1/search` is a real endpoint with no screen in v1
     // (DESIGN.md §1e draws no search field, and the mockup has none), and an
     // unreachable URL builder is not a head start — it is untested code that
@@ -137,6 +140,15 @@ nonisolated enum Endpoint {
             if let limit { items.append(URLQueryItem(name: "limit", value: String(limit))) }
         case .thread(let id):
             components?.path = "/v1/threads/\(id)"
+        case .attachment(let gmailID, let attachmentID):
+            // Both ids are **opaque** (`API.md` §0), so each is one path
+            // segment. `.urlPathAllowed` is the wrong set: it permits `/`, so
+            // an id containing one would silently become two segments — a 404
+            // at best, and a different authenticated path at worst. Escaping
+            // against the path-segment set closes both.
+            let message = gmailID.addingPercentEncoding(withAllowedCharacters: .nadePathSegment) ?? gmailID
+            let part = attachmentID.addingPercentEncoding(withAllowedCharacters: .nadePathSegment) ?? attachmentID
+            components?.path = "/v1/messages/\(message)/attachments/\(part)"
         }
 
         components?.queryItems = items.isEmpty ? nil : items
@@ -227,6 +239,85 @@ nonisolated final class APIClient: Sendable {
 
     // MARK: Transport
 
+    /// Downloads an attachment to a temporary file and returns its URL.
+    ///
+    /// A file rather than `Data`, because the only thing the app does with it is
+    /// hand it to Quick Look, which wants a URL — and because a 25 MB ceiling
+    /// (`API.md` §2) is not something to hold in memory twice.
+    ///
+    /// The name comes from the message's own metadata rather than
+    /// `Content-Disposition`: the row the user tapped already shows that name,
+    /// and a preview titled something else reads as the wrong file.
+    func downloadAttachment(
+        origin: URL, gmailID: String, attachmentID: String, filename: String
+    ) async throws -> URL {
+        let data = try await bytes(.attachment(gmailID: gmailID, attachmentID: attachmentID),
+                                   origin: origin)
+        // EDGE: a name from mail is attacker-controlled. `lastPathComponent`
+        // collapses "../../etc/passwd" to "passwd", and an empty or all-slash
+        // name falls back rather than writing to the directory itself.
+        var safe = (filename as NSString).lastPathComponent
+        if safe.isEmpty || safe == "/" || safe == "." || safe == ".." { safe = "attachment" }
+        let directory = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString,
+                                                                     isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent(safe)
+        try data.write(to: destination, options: .atomic)
+        return destination
+    }
+
+    /// The bytes of one attachment, for "View original"'s inline images.
+    ///
+    /// Separate from `downloadAttachment` because that one's product is a file
+    /// on disk for Quick Look; this one's is bytes for a `WKURLSchemeHandler`,
+    /// and writing them out only to read them back would be the long way round.
+    func attachmentData(origin: URL, gmailID: String, attachmentID: String) async throws -> Data {
+        try await bytes(.attachment(gmailID: gmailID, attachmentID: attachmentID),
+                        origin: origin)
+    }
+
+    /// The non-decoding half of `send`. Same auth, same error envelope, no JSON.
+    private func bytes(_ endpoint: Endpoint, origin: URL) async throws -> Data {
+        guard let url = endpoint.url(base: origin) else {
+            throw APIFailure.malformedResponse("could not build a URL for \(endpoint)")
+        }
+        var request = URLRequest(url: url, timeoutInterval: Self.timeout)
+        request.httpMethod = endpoint.method
+        guard let credential = try credentials.credential(for: origin) else {
+            throw APIFailure.server(code: .unauthorized, status: 401,
+                                    message: ErrorCode.unauthorized.rawValue, retryAfter: nil)
+        }
+        request.setValue("Bearer \(credential.token)", forHTTPHeaderField: "Authorization")
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch let error as URLError {
+            throw error.code == .cancelled ? APIFailure.cancelled : APIFailure.unreachable(error.code)
+        }
+        guard let http = response as? HTTPURLResponse else {
+            throw APIFailure.malformedResponse("not an HTTP response")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw Self.failure(status: http.statusCode, headers: http, data: data)
+        }
+        // EDGE: the 25 MB ceiling is the *server's*, and the server is a URL the
+        // user typed (`DESIGN.md` §1k). A misconfigured or hostile origin
+        // answering with a multi-gigabyte body would otherwise be held in memory
+        // and then written to disk — two copies of something that never had a
+        // right to arrive. The client keeps its own limit.
+        guard data.count <= Self.maxAttachmentBytes else {
+            throw APIFailure.server(code: .payloadTooLarge, status: 413,
+                                    message: "That attachment is too large to open.",
+                                    retryAfter: nil)
+        }
+        return data
+    }
+
+    /// `API.md` §2's ceiling, enforced on this side too.
+    static let maxAttachmentBytes = 25 * 1024 * 1024
+
     private func send<T: Decodable>(
         _ endpoint: Endpoint, origin: URL, body: Data? = nil, as type: T.Type
     ) async throws -> T {
@@ -297,4 +388,20 @@ nonisolated final class APIClient: Sendable {
                                        comment: "Fallback when an error response is not the contract's envelope"),
                        retryAfter: retryAfter)
     }
+}
+
+nonisolated extension CharacterSet {
+    /// `urlPathAllowed` minus the separators **and the dot**.
+    ///
+    /// A path segment may not carry `/`. The dot matters for a different reason:
+    /// an id of exactly `..` percent-encodes to `..` under `urlPathAllowed`,
+    /// which `URL` then normalises away — `/v1/messages/../attachments/x`
+    /// becomes `/v1/attachments/x`, a different authenticated route. Escaping it
+    /// to `%2E` keeps an opaque id opaque. The earlier version of this comment
+    /// claimed the dot was handled while the code left it in the set.
+    static let nadePathSegment: CharacterSet = {
+        var set = CharacterSet.urlPathAllowed
+        set.remove(charactersIn: "/;=.")
+        return set
+    }()
 }

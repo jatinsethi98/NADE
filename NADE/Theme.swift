@@ -598,3 +598,27 @@ struct SectionEyebrow: View {
             .fixedSize(horizontal: false, vertical: true)   // EDGE (E3): wraps, never clips
     }
 }
+
+// MARK: - Meaningful text
+
+nonisolated extension String {
+    /// True when this string carries nothing a person could see.
+    ///
+    /// `trimmingCharacters(in: .whitespacesAndNewlines)` is not enough:
+    /// U+200B ZERO WIDTH SPACE, U+FEFF, the bidi controls and the rest of
+    /// Unicode's `Cf` (format) category are none of them whitespace, so a paste
+    /// of them alone enabled the ask field's submit button and produced an
+    /// invisible query. Both the field and the navigation guard use this, so
+    /// the two cannot disagree about what "empty" means.
+    var nadeIsBlank: Bool {
+        !unicodeScalars.contains { scalar in
+            !Self.nadeInvisible.contains(scalar) && scalar.properties.generalCategory != .format
+        }
+    }
+
+    /// Hoisted: `CharacterSet.whitespacesAndNewlines` and `.controlCharacters`
+    /// are bridged statics that materialise a fresh value on **every** access,
+    /// and this ran twice per scalar inside the loop.
+    private static let nadeInvisible = CharacterSet.whitespacesAndNewlines
+        .union(.controlCharacters)
+}

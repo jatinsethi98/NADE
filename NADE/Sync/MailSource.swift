@@ -28,6 +28,17 @@ nonisolated protocol MailSource: Sendable {
     func mailboxes() async throws -> [WireMailbox]
     func threads(mailboxID: String, cursor: String?) async throws -> WireThreadPage
     func thread(id: String) async throws -> WireThread
+    /// Downloads an attachment to a temporary file. P3: 1f's attachment tags
+    /// become tappable, and the proxy that makes that possible shipped in P2.
+    func downloadAttachment(gmailID: String, attachmentID: String, filename: String)
+        async throws -> URL
+    /// Raw bytes, for "View original"'s inline images.
+    ///
+    /// `MailSource` is already `Sendable`, which is exactly the property the
+    /// caller needs: the inline-image handler runs on WebKit's own queue, not
+    /// the main actor. That is why the web view holds a source rather than a
+    /// closure threaded down through four layers.
+    func attachmentData(gmailID: String, attachmentID: String) async throws -> Data
 
     // P3. The feed and the agents live behind endpoints that land at P5 and
     // P4; the seam exists now so the screens are written once. `FixtureMailSource`
@@ -41,6 +52,20 @@ nonisolated protocol MailSource: Sendable {
     func skip(feedItemID: String, approvalToken: String) async throws -> WireSkipResponse
     func seen(ids: [String]) async throws -> WireSeenResponse
     func agents() async throws -> [WireAgentRow]
+    func agent(id: String) async throws -> WireAgent
+    func createAgent(nlDefinition: String) async throws -> WireAgent
+    func updateAgent(id: String, patch: AgentPatch) async throws -> WireAgent
+    func deleteAgent(id: String) async throws
+    func runAgent(id: String) async throws -> WireRunStarted
+
+    /// `POST /ask`, as the typed SSE session `API.md` §4 describes.
+    ///
+    /// A stream rather than a returned array, because the screen renders while
+    /// the tokens arrive - and because the transport lands at P6 while the
+    /// screen lands at P3, the seam has to be the streaming one now or the
+    /// screen gets written twice. `route` is guaranteed first.
+    func ask(query: String, threadID: String?, routeHint: AskRoute?)
+        -> AsyncThrowingStream<AskEvent, any Error>
 }
 
 // MARK: - Live
@@ -102,6 +127,17 @@ nonisolated final class HTTPMailSource: MailSource {
         try await client.thread(origin: origin, id: id)
     }
 
+    func downloadAttachment(gmailID: String, attachmentID: String, filename: String)
+        async throws -> URL {
+        try await client.downloadAttachment(origin: origin, gmailID: gmailID,
+                                            attachmentID: attachmentID, filename: filename)
+    }
+
+    func attachmentData(gmailID: String, attachmentID: String) async throws -> Data {
+        try await client.attachmentData(origin: origin, gmailID: gmailID,
+                                        attachmentID: attachmentID)
+    }
+
     // MARK: - P3's endpoints, which the backend does not serve yet
     //
     // `APIClient` deliberately refuses to carry a URL builder no screen calls
@@ -127,4 +163,30 @@ nonisolated final class HTTPMailSource: MailSource {
     }
 
     func agents() async throws -> [WireAgentRow] { throw APIFailure.notServedYet("GET /agents") }
+    func agent(id: String) async throws -> WireAgent { throw APIFailure.notServedYet("GET /agents/{id}") }
+
+    func createAgent(nlDefinition: String) async throws -> WireAgent {
+        throw APIFailure.notServedYet("POST /agents")
+    }
+
+    func updateAgent(id: String, patch: AgentPatch) async throws -> WireAgent {
+        throw APIFailure.notServedYet("PATCH /agents/{id}")
+    }
+
+    func deleteAgent(id: String) async throws {
+        throw APIFailure.notServedYet("DELETE /agents/{id}")
+    }
+
+    func runAgent(id: String) async throws -> WireRunStarted {
+        throw APIFailure.notServedYet("POST /agents/{id}/run")
+    }
+
+    /// P6 gives this a `URLSession` byte stream. Until then it fails the same
+    /// loud, nameable way as every other route this phase outruns - and it
+    /// fails *inside* the stream rather than at the call site, so the screen's
+    /// error state is the one path both halves take.
+    func ask(query: String, threadID: String?, routeHint: AskRoute?)
+        -> AsyncThrowingStream<AskEvent, any Error> {
+        AsyncThrowingStream { $0.finish(throwing: APIFailure.notServedYet("POST /ask")) }
+    }
 }

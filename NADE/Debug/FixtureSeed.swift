@@ -87,6 +87,10 @@ nonisolated enum FixtureSeed {
     }
 
     static let defaultThreadID = "18f2a1b3c4d5e6f7"
+    /// `agent.json` — the published, fully compiled one, so `-NADEScreen 1c`
+    /// lands on the state with underlines rather than the compile-failure
+    /// fallback.
+    static let defaultAgentID = "a0000001-0000-4000-8000-000000000001"
 
     static func data(_ name: String) throws -> Data {
         guard let url = Bundle.main.url(forResource: name, withExtension: "json") else {
@@ -152,12 +156,26 @@ nonisolated final class FixtureMailSource: MailSource {
     private struct State: Sendable {
         var paired: Bool
         var gmailLinked: Bool
+        /// Nil until first read. The agent screens *write* — publish, toggle
+        /// approval, edit a sentence, delete — and a source that re-decoded the
+        /// fixture on every call would show every one of those edits being
+        /// silently discarded, which is a worse lie than an empty list.
+        var agents: [WireAgent]?
+        /// Same, for the feed. Approve and skip are **terminal**: the card must
+        /// lose its token and stop being `new`, or the outbox's own refetch
+        /// restores the card it just resolved and the approval can be replayed.
+        var feed: [WireFeedItem]?
+        var newCount: Int?
     }
     private let state: OSAllocatedUnfairLock<State>
 
     init(isEmpty: Bool, paired: Bool = true, gmailLinked: Bool = true) {
         self.isEmpty = isEmpty
-        self.state = OSAllocatedUnfairLock(initialState: State(paired: paired, gmailLinked: gmailLinked))
+        self.state = OSAllocatedUnfairLock(initialState: State(paired: paired,
+                                                               gmailLinked: gmailLinked,
+                                                               agents: nil,
+                                                               feed: nil,
+                                                               newCount: nil))
     }
 
     func isPaired() throws -> Bool {
@@ -167,34 +185,376 @@ nonisolated final class FixtureMailSource: MailSource {
     // MARK: - P3
 
     func feed(cursor: String?) async throws -> WireFeedPage {
-        try FixtureSeed.decode(WireFeedPage.self, isEmpty ? "feed_empty" : "feed")
+        let items = try loadedFeed()
+        return WireFeedPage(items: items, nextCursor: nil, newCount: try currentNewCount())
     }
 
     func feedItem(id: String) async throws -> WireFeedItem {
-        let page = try FixtureSeed.decode(WireFeedPage.self, "feed")
-        guard let item = page.items.first(where: { $0.id == id }) else {
+        guard let item = try loadedFeed().first(where: { $0.id == id }) else {
             throw APIFailure.server(code: .notFound, status: 404,
                                     message: "No such feed item.", retryAfter: nil)
         }
         return item
     }
 
-    /// The fixture world answers an approve the way the server would, so the
-    /// outbox's success path is exercised rather than stubbed.
+    /// The fixture world answers an approve the way the server would — and,
+    /// crucially, **moves the card**.
+    ///
+    /// Returning a canned success while leaving the fixture untouched made every
+    /// terminal action undo itself: the outbox re-fetches the item after a
+    /// success, got the original `new` row with its token back, and the card
+    /// returned to the feed still approvable. A replay of a consumed token is
+    /// exactly what `API.md` §7's 409 exists to prevent, so the fixture has to
+    /// be able to reach that state.
     func approve(feedItemID: String, approvalToken: String) async throws -> WireApproveResponse {
-        try FixtureSeed.decode(WireApproveResponse.self, "approve")
+        try resolve(feedItemID, token: approvalToken, status: .resolved,
+                    note: "Saved.")
+        return try FixtureSeed.decode(WireApproveResponse.self, "approve")
     }
 
     func skip(feedItemID: String, approvalToken: String) async throws -> WireSkipResponse {
-        try FixtureSeed.decode(WireSkipResponse.self, "skip")
+        try resolve(feedItemID, token: approvalToken, status: .skipped,
+                    note: "Skipped.")
+        return try FixtureSeed.decode(WireSkipResponse.self, "skip")
     }
 
     func seen(ids: [String]) async throws -> WireSeenResponse {
-        try FixtureSeed.decode(WireSeenResponse.self, "seen")
+        try mutateFeed { items in
+            for (index, item) in items.enumerated()
+            where ids.contains(item.id) && item.kind == .info && item.status == .new {
+                items[index] = Self.resolved(item, status: .resolved, note: item.resolvedNote)
+            }
+        }
+        return WireSeenResponse(newCount: try currentNewCount())
+    }
+
+    /// A terminal action, with the contract's own replay rule.
+    ///
+    /// A second attempt with a spent token is a **409 `token_consumed`**, which
+    /// the client treats as success — not a silent second approval.
+    private func resolve(_ id: String, token: String,
+                         status: FeedStatus, note: String) throws {
+        var outcome: APIFailure?
+        try mutateFeed { items in
+            guard let index = items.firstIndex(where: { $0.id == id }) else {
+                outcome = APIFailure.server(code: .notFound, status: 404,
+                                            message: "No such feed item.", retryAfter: nil)
+                return
+            }
+            guard items[index].approvalToken == token else {
+                outcome = APIFailure.server(code: .tokenConsumed, status: 409,
+                                            message: "That approval was already answered.",
+                                            retryAfter: nil)
+                return
+            }
+            items[index] = Self.resolved(items[index], status: status, note: note)
+        }
+        if let outcome { throw outcome }
+    }
+
+    /// Terminal means terminal: the token is gone and `actions` is empty, which
+    /// is what `API.md` §7 says of anything resolved, skipped or expired.
+    private static func resolved(_ item: WireFeedItem,
+                                 status: FeedStatus, note: String?) -> WireFeedItem {
+        WireFeedItem(id: item.id, kind: item.kind, title: item.title, body: item.body,
+                     status: status, runID: item.runID, actions: [],
+                     approvalToken: nil, approvalExpiresAt: item.approvalExpiresAt,
+                     resolvedNote: note ?? item.resolvedNote, data: item.data,
+                     createdAt: item.createdAt)
+    }
+
+    private func loadedFeed() throws -> [WireFeedItem] {
+        if let existing = state.withLock({ $0.feed }) { return existing }
+        let page = try FixtureSeed.decode(WireFeedPage.self, isEmpty ? "feed_empty" : "feed")
+        return state.withLock { current in
+            if let existing = current.feed { return existing }
+            current.feed = page.items
+            current.newCount = page.newCount
+            return page.items
+        }
+    }
+
+    private func mutateFeed(_ body: (inout [WireFeedItem]) -> Void) throws {
+        _ = try loadedFeed()
+        state.withLock { current in
+            var items = current.feed ?? []
+            body(&items)
+            current.feed = items
+        }
+    }
+
+    /// Recomputed from the rows, so answering a card moves the badge — which is
+    /// the whole reason `new_count` is on the page.
+    private func currentNewCount() throws -> Int {
+        try loadedFeed().count { $0.status == .new }
     }
 
     func agents() async throws -> [WireAgentRow] {
-        try FixtureSeed.decode(WireAgentList.self, isEmpty ? "agents_empty" : "agents").agents
+        try loadedAgents().map(Self.row(from:))
+    }
+
+    func agent(id: String) async throws -> WireAgent {
+        guard let found = try loadedAgents().first(where: { $0.id == id }) else {
+            throw APIFailure.server(code: .notFound, status: 404,
+                                    message: "That agent no longer exists.", retryAfter: nil)
+        }
+        return found
+    }
+
+    /// Mirrors the server's one non-negotiable rule: **a created agent is always
+    /// a draft** (`API.md` §5). The fixture cannot let a caller ask for
+    /// `published`, because the Ask screen's promise - "It won't run until you
+    /// publish it" - is the thing being demonstrated.
+    func createAgent(nlDefinition: String) async throws -> WireAgent {
+        guard !nlDefinition.nadeIsBlank else {
+            throw APIFailure.server(code: .badRequest, status: 400,
+                                    message: "An agent needs a sentence.", retryAfter: nil)
+        }
+        let template = try FixtureSeed.decode(WireAgent.self, "agent_draft")
+        let created = WireAgent(
+            id: UUID().uuidString.lowercased(),
+            name: Self.name(from: nlDefinition) ?? template.name,
+            nlDefinition: nlDefinition,
+            status: .draft,
+            triggerSummary: template.triggerSummary,
+            schedule: template.schedule,
+            lastRunAt: nil,
+            approvalRequired: template.approvalRequired,
+            allowedTools: template.allowedTools,
+            compileError: nil,
+            whenSpan: template.whenSpan,
+            doSpan: template.doSpan,
+            trailing: template.trailing,
+            spec: template.spec
+        )
+        // **Appended, not prepended.** `API.md` §5 orders `GET /agents` oldest
+        // first, and the order is persisted verbatim as `AgentRecord.position`,
+        // so putting new agents at the top here would have taught the demo world
+        // an order the live backend will not reproduce.
+        try mutateAgents { $0.append(created) }
+        return created
+    }
+
+    func updateAgent(id: String, patch: AgentPatch) async throws -> WireAgent {
+        var updated: WireAgent?
+        try mutateAgents { agents in
+            guard let index = agents.firstIndex(where: { $0.id == id }) else { return }
+            agents[index] = Self.apply(patch, to: agents[index])
+            updated = agents[index]
+        }
+        guard let updated else {
+            throw APIFailure.server(code: .notFound, status: 404,
+                                    message: "That agent no longer exists.", retryAfter: nil)
+        }
+        return updated
+    }
+
+    func deleteAgent(id: String) async throws {
+        var removed = false
+        try mutateAgents { agents in
+            let before = agents.count
+            agents.removeAll { $0.id == id }
+            removed = agents.count != before
+        }
+        guard removed else {
+            throw APIFailure.server(code: .notFound, status: 404,
+                                    message: "That agent no longer exists.", retryAfter: nil)
+        }
+    }
+
+    /// `API.md` §6: a manual run works on a **draft** too - that is what the
+    /// builder's "Run once now" is for - and it does not advance `runs_done`.
+    func runAgent(id: String) async throws -> WireRunStarted {
+        _ = try await agent(id: id)
+        return WireRunStarted(runID: UUID().uuidString.lowercased())
+    }
+
+    /// Replays a checked-in `.sse` fixture through the **real** parser.
+    ///
+    /// Not a hand-built array of events: `docs/contract/*.sse` are the bytes the
+    /// server promises, `SSEParser` is the code that will read them at P6, and
+    /// a fixture that skipped the parser would let a framing bug ship.
+    func ask(query: String, threadID: String?, routeHint: AskRoute?)
+        -> AsyncThrowingStream<AskEvent, any Error> {
+        AsyncThrowingStream { continuation in
+            do {
+                let name = Self.streamName(query: query, routeHint: routeHint)
+                var parser = SSEParser()
+                for event in try parser.consume(try FixtureSeed.stream(name)) {
+                    continuation.yield(event)
+                }
+                for event in try parser.finish() {
+                    continuation.yield(event)
+                }
+                continuation.finish()
+            } catch {
+                continuation.finish(throwing: error)
+            }
+        }
+    }
+
+    /// Which fixture answers this query.
+    ///
+    /// `routeHint` wins, because that is exactly what `API.md` §4 says it does -
+    /// it "forces the route instead of letting the server classify" and is the
+    /// whole reason 1a's "Make this an agent" button can exist. Everything else
+    /// mimics the server's documented heuristics-first order: quoted strings and
+    /// `from:` are a search, imperative time words are an agent, else an answer.
+    private static func streamName(query: String, routeHint: AskRoute?) -> String {
+        if let routeHint {
+            switch routeHint {
+            case .agentDraft: return "ask_agent_draft"
+            case .results: return "ask_results"
+            case .answer: return "ask_answer"
+            case .unknown: return "ask_error"
+            }
+        }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        // EDGE: empty input. The field disables its button, so reaching here at
+        // all is a caller bug - and the contract has an error stream for it.
+        if trimmed.isEmpty { return "ask_error" }
+        let lowered = trimmed.lowercased()
+        // Agent first: "Every weekday, …" starts with a word the search branch
+        // would otherwise claim.
+        if ["when ", "every ", "each ", "whenever "].contains(where: lowered.hasPrefix) {
+            return "ask_agent_draft"
+        }
+        // `from:` and quoted strings are the two heuristics `PLAN.md` §Ask
+        // routing names. `find ` is added for the fixture world only: the real
+        // server falls through to a cheap model, which this cannot do, and
+        // without it `DESIGN.md` §4's second focus prompt ("Find every receipt
+        // from last month") routed to `answer` — leaving the `results` state
+        // unreachable from 2a, which is the one thing the three prompts exist
+        // to prove.
+        if lowered.contains("from:") || trimmed.contains("\"") || lowered.hasPrefix("find ") {
+            return "ask_results"
+        }
+        return "ask_answer"
+    }
+
+    // MARK: - The mutable agent world
+
+    private func loadedAgents() throws -> [WireAgent] {
+        if let existing = state.withLock({ $0.agents }) { return existing }
+        let loaded = try Self.seedAgents(isEmpty: isEmpty)
+        // EDGE: two concurrent first reads. Whoever writes second must not
+        // clobber edits the first one's caller has already made, so the write
+        // only fills a still-empty slot.
+        return state.withLock { current in
+            if let existing = current.agents { return existing }
+            current.agents = loaded
+            return loaded
+        }
+    }
+
+    private func mutateAgents(_ body: (inout [WireAgent]) -> Void) throws {
+        _ = try loadedAgents()
+        state.withLock { current in
+            var agents = current.agents ?? []
+            body(&agents)
+            current.agents = agents
+        }
+    }
+
+    /// The four detail fixtures are the four rows of `agents.json`, so the list
+    /// and the detail cannot drift - open any row and the object behind it is
+    /// the one the contract ships.
+    private static func seedAgents(isEmpty: Bool) throws -> [WireAgent] {
+        guard !isEmpty else { return [] }
+        let order = try FixtureSeed.decode(WireAgentList.self, "agents").agents.map(\.id)
+        let details = ["agent", "agent_scheduled", "agent_draft", "agent_compile_failed"]
+            .compactMap { try? FixtureSeed.decode(WireAgent.self, $0) }
+        return order.compactMap { id in details.first { $0.id == id } }
+    }
+
+    private static func row(from agent: WireAgent) -> WireAgentRow {
+        WireAgentRow(id: agent.id,
+                     name: agent.name,
+                     nlDefinition: agent.nlDefinition,
+                     status: agent.status,
+                     triggerSummary: agent.triggerSummary,
+                     schedule: agent.schedule,
+                     lastRunAt: agent.lastRunAt,
+                     approvalRequired: agent.approvalRequired)
+    }
+
+    /// Only the five fields `PATCH` accepts.
+    ///
+    /// **A changed `nl_definition` re-derives the spans.** `API.md` §5 says
+    /// changing it recompiles `spec` and returns fresh `when_span` / `do_span`,
+    /// and carrying the old ones over made every sentence edit look like it had
+    /// failed: the stored definition changed while 1c kept rendering the words
+    /// the user had just replaced. There is no compiler here, so the spans are
+    /// split back out of the sentence the screen composed — the exact inverse of
+    /// `AgentBuilderModel.compose`, which is enough to keep the round trip
+    /// honest.
+    private static func apply(_ patch: AgentPatch, to agent: WireAgent) -> WireAgent {
+        let sentence = patch.nlDefinition
+        let spans = sentence.flatMap(decompose(_:))
+        return WireAgent(id: agent.id,
+                         name: sentence.flatMap(name(from:)) ?? agent.name,
+                         nlDefinition: sentence ?? agent.nlDefinition,
+                         status: patch.status ?? agent.status,
+                         triggerSummary: agent.triggerSummary,
+                         schedule: patch.schedule ?? agent.schedule,
+                         lastRunAt: agent.lastRunAt,
+                         approvalRequired: patch.approvalRequired ?? agent.approvalRequired,
+                         allowedTools: patch.allowedTools ?? agent.allowedTools,
+                         // A sentence that no longer parses is a compile
+                         // failure, which is a state 1c already renders.
+                         compileError: sentence == nil ? agent.compileError
+                             : (spans == nil ? "Couldn't read that as a rule." : nil),
+                         whenSpan: sentence == nil ? agent.whenSpan : spans?.when,
+                         doSpan: sentence == nil ? agent.doSpan : spans?.doing,
+                         trailing: sentence == nil ? agent.trailing : spans?.trailing,
+                         spec: sentence == nil ? agent.spec : (spans == nil ? nil : agent.spec))
+    }
+
+    /// `When {when}, {do}.` plus an optional trailing sentence, split back out.
+    ///
+    /// Returns nil when the sentence is not that shape, which is what makes the
+    /// compile-failure path reachable from the builder.
+    private static func decompose(
+        _ sentence: String
+    ) -> (when: String, doing: String, trailing: String?)? {
+        let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.lowercased().hasPrefix("when ") else { return nil }
+        let body = String(trimmed.dropFirst("when ".count))
+        // The period is searched for **after the comma**, and only one that ends
+        // a clause counts.
+        //
+        // Two ways the naive version got this wrong. `firstIndex(of: ".")` over
+        // the whole string found the dot in "When stripe.com emails, …" and gave
+        // up, dropping 1c to its compile-failure fallback for a good sentence.
+        // `lastIndex` then swung the other way and swallowed the trailing
+        // sentence into the `do` span. A clause-ending period is one at the end
+        // of the string or followed by whitespace — which "stripe.com" is not.
+        guard let comma = body.firstIndex(of: ",") else { return nil }
+        let afterComma = body.index(after: comma)
+        guard let stop = body[afterComma...].indices.first(where: { index in
+            guard body[index] == "." else { return false }
+            let next = body.index(after: index)
+            return next == body.endIndex || body[next].isWhitespace
+        }) else { return nil }
+        let when = String(body[body.startIndex..<comma])
+            .trimmingCharacters(in: .whitespaces)
+        let doing = String(body[body.index(after: comma)..<stop])
+            .trimmingCharacters(in: .whitespaces)
+        let rest = String(body[body.index(after: stop)...])
+            .trimmingCharacters(in: .whitespaces)
+        guard !when.isEmpty, !doing.isEmpty else { return nil }
+        return (when, doing, rest.isEmpty ? nil : rest)
+    }
+
+    /// A readable stand-in for the strong model's naming step, so a created
+    /// agent is not called "Reply Drafter" whatever you typed.
+    private static func name(from nlDefinition: String) -> String? {
+        let words = nlDefinition
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: { $0 == " " || $0 == "\n" })
+            .prefix(4)
+        guard !words.isEmpty else { return nil }
+        return words.joined(separator: " ").capitalized
     }
 
     func pair(code: String, deviceName: String) async throws -> Credential {
@@ -243,6 +603,27 @@ nonisolated final class FixtureMailSource: MailSource {
             return try FixtureSeed.decode(WireThreadPage.self, "threads_last_page")
         }
         return try FixtureSeed.decode(WireThreadPage.self, page)
+    }
+
+    /// The fixture world has no bytes to serve, so it writes a small text file
+    /// with the name that was asked for. Enough to prove the tap, the download
+    /// state and the preview sheet, without pretending to be a real PDF.
+    func downloadAttachment(gmailID: String, attachmentID: String, filename: String)
+        async throws -> URL {
+        let directory = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString,
+                                                                      isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var safe = (filename as NSString).lastPathComponent
+        if safe.isEmpty { safe = "attachment" }
+        let destination = directory.appendingPathComponent(safe)
+        try Data("This is a fixture attachment.\n".utf8).write(to: destination)
+        return destination
+    }
+
+    /// A 1×1 transparent PNG, so the fixture world's "View original" renders a
+    /// real image element rather than a broken one.
+    func attachmentData(gmailID: String, attachmentID: String) async throws -> Data {
+        Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=")!
     }
 
     func thread(id: String) async throws -> WireThread {

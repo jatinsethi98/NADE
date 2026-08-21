@@ -25,12 +25,25 @@ struct MailModels {
     let list: MailListModel
     let thread: ThreadModel
     let settings: SettingsModel
+    /// P3's two observing screens. 1c builds its own model per agent (it does
+    /// not observe), and 1a builds one per query (it is a stream).
+    let home: HomeFeedModel
+    let agents: AgentsListModel
 
     init(sync: MailSync, openURL: @escaping @MainActor (URL) -> Void) {
         mailboxes = MailboxesModel(sync: sync)
         list = MailListModel(sync: sync)
         thread = ThreadModel(sync: sync)
         settings = SettingsModel(sync: sync, openURL: openURL)
+        home = HomeFeedModel(sync: sync)
+        #if DEBUG
+        // `-NADEScreen 2a-focus`. Seeded at composition, not read from
+        // `UserDefaults` inside the view: this was the app's only launch
+        // argument read outside `LaunchOptions`, so a rename in the screenshot
+        // script would have silently no-opped instead of failing.
+        if LaunchOptions.startsOnFocus { home.mode = .focus }
+        #endif
+        agents = AgentsListModel(sync: sync)
     }
 }
 
@@ -192,6 +205,83 @@ final class ThreadModel {
     /// beside `isPartial`, because `API.md` §2 says `partial` is produced by an
     /// upstream failure, so the two are routinely true together.
     var connectionProblem: ConnectionProblem? { observation.problem ?? sync.threadProblem }
+
+    // MARK: - 1f's attachment tap
+
+    /// The file Quick Look is showing. Bound by the view; cleared by it on
+    /// dismiss, which is why `downloadedFile` below exists separately.
+    var previewURL: URL?
+    private(set) var attachmentProblem: String?
+
+    /// The in-flight download, so a second tap cannot start another.
+    private var downloading: Task<Void, Never>?
+    /// A second reference to the same file, and the reason is the bug it fixes:
+    /// `.quickLookPreview` writes `nil` back to `previewURL` on dismiss, so
+    /// cleaning up off that binding deleted nothing on the commonest path.
+    private var downloadedFile: URL?
+
+    /// Downloads through the authenticated proxy, then previews the file.
+    ///
+    /// **This lives in the model, not the view.** It is a single-flight guard, a
+    /// task lifecycle, a temporary-directory lifetime and an error mapping —
+    /// none of which is view state, and all of which is the edge-case class
+    /// (repeat delivery, cancellation, cleanup) the tests exist to cover. As
+    /// five `@State` properties in `ThreadView` none of it was reachable from a
+    /// test at all.
+    func openAttachment(gmailID: String, attachment: WireAttachment) {
+        // EDGE: repeated taps. The ceiling is 25 MB (`API.md` §2) and each
+        // request holds the whole body in memory, so N taps on a slow link is N
+        // copies plus N temporary directories.
+        guard downloading == nil else { return }
+        downloading = Task { [weak self] in
+            defer { self?.downloading = nil }
+            do {
+                let url = try await self?.sync.downloadAttachment(
+                    gmailID: gmailID, attachmentID: attachment.id, filename: attachment.name
+                )
+                guard let self, let url, !Task.isCancelled else { return }
+                self.discardDownloadedFile()
+                self.downloadedFile = url
+                self.previewURL = url
+            } catch is CancellationError {
+                // The screen went away. Not a failure worth a dialog.
+            } catch let failure as APIFailure {
+                // EDGE: over 25 MB is a 413, and a message Gmail has since
+                // deleted is a 404. Both are the server's own sentence.
+                if !failure.isCancellation { self?.attachmentProblem = failure.userFacingMessage }
+            } catch {
+                self?.attachmentProblem = String(
+                    localized: "Couldn't open that attachment.",
+                    comment: "Shown when an attachment cannot be downloaded"
+                )
+            }
+        }
+    }
+
+    func dismissAttachmentProblem() { attachmentProblem = nil }
+
+    /// Cancels anything in flight and removes the last downloaded file. Called
+    /// when 1f goes away.
+    func stopAttachments() {
+        downloading?.cancel()
+        downloading = nil
+        discardDownloadedFile()
+    }
+
+    /// Each download gets its own UUID directory so two files of the same name
+    /// cannot collide; without this the app leaves one behind per tap, and mail
+    /// attachments are the largest thing it touches.
+    private func discardDownloadedFile() {
+        guard let previous = downloadedFile else { return }
+        downloadedFile = nil
+        previewURL = nil
+        try? FileManager.default.removeItem(at: previous.deletingLastPathComponent())
+    }
+
+    /// Handed to "View original" so its scheme handler can fetch inline parts
+    /// off the main actor. A value, not a closure: a fresh partial application
+    /// per `body` meant `ThreadMessageBlock` could never diff equal.
+    nonisolated var attachmentSource: any MailSource { sync.attachmentSource }
 
     func observe(id: String) {
         guard observedID != id || !observation.isRunning else { return }

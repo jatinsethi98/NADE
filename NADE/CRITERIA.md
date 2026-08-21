@@ -205,19 +205,43 @@ carries the criteria that expansion owes.
 - **The agent card has no buttons.** They need `GET /feed/{id}` for `actions`
   and `action_label` (P5). Rendering a literal "Approve" would break DESIGN §4
   and PLAN C1/C2.
-- **"View original"** (`body_html != null` → locked WKWebView) — P3, with the
-  attachments proxy whose `cid:` URLs give it meaning. `body_html` is decoded
-  and stored now so P3 is a UI-only change.
-- **Attachments are not tappable.** No proxy until P3, and the mockup draws no
-  `onClick`. **Inline (`cid:`) parts are still listed**, which a mail client
-  would normally suppress: P2 does not render `body_html`, so hiding them would
-  make them invisible everywhere rather than merely redundant. Revisit with P3's
-  "View original", not before.
+- ~~**"View original"**~~ — **shipped at P3.** `body_html != null` renders a
+  toggle over a locked `WKWebView`: JavaScript off, a document CSP of
+  `default-src 'none'` with `img-src nade-inline:` and nothing else, link
+  previews off, a non-persistent data store, and a navigation delegate that
+  allows only the initial `about:` load. A link in mail therefore does nothing
+  at all — it is not opened in Safari either, because v1 takes no outbound
+  action and a mail link is the oldest phishing vector there is.
+
+  **The message's own inline images do render**, over a private
+  `nade-inline:` scheme served by a `WKURLSchemeHandler`. The first version of
+  this allowed `img-src cid:` and claimed those parts were "served by our own
+  authenticated proxy" — both halves were false. The server rewrites every
+  resolvable `cid:` to a relative `/v1/messages/…/attachments/…` before the
+  client ever sees it, so the allowance matched nothing and the relative URL was
+  blocked by `default-src 'none'`; and `WKWebView` cannot attach a bearer token
+  to a subresource load, so nothing in the view could reach the proxy at all.
+  The handler fetches through the authenticated client, checks the `gmail_id` in
+  the URL against the message being rendered, and sniffs the content type from
+  the bytes rather than trusting anything the mail declared.
+- ~~**Attachments are not tappable**~~ — **shipped at P3.** One download at a
+  time, straight to a temporary directory that is removed when the next one
+  starts or the screen goes away, previewed with Quick Look. Not a `Link` to the
+  URL: the proxy is bearer-guarded and Safari cannot present the token.
+  **Inline (`cid:`) parts are still listed** — "View original" now renders them
+  in place, but its CSP allows `cid:` and nothing else, and a reader who wants
+  the file still needs a way to reach it. Deviation 47 stays closed by keeping
+  both.
 - **1k's AGENTS, READING and `disclosure` footer** — no `GET/PATCH /settings`
   and no `GET /runs` route exists until P7.
 - **Mail search.** `GET /search` is modelled and decoded; DESIGN.md draws no
   search field on 1e and the mockup has none.
-- **Push, SSE, feed, notes, calendar, agents** — P3/P5/P6/P7.
+- ~~**feed, agents**~~ — **shipped at P3**, against the fixture world: 2a's feed
+  and focus states, 1a's three route states, 1b, 1c and 1d. The endpoints behind
+  them land at P4 (`/agents`) and P5 (`/feed`), so the live source answers
+  `notServedYet` until then — loudly, rather than as an empty list.
+- **Push, SSE transport, notes, calendar** — P5/P6/P7. The SSE *parser* ships
+  and 1a drives it; only its `URLSession` byte stream is P6.
 
 ## D. What is *not* claimed
 

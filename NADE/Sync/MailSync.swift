@@ -22,6 +22,8 @@ nonisolated enum ProblemKind: Hashable, Sendable {
     case account
     case list
     case thread
+    case feed
+    case agents
 }
 
 @MainActor
@@ -31,15 +33,33 @@ final class MailSync {
     private(set) var state: AppState = .unpaired
     private(set) var problems: [ProblemKind: ConnectionProblem] = [:]
 
-    /// What a mail list shows. An account-level failure outranks a paging one:
-    /// "couldn't reach the server" explains the missing page as well.
-    var connectionProblem: ConnectionProblem? {
-        problems[.account] ?? problems[.list]
+    /// What a screen shows when both it and the account have a problem.
+    ///
+    /// **One rule, stated once.** An account-level failure outranks a
+    /// screen-level one, because "couldn't reach the server" already explains
+    /// the missing page, the missing cards and the missing agents. P3 added two
+    /// more accessors that each restated it — and both restated it *backwards*,
+    /// putting the screen first while their own doc comments claimed the
+    /// opposite. A fourth screen would have been a fourth chance to get it
+    /// wrong.
+    func problem(for kind: ProblemKind) -> ConnectionProblem? {
+        problems[.account] ?? problems[kind]
     }
+
+    /// What a mail list shows.
+    var connectionProblem: ConnectionProblem? { problem(for: .list) }
+    /// What 2a shows.
+    var feedProblem: ConnectionProblem? { problem(for: .feed) }
+    /// What 1b shows.
+    var agentsProblem: ConnectionProblem? { problem(for: .agents) }
 
     /// What a thread shows. EDGE (P13): this is a **second** slot beside the
     /// thread's own `partial` flag, because `API.md` §2 says `partial` is
     /// *produced by* an upstream failure — the two are routinely true together.
+    ///
+    /// The **one** screen that inverts the rule above, deliberately: 1f is
+    /// already showing "some of this conversation is missing", and the specific
+    /// reason that thread failed is more use there than the general one.
     var threadProblem: ConnectionProblem? {
         problems[.thread] ?? problems[.account]
     }
@@ -84,6 +104,68 @@ final class MailSync {
         self.store = store
         self.clock = clock
         self.sleep = sleep
+        // Built here rather than by the screens: an approve queued on 2a and a
+        // drain triggered by a foreground have to share one driver, or two
+        // drains race for the same rows. `onNeedsReauth` is how a dead Gmail
+        // credential found while sending reaches this state machine without the
+        // outbox needing to know what a `MailSync` is.
+        self.outbox = OutboxDriver(store: store,
+                                   source: source,
+                                   origin: { source.origin })
+        self.outbox.onNeedsReauth = { [weak self] in
+            Task { @MainActor in await self?.markNeedsGmail() }
+        }
+    }
+
+    /// The single approve/skip queue. See `Outbox.swift`.
+    let outbox: OutboxDriver
+
+    /// Send whatever the outbox is holding.
+    ///
+    /// `OutboxDriver.drain`'s own comment said it was "called on app foreground,
+    /// when the feed appears, and after a successful pair" — and nothing called
+    /// it but `enqueue`. A queue whose only trigger is a *new* enqueue is not a
+    /// queue: kill the app between the durable write and the request, or take a
+    /// 429, and the approval sits there until the user happens to tap another
+    /// one. These three entry points are what the comment always claimed.
+    func drainOutbox() async {
+        guard (try? source.isPaired()) == true else { return }
+        await outbox.drain()
+    }
+
+    /// `POST /feed/seen` — how an `info` card stops being new (`API.md` §7).
+    ///
+    /// Not routed through the outbox: seen is idempotent and carries no
+    /// capability token, so a lost one costs a badge that corrects itself on the
+    /// next refresh, and queueing it would put a durable row on disk per glance.
+    func markSeen(ids: [String]) async {
+        guard !ids.isEmpty, mayRequest() else { return }
+        do {
+            let response = try await source.seen(ids: ids)
+            // **Not `loadFeed(resetting: true)`.** That deletes every cached
+            // row and refetches page 1, so a read receipt — the most incidental
+            // thing on the screen — threw away pages 2..n, shrank the list under
+            // the user's finger, and the relayout scrolled more rows into view,
+            // firing more receipts. The rows are already known; only their
+            // status and the badge change.
+            // One transaction, not one per id. `HomeFeedModel` coalesces a
+            // flick into a single `POST /feed/seen` precisely so this is cheap;
+            // fanning it back out into N writes would fire `observeFeed` N
+            // times, and each fire re-decodes and re-renders the whole feed.
+            try? await store.markFeedItemsSeen(ids: ids, newCount: response.newCount)
+            clear(.feed)
+        } catch let failure as APIFailure {
+            await handle(failure, from: .feed)
+        } catch {}
+    }
+
+    /// EDGE (P9), reached from the outbox: the Gmail credential died while a
+    /// queued approve was in flight. Same landing as `handle`'s `needs_reauth`
+    /// branch, so the recovery affordance appears wherever the failure happened.
+    private func markNeedsGmail() async {
+        try? await store.upsertAccount(WireMe(email: currentEmail, status: .needsReauth))
+        stopPolling()
+        state = .needsGmail
     }
 
     // No `deinit { pollTask?.cancel() }`: `deinit` is nonisolated and cannot
@@ -133,6 +215,11 @@ final class MailSync {
                 stopPolling()
                 state = .ready
             }
+
+            // Every foreground and every screen appearance runs `refresh()`, so
+            // this is the drain trigger the outbox always documented. Detached
+            // so a slow queue never delays the mailbox list.
+            Task { await self.drainOutbox() }
         } catch let failure as APIFailure {
             await handle(failure, from: .account)
         } catch is CancellationError {
@@ -212,6 +299,95 @@ final class MailSync {
             return false
         }
     }
+
+    // MARK: - P3: the feed and the agents
+
+    /// The home feed. `resetting` is the pull-to-top; otherwise this pages.
+    ///
+    /// Not folded into `refresh()`: the feed is the Ask tab's root and the
+    /// mailbox list is the Mail tab's, and both tabs stay in the tree at all
+    /// times (D29), so one combined refresh would make every mail launch pay for
+    /// a feed it may never show - and hide a feed failure behind a mail one.
+    @discardableResult
+    func loadFeed(resetting: Bool) async -> Bool {
+        guard mayRequest() else { return false }
+        do {
+            let cursor: String?
+            if resetting {
+                cursor = nil
+            } else {
+                guard let next = try await store.feedCursor()?.nextCursor else { return false }
+                cursor = next
+            }
+            let page = try await source.feed(cursor: cursor)
+            _ = try await store.saveFeed(page, resetting: resetting)
+            clear(.feed)
+            return true
+        } catch let failure as APIFailure {
+            await handle(failure, from: .feed)
+            return false
+        } catch {
+            return false
+        }
+    }
+
+    func loadAgents() async {
+        guard mayRequest() else { return }
+        do {
+            try await store.saveAgents(try await source.agents())
+            clear(.agents)
+        } catch let failure as APIFailure {
+            await handle(failure, from: .agents)
+        } catch {}
+    }
+
+    /// The agent writes. They are **not** cached: 1c edits one agent at a time
+    /// and needs the server's recompiled spans back, so a store round trip would
+    /// only add a way for the screen and the database to disagree. The list is
+    /// re-read afterwards, which is what keeps 1b honest.
+    func agent(id: String) async throws -> WireAgent {
+        try await source.agent(id: id)
+    }
+
+    /// `POST` and `PATCH` both **return the agent**, so the list is updated from
+    /// the response rather than refetched. The `GET /agents` that used to follow
+    /// every write was a second round trip per control tap — and because 1c's
+    /// writes are a serialised chain, the footer stayed disabled for both.
+    func createAgent(nlDefinition: String) async throws -> WireAgent {
+        let created = try await source.createAgent(nlDefinition: nlDefinition)
+        try? await store.upsertAgent(created)
+        return created
+    }
+
+    func updateAgent(id: String, patch: AgentPatch) async throws -> WireAgent {
+        let updated = try await source.updateAgent(id: id, patch: patch)
+        try? await store.upsertAgent(updated)
+        return updated
+    }
+
+    func deleteAgent(id: String) async throws {
+        try await source.deleteAgent(id: id)
+        try? await store.removeAgent(id: id)
+    }
+
+    func runAgent(id: String) async throws -> WireRunStarted {
+        try await source.runAgent(id: id)
+    }
+
+    func ask(query: String, threadID: String? = nil, routeHint: AskRoute? = nil)
+        -> AsyncThrowingStream<AskEvent, any Error> {
+        source.ask(query: query, threadID: threadID, routeHint: routeHint)
+    }
+
+    func downloadAttachment(gmailID: String, attachmentID: String, filename: String)
+        async throws -> URL {
+        try await source.downloadAttachment(gmailID: gmailID, attachmentID: attachmentID,
+                                            filename: filename)
+    }
+
+    /// The source itself, for the one caller that is not on the main actor.
+    /// See `MailSource.attachmentData`.
+    nonisolated var attachmentSource: any MailSource { source }
 
     /// A thread's detail, with the mailbox it was opened from.
     ///
@@ -317,6 +493,7 @@ final class MailSync {
         }
         _ = try await source.pair(code: code, deviceName: deviceName)
         await refresh()
+        await drainOutbox()
     }
 
     func unpair() async throws {

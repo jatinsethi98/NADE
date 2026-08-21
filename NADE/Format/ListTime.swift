@@ -50,19 +50,10 @@ nonisolated enum ListTime {
     /// Keyed on the zone rather than cached outright so the injected calendar
     /// in `ListTimeTests` still works and a device that changes time zone still
     /// re-bins its rows.
-    private static let formatters = OSAllocatedUnfairLock(initialState: [String: DateFormatter]())
-
+    /// The memo moved to `DateFormatterCache` when P3 added three more callers
+    /// that needed it. Same keying, same reason.
     private static func formatter(_ format: String, _ calendar: Calendar) -> DateFormatter {
-        let key = "\(format)|\(calendar.timeZone.identifier)|\(calendar.locale?.identifier ?? "")"
-        if let known = formatters.withLock({ $0[key] }) { return known }
-
-        let f = DateFormatter()
-        f.locale = calendar.locale ?? Locale(identifier: "en_US_POSIX")
-        f.timeZone = calendar.timeZone
-        f.calendar = calendar
-        f.dateFormat = format
-        formatters.withLock { $0[key] = f }
-        return f
+        DateFormatterCache.fixed(format, calendar: calendar)
     }
 
     static func string(for date: Date, now: Date, calendar: Calendar = ListTime.calendar) -> String {

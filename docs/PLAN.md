@@ -323,6 +323,37 @@ gives it one.
   Built against the DEBUG fixture world, because the endpoints these screens
   read land at P4–P6. They go live with no rewrite.
 
+  **Done 2026-08-20.** 2a (feed ⇄ focus), 1a's three route states, 1b, 1c and
+  1d all ship, plus `NAskField` and a `FlowLayout` the wrapping tag row needed.
+  The live push loop was proven at the same time: real mail arrived at 01:22:21
+  and the authenticated webhook landed at 01:22:25 — **4 s**, against the ≤60 s
+  criterion. An adversarial Codex review of the finished lane returned 23
+  findings; the ones that mattered are closed and each has a test:
+
+  - the locked `WKWebView` still allowed **link previews**, which bypass
+    `decidePolicyFor` entirely and fetch a remote URL on long press — the exact
+    tracking callback the CSP exists to stop;
+  - the **outbox was never drained** on launch, foreground or pairing, though
+    its own doc comment claimed all three: a kill between the durable write and
+    the request stranded an approval until the user tapped another one;
+  - `ends.date` round-tripped through an absolute `Date`, so a calendar-only
+    date **moved a day** in either direction depending on the device's offset;
+  - two in-flight agent `PATCH`es both derived `allowed_tools` from the same
+    pre-edit object, so the second **undid** the first;
+  - a mid-stream SSE `error` erased the partial answer that had already arrived;
+  - the fixture world returned canned successes for approve/skip, so the
+    outbox's own refetch **restored the card it had just resolved** — a
+    consumed token could be replayed forever;
+  - a sentence edit kept the old compiled spans, making every edit look like it
+    had failed;
+  - and `nadeIsBlank`, because U+200B is not whitespace and a paste of it lit
+    the ask field's submit button.
+
+  Recorded as deviations 50–56 in `DESIGN.md`. Two are worth reading before P6:
+  1a's citation rows are **not tappable** (the contract gives a message id where
+  the thread route needs a thread id) and 1c's Invocation radios are read-only
+  (`PATCH` accepts no trigger kind).
+
   **1k's remaining sections are P7, not P3.** This line used to say "settings
   beyond the CONNECTION + ACCOUNT sections", which contradicts P2's own scope
   table above: AGENTS, READING and the served `disclosure` footer need

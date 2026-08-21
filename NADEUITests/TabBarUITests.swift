@@ -70,11 +70,10 @@ final class TabBarUITests: XCTestCase {
         let app = launchApp()
         XCTAssertTrue(app.buttons["tab.ask"].waitForExistence(timeout: 10))
 
-        // P2 replaced the Mail placeholder with 1g, so the Mail tab is
-        // identified by its real screen rather than by a note. The other three
-        // are still placeholders and are still checked by their copy.
+        // P2 replaced the Mail placeholder with 1g and P3 replaced the Ask one
+        // with 2a, so both are identified by their real screens. Notes and
+        // Calendar are still placeholders and are still checked by their copy.
         let notes: [String: String] = [
-            "ask": "Ask, search, or describe an agent.",
             "notes": "Notes your agents write.",
             "calendar": "Six days, each a compressed timeline.",
         ]
@@ -83,6 +82,13 @@ final class TabBarUITests: XCTestCase {
         let mailboxes = app.staticTexts["mailboxes.title"]
         XCTAssertTrue(mailboxes.waitForExistence(timeout: 5), "the mail screen did not appear")
         XCTAssertTrue(mailboxes.isHittable)
+
+        app.buttons["tab.ask"].tap()
+        let home = app.staticTexts["home.date"]
+        XCTAssertTrue(home.waitForExistence(timeout: 5), "the ask screen did not appear")
+        XCTAssertTrue(home.isHittable)
+        XCTAssertFalse(mailboxes.isHittable,
+                       "the mail screen is still reachable while ask is showing")
 
         for (id, note) in notes {
             app.buttons["tab.\(id)"].tap()
