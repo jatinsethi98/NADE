@@ -166,6 +166,15 @@ Tab bar padding is `9 / 10 / 26` and that 26 is a display-edge number.
 
 ## 2. Chrome
 
+> **Liquid Glass (branch `liquid-glass`).** This section describes the design as
+> drawn. v1 as built takes Apple's Liquid Glass on the **chrome layer only**:
+> the tab bar is now a native `TabView`, and every screen's own header band
+> floats over its content as a glass bar. The content layer is unchanged —
+> Cormorant over Lora, hairlines, bordered-not-filled cards, colour as a stroke.
+> Deviations **58–65** in §6 index every difference; `IOS_DECISIONS.md` D98
+> carries the reasoning. Where this section and those rows disagree, the rows
+> are what ships.
+
 ### Tab bar (every root screen)
 
 Four tabs, equal width, 1 pt top divider, icon 18 pt stroke 1.8 above a 10.5 pt
@@ -189,6 +198,18 @@ against the mockup's 75.28 and the four labels landed on baselines 2.33 pt
 apart. `NIcon` therefore carries the square frame, and the label's own box is
 the inherited `line-height: 1.55` — `10.5 × 1.55 = 16.275`, not Lora's ~13.4.
 Bar height is exactly `1 + 9 + 18 + 5 + 16.275 + 26 = 75.275`.
+
+**None of the paragraph above still ships.** It described `NTabBar`, which the
+Liquid Glass pass deleted in favour of a native `TabView` (deviation 58). The
+hairline, the 18 pt light-stroke glyphs, the 10.5 pt uppercase `0.09em` labels
+and the 75.275 pt height are all UIKit's now, and none of them is reachable
+through `TabView`'s styling surface — which is exactly what D22 said when it
+kept `TabView` out. It is kept here because it is still the design of record and
+because the swap-back, if it ever happens, needs the numbers.
+
+What survives unchanged is the table above it: **which four tabs, in which
+order, with which glyphs.** `ThemeTests.testTabsAreTheFourInTheDesign` still
+asserts every symbol resolves on the running OS.
 
 Which screens carry the bar, and which tab is lit — this is the design's own
 navigation map, so follow it:
@@ -224,6 +245,14 @@ Pill input + circular 1 pt accent button, gap 10, both `align-items: center`.
 2b's static render pads `11 / 16` with no min-height; 2a's live input is the one
 v1 builds. Submitting from any of them posts `POST /ask` (PLAN §Ask routing); on
 1f the `thread_id` goes with it.
+
+Every number in that table still holds. What the Liquid Glass pass added is a
+**material behind them** (deviation 61): the pill takes `.glassEffect(.regular)`
+and the circle `.glassEffect(.regular.interactive())`, the two inside one
+`GlassEffectContainer`. The 1 pt borders are unchanged and draw on top, so the
+stroke reads as the rim of the glass rather than being replaced by it — which
+is the one way this design's "colour is a stroke" rule and a translucent fill
+can share a control.
 
 ---
 
@@ -907,3 +936,11 @@ an addition the mockup does not contain; the rest are substitutions.
 | 55 | 2a | pull-down ⇄ swipe-up is a **tap** on the grabber | §2a lists the drag as P7 "time-allowing"; both states and the transition ship now, the gesture does not |
 | 56 | 1f | **+** "View original" toggle, and attachments are tappable | PLAN P3's iOS line. The WKWebView is locked: no JS, CSP `default-src 'none'` with `img-src nade-inline:` and no `http(s):` source of any kind, link previews off, non-persistent store, and every navigation but the first `about:` load cancelled |
 | 57 | 1f | inline images load over a private `nade-inline:` scheme | this is what actually closes 47. The server rewrites `cid:` to a relative `/v1/messages/…/attachments/…` before the client sees it, so an `img-src cid:` allowance matched **nothing** and the relative URL resolved against `about:blank` — every inline image was a broken box. `WKWebView` cannot attach a bearer to a subresource, so a `WKURLSchemeHandler` fetches the bytes through the authenticated client and sniffs the type from the bytes rather than trusting the message |
+| 58 | all | the tab bar is a native `TabView`, not `NTabBar` | Liquid Glass is a floating layer that lenses what passes beneath it, and the design's bar was a **sibling** of the scrolling band with nothing under it (D26). Reverses D22 and D26; `IOS_DECISIONS` D98 |
+| 59 | all | the tab bar's type is the system's | a consequence of 58 and the price of it: `TabView` reaches none of the 10.5 pt uppercase `0.09em` labels, the 18 pt light-stroke glyphs or the 1 pt top hairline. The four **titles and glyphs** are still the design's |
+| 60 | all | every screen's header band floats over its content | the chrome layer sits above the content layer. `safeAreaInset` + `nadeChromeBar()`, not `safeAreaBar`, which clips its content and with it D28's overflowing 44 pt hit targets — measured: a chip's target fell from 44 to its drawn 30 |
+| 61 | 2a / 1a / 1f | the ask field is glass | the app's most-looked-at control, and it lives in the chrome layer on all four screens that draw it. Borders and metrics unchanged |
+| 62 | all | the `Hairline()` closing each header band is gone | the band's own edge says where chrome ends and content begins, and says it while the content is moving |
+| 63 | 1d / 1k | sheets keep no fill of their own | `surface` painted over an iOS 26 sheet replaces its material, its corner radius, its edge inset and its drag-to-full opacity. 1d's hand-drawn 38 × 4 grabber goes with it — `.presentationDragIndicator(.visible)` |
+| 64 | all | deployment target 26.0, not 18.0 | every Liquid Glass API is iOS 26 and this branch runs one code path rather than `#available` branches. Reverses D1, whose warning — it will not install below the target — is accepted, not overlooked |
+| 65 | all | tab-bar VoiceOver position is the platform's | `NTabBar` synthesised "Tab 1 of 4" because SwiftUI derives nothing for four loose buttons. A `UITabBar` item exposes no `value` through XCUITest at all, so the announcement is better and the assertion is gone |

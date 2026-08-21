@@ -105,3 +105,24 @@ and paste the printed `https://<host>/v1/auth/gmail/callback` into the Google
 OAuth client's redirect URIs — the one step the script cannot do (PHASE0 H3).
 The hostname changes every session, which is the price of not owning a
 Cloudflare-managed domain.
+
+## The two legs simctl cannot set
+
+Liquid Glass adapts to **Reduce Transparency** and **Increase Contrast**, and
+neither is reachable from `xcrun simctl ui` the way `appearance` and
+`content_size` are. `scripts/screenshots.sh` therefore does not shoot them, and
+the gallery cannot fake them either — both are read-only environment values, the
+same problem `GalleryView`'s Reduce Motion section already documents.
+
+They are looked at by hand, and the glass chrome is the reason to bother:
+
+1. In the simulator, **Settings → Accessibility → Display & Text Size**.
+2. Turn on **Reduce Transparency**, then **Increase Contrast**, one at a time.
+3. Re-shoot the two places the material carries type over moving content —
+   `scripts/bench.sh --screen 1e` scrolled, and the gallery's glass section
+   (`-NADEGallery 1 -NADEGallerySection glass`).
+
+What you are checking is legibility, not fidelity: the system is expected to
+replace the material with something flatter, and the design's own contrast has
+none to spare — the Classical accent-to-ground pair is tuned to 3:1, "enough for
+icons, large text and interface chrome, **not for body copy**".

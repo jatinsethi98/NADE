@@ -226,7 +226,7 @@ answered everything older with a silent empty result.
 
 ### iOS app
 
-MVVM + `@Observable`, iOS 17 target, GRDB 7 pinned, MainActor-default isolation with `Sendable` records. No Xcode GUI steps: pbxproj/Info.plist/entitlements/xcscheme edited as files, verified by `xcodebuild`. `NADE_BASE_URL`/`NADE_TOKEN` via launch env; Settings overrides into Keychain (pairing-code entry screen ships in Settings).
+MVVM + `@Observable`, iOS 26.0 target (18.0 until the Liquid Glass pass; `IOS_DECISIONS` D1/D98), GRDB 7 pinned, MainActor-default isolation with `Sendable` records. No Xcode GUI steps: pbxproj/Info.plist/entitlements/xcscheme edited as files, verified by `xcodebuild`. `NADE_BASE_URL`/`NADE_TOKEN` via launch env; Settings overrides into Keychain (pairing-code entry screen ships in Settings).
 
 GRDB mirrors the wire: `thread` per contract; `thread_mailbox` join; cursors in `mailbox_sync`; `feed_item` enums verbatim; `pending_action` outbox (409=success). `note`/`draft` tables mirror their endpoints. No local FTS.
 

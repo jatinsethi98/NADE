@@ -17,11 +17,15 @@ configuration (project Debug/Release + three targets — eight settings in all).
 uses.
 
 Asserted twice, because once was not enough:
-`InfoPlistTests.testTheBuiltConfigurationTargets18` reads `MinimumOSVersion`
+`InfoPlistTests.testTheBuiltConfigurationTargets26` reads `MinimumOSVersion`
 from the built bundle — which only ever sees Debug — and
-`testEveryBuildConfigurationTargets18` parses `project.pbxproj` and requires all
-eight settings to be 18.0. See D36; the earlier claim that the bundle check
-alone caught a drifting configuration was false.
+`testEveryBuildConfigurationTargets26` parses `project.pbxproj` and requires all
+eight settings to agree. See D36; the earlier claim that the bundle check alone
+caught a drifting configuration was false.
+
+**Superseded by D98**, which raises the target to 26.0 for the Liquid Glass
+pass. Both assertions moved with it, keeping their derived count — the part
+that has caught real drift — and both were renamed rather than left saying 18.
 
 ### D2. Info.plist is hand-written *and* generated
 `INFOPLIST_FILE = NADE/Info.plist` with `GENERATE_INFOPLIST_FILE = YES`. Xcode
@@ -1581,3 +1585,134 @@ state. It went red partway through a session that had already run it green.
 Both rows now take the fixture's own instant, so the tie is real and the result
 does not depend on the day. **A test that mixes a wall clock with a fixed
 fixture is not testing what its name says; it is scheduling a failure.**
+
+## Liquid Glass (branch `liquid-glass`)
+
+### D98. The chrome layer went to Liquid Glass, and the content layer did not
+
+The ruling: **chrome only.** Bars, header bands, the ask field and the sheets
+take Apple's material; cards, rows, tags, chips and the `.primary` / `.secondary`
+/ `.ghost` buttons keep the Classical grammar — colour as a stroke, no filled
+buttons, elevation a whisper. That split is Apple's own model (glass is a
+functional layer *above* content) and it is the only reading under which D31 —
+never an average of two components — survives a second design system arriving.
+
+Three decisions are reversed, deliberately, and each is worth stating rather
+than quietly overwriting:
+
+* **D22** kept `TabView` out because it reaches none of the design's bar: not
+  the 1 pt top hairline, not the 18 pt light-stroke glyphs, not the 10.5 pt
+  uppercase `0.09em` labels. Still true. That type is the price of the system
+  bar and it is paid knowingly (deviations 58–59). What is bought is a bar that
+  minimizes on scroll-down, and a real `UITabBar` for VoiceOver rather than our
+  reconstruction of one.
+* **D26** made the bar a *sibling* of the scrolling band so "content ends at the
+  hairline and never scrolls underneath". Liquid Glass lenses what passes
+  beneath it; a bar with nothing under it is a bar with nothing to refract.
+* **D1** pinned the deployment target at 18.0. Every Liquid Glass API is iOS 26,
+  and the ruling was one code path rather than `#available` branches, so it is
+  26.0 (deviation 64). D1's warning — this will not install below the target —
+  is accepted, not overlooked.
+
+### D99. `safeAreaBar` clips, and this app's hit targets are built on overflow
+
+`safeAreaBar` is the iOS 26 API written for exactly this: it insets the safe
+area, applies the glass, brings the scroll edge effect. It was the first thing
+tried, and it **clips its content**.
+
+D28 built the 44 pt hit target out of an overflowing `Color.clear` background
+precisely so it could grow the target "without moving a pixel". Clipped, that
+background contributes nothing. Measured on iOS 26.5, the same two controls in
+1e's header:
+
+| | inside `safeAreaBar` | inside `safeAreaInset` |
+|---|---|---|
+| `maillist.chip.INBOX` | 58.3 × **30.0** | 58.3 × **44.0** |
+| `maillist.back` | 7.0 × **28.0** | 44.0 × **44.0** |
+
+Those are the drawn boxes, exactly — the targets were gone, not merely reduced.
+`MailUITests.testTheChipAndTheBackChevronAreBothAtLeast44Points` caught it.
+
+The alternative was to pay for the target in layout — `.frame(minHeight: 44)` on
+every control in a bar — which grows every header band and moves the pixels D28
+went out of its way not to move. `safeAreaInset` costs nothing and keeps both
+properties; it applies no material, so `nadeChromeBar()` carries the glass.
+
+**A convenience API that composes three behaviours can be wrong for one of
+them.** Taking the three apart cost one modifier and kept a requirement.
+
+### D100. Tearing a tab down is not the same as hiding it, and one model appended
+
+The old shell kept all four screens in the tree and toggled their opacity (D29),
+so `.onDisappear` never fired on a tab switch and `.task` never re-fired.
+`TabView` really does tear the outgoing tab down. Both halves of that pair now
+run on every departure and every return.
+
+Every `start()` in the app was already guarded by `!observation.isRunning` and
+every `refresh()` was a re-fetch — except `AskModel`, whose only guard was
+`task == nil` and whose `cancel()` clears `task`. So leaving the Ask tab and
+coming back re-asked the same question and `apply(.token)` **appended** to prose
+that was already complete: the answer rendered twice, back to back, with no
+seam. `HomeUITests.testAnAnswerSurvivesLeavingAndReturningToTheTab` caught it —
+the test written for the *opposite* failure, an answer that vanished.
+
+`AskModel.hasFinished` is the fix: set on every terminal outcome and pointedly
+**not** set when the task returns because it was cancelled. A finished session
+never runs again; an interrupted one resets its accumulated state before
+re-asking, so a partial answer is replaced rather than spliced.
+
+**A guard that says "not already running" is not the same as one that says "not
+already done."** The distinction only became visible when the shell started
+tearing views down.
+
+### D101. Two `.toolbar` calls do not compose
+
+`.toolbar(.hidden, for: .navigationBar)` followed by
+`.toolbar(.hidden, for: .tabBar)` compiles, hides the nav bar, and leaves the
+tab bar on screen over 1f. The variadic
+`.toolbar(.hidden, for: .navigationBar, .tabBar)` works.
+
+`HiddenBars` exists so the choice is made *before* the call rather than inside
+its argument, and so both stacks go through one place — including the Ask stack,
+where `hidesTabBar` is always `false`. `MailRoute.hidesTabBar` is still the only
+place the rule is written down, and it is still read off the **top route**,
+never off stack depth (D51).
+
+### D102. UIKit's tab bar takes no identifier, and one assertion had to go
+
+`.accessibilityIdentifier` was applied to the `Tab`, and then to an explicit
+`Label` inside it. Both compiled; both arrived at the rendered button as the
+empty string on iOS 26.5. Seven test files addressed tabs as
+`app.buttons["tab.<rawValue>"]`; they now go through `XCUIApplication.tab(_:)`,
+which scopes the query to `tabBars` and matches the title VoiceOver speaks.
+
+That is not a new coupling to visible copy — `TabBarUITests` asserts those four
+labels directly, so the suite fails loudly on a title change rather than quietly
+finding nothing. Scoping to `tabBars` also makes the negative assertion exact:
+on 1f there is no tab bar to look in.
+
+`testEachTabAnnouncesItsPosition` is gone. A `UITabBar` item exposes no `value`
+through XCUITest — verified, empty for all four — because the position is
+composed by VoiceOver from the bar rather than stored on the item. The
+announcement is the platform's now and is better for it, and it is **not
+observable from a UI test**, so the assertion was deleted rather than weakened.
+
+Recorded rather than dropped silently: this is a real loss of coverage, and the
+next person to wonder why a tab has no spoken position should find this instead
+of re-running the experiment.
+
+### D103. A look-at loop that does not rebuild is a look at the last build
+
+Three consecutive rounds of "fix the bottom bar, screenshot, still broken" were
+three screenshots of one binary. The ad-hoc shot script resolved
+`BUILT_PRODUCTS_DIR` with `xcodebuild -showBuildSettings` and installed from it,
+which succeeds whether or not the source has been compiled since.
+
+The conclusions drawn in those three rounds were written into a source comment
+before the mistake surfaced, and the comment was wrong in the specific way that
+is hardest to catch later: it cited measurements that had never been taken. It
+has been rewritten to claim only what was tested.
+
+`scripts/screenshots.sh` and `scripts/bench.sh` both build first, which is why
+neither has ever had this problem. **A scratch tool that skips the slow step
+is not a faster version of the real one; it is a different tool that can lie.**
