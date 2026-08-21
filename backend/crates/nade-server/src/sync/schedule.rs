@@ -41,7 +41,9 @@ use crate::{
 /// The job kind that does both overdue things.
 pub const KIND: &str = "gmail_maintenance";
 
-/// One pending maintenance job at a time, whatever asked for it.
+/// One pending maintenance job **per account** at a time, whatever asked for
+/// it: the key is `gmail_maintenance:{account_id}`, so one account's overdue
+/// work cannot suppress another's.
 pub const DEDUPE_KEY: &str = "gmail_maintenance";
 
 /// What the database says is overdue.
@@ -227,13 +229,18 @@ pub async fn run_maintenance(state: &AppState, account_id: Uuid) -> Result<Maint
     Ok(report)
 }
 
-/// Ask for a maintenance run, unless one is already waiting.
+/// Ask for a maintenance run, unless one is already waiting for this account.
 ///
 /// # Errors
 /// Returns an error if the enqueue fails.
 pub async fn enqueue(queue: &Queue, account_id: Uuid) -> sqlx::Result<Option<i64>> {
     queue
-        .enqueue_unique(KIND, &json!({ "account_id": account_id }), None, DEDUPE_KEY)
+        .enqueue_unique(
+            KIND,
+            &json!({ "account_id": account_id }),
+            None,
+            &format!("{DEDUPE_KEY}:{account_id}"),
+        )
         .await
 }
 
@@ -266,24 +273,36 @@ pub fn spawn(state: AppState, queue: Queue) -> tokio::task::JoinHandle<()> {
 
 /// One tick. Separated so a test can drive it without a timer.
 ///
+/// Every account gets its own due-ness question and its own deduplicated job:
+/// the accounts are independent mailboxes on independent cadences, and one
+/// being overdue says nothing about another. `needs_reauth` rows are excluded
+/// in the listing for the same reason [`due`] joins on status - a paused
+/// account must stop the ticker, not feed it.
+///
 /// # Errors
-/// Returns an error if the account lookup, the due-ness query, or the enqueue
+/// Returns an error if the account listing, a due-ness query, or an enqueue
 /// fails.
 pub async fn tick_once(state: &AppState, queue: &Queue) -> Result<bool> {
-    let Some(account) = state.account().await? else {
-        return Ok(false);
-    };
-    let due = due(
-        &state.pool,
-        account.id,
-        &state.config.schedule,
-        state.config.push.topic.as_deref(),
-    )
-    .await?;
-    if due.nothing() {
-        return Ok(false);
+    let accounts: Vec<Uuid> =
+        sqlx::query_scalar("select id from accounts where status <> 'needs_reauth' order by id")
+            .fetch_all(&state.pool)
+            .await?;
+
+    let mut enqueued_any = false;
+    for account_id in accounts {
+        let due = due(
+            &state.pool,
+            account_id,
+            &state.config.schedule,
+            state.config.push.topic.as_deref(),
+        )
+        .await?;
+        if due.nothing() {
+            continue;
+        }
+        enqueued_any |= enqueue(queue, account_id).await?.is_some();
     }
-    Ok(enqueue(queue, account.id).await?.is_some())
+    Ok(enqueued_any)
 }
 
 /// The `gmail_maintenance` handler.
@@ -308,9 +327,11 @@ impl std::fmt::Debug for MaintenanceHandler {
 #[async_trait]
 impl Handler for MaintenanceHandler {
     async fn handle(&self, job: Job, _ctx: JobContext) -> Result<()> {
+        // A payload without an account - a legacy or hand-inserted row - can
+        // only mean the sole account; with several there is no honest guess.
         let account_id = match job.payload.get("account_id").and_then(|v| v.as_str()) {
             Some(raw) => Uuid::parse_str(raw).context("the account_id in the job payload")?,
-            None => match self.state.account().await? {
+            None => match self.state.sole_account().await? {
                 Some(account) => account.id,
                 None => return Ok(()),
             },

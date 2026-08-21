@@ -28,12 +28,25 @@ import os
 nonisolated enum ListTime {
 
     /// The reader's day boundaries, and a stable rendering of them.
+    ///
+    /// Memoised by time zone, `DateFormatterCache`'s own pattern (D88):
+    /// building a `Calendar` plus its locale is not free, this sits on the
+    /// same hot path as the formatters — `MailRow` reaches it twice per row
+    /// per render — and the value never changes until the zone does. Keying on
+    /// the zone identifier is what keeps a device that changes zone re-binning
+    /// its rows. `Calendar` is a value type, so callers get copies and cannot
+    /// mutate the cached one.
     static var calendar: Calendar {
+        let zone = TimeZone.current
+        if let known = calendars.withLock({ $0[zone.identifier] }) { return known }
         var calendar = Calendar(identifier: .gregorian)
         calendar.locale = Locale(identifier: "en_US_POSIX")
-        calendar.timeZone = TimeZone.current
+        calendar.timeZone = zone
+        calendars.withLock { $0[zone.identifier] = calendar }
         return calendar
     }
+
+    private static let calendars = OSAllocatedUnfairLock(initialState: [String: Calendar]())
 
     /// Built from the **same** calendar that decides the day boundary. Reading
     /// the zone from `TimeZone.current` instead is a bug that hides in plain

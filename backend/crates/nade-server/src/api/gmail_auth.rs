@@ -349,30 +349,39 @@ pub async fn callback(
         }
     };
 
-    // v1 is single-account. Binding a second mailbox would silently repoint
-    // every stored message at a new owner, so refuse instead.
+    // v1 is one mailbox per device. Rebinding this device to a second mailbox
+    // would silently repoint its whole view of its mail at a new owner, so
+    // refuse instead. A different, unbound device consenting a new mailbox is
+    // not this case - that is a second user, and it simply proceeds.
     //
     // This is the **cheap pre-check**: it buys the friendly page without a
     // write. The authoritative one lives inside `save_consent`, under the
-    // singleton advisory lock, because two callbacks can reach this line at the
-    // same moment and both see "no account".
-    match oauth::existing_account_email(&state.pool).await {
-        Ok(Some(existing)) if !existing.eq_ignore_ascii_case(&email) => {
-            tracing::warn!(%existing, attempted = %email, "refused to bind a second Gmail account");
-            return already_connected();
-        }
-        Ok(_) => {}
-        Err(error) => {
-            tracing::error!(%error, "could not read the existing account");
-            return page(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Something went wrong",
-                "The account could not be read. Check the server log.",
-            );
+    // account advisory lock, because two callbacks can reach this line at the
+    // same moment and both see "unbound".
+    if let Some(device_id) = pending.device_id {
+        match oauth::bound_account_email(&state.pool, device_id).await {
+            Ok(Some(existing)) if !existing.eq_ignore_ascii_case(&email) => {
+                tracing::warn!(%existing, attempted = %email, "refused to rebind a device to a second Gmail account");
+                return already_connected();
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(%error, "could not read the device's bound account");
+                return page(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Something went wrong",
+                    "The account could not be read. Check the server log.",
+                );
+            }
         }
     }
 
-    match state.gmail.tokens.save_consent(&email, &tokens).await {
+    match state
+        .gmail
+        .tokens
+        .save_consent(&email, &tokens, pending.device_id)
+        .await
+    {
         Ok(account_id) => {
             tracing::info!(%account_id, %email, "gmail account connected");
             // A first sync, straight away, on the job queue.
@@ -390,11 +399,19 @@ pub async fn callback(
                 ),
             )
         }
-        // The race the pre-check above cannot win: another callback committed
-        // first. Same page, because it is the same fact.
+        // The race the pre-check above cannot win: another callback bound this
+        // device first. Same page, because it is the same fact.
         Err(TokenError::AlreadyBound { existing }) => {
-            tracing::warn!(%existing, attempted = %email, "lost the race to bind the mailbox");
+            tracing::warn!(%existing, attempted = %email, "lost the race to bind the device");
             already_connected()
+        }
+        // A revoke landed between the pre-exchange check and the commit. Same
+        // page as the pre-exchange refusal, so the revocation's timing is not
+        // an oracle - and nothing was persisted, because the bind aborts the
+        // whole consent transaction.
+        Err(TokenError::DeviceRevoked) => {
+            tracing::warn!("gmail callback refused at commit: the device is revoked");
+            expired_link()
         }
         Err(error) => {
             tracing::error!(%error, "could not save the Gmail consent");
@@ -438,9 +455,9 @@ fn expired_link() -> Response {
 fn already_connected() -> Response {
     page(
         StatusCode::CONFLICT,
-        "This server is already connected",
-        "It is signed in as a different Google account. v1 serves one mailbox; nothing was \
-         changed.",
+        "This device is already connected",
+        "It is signed in as a different Google account. v1 serves one mailbox per device; \
+         nothing was changed.",
     )
 }
 

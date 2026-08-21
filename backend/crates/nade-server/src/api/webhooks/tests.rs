@@ -374,10 +374,11 @@ async fn an_unreadable_body_from_a_verified_sender_is_204_not_400() {
     );
 }
 
-/// Criterion T5 - a valid delivery for another watch on the same topic must not
-/// drive this account.
+/// Criterion T5, re-scoped by D45: a push routes by its **address**. One this
+/// server does not hold is acknowledged and audited to no account - inventing
+/// an owner would file evidence under the wrong user.
 #[tokio::test]
-async fn a_push_for_a_different_mailbox_is_acknowledged_and_ignored() {
+async fn a_push_for_an_unknown_mailbox_is_acknowledged_and_ignored() {
     let server = MockServer::start().await;
     let signer = Signer::new();
     serve_jwks(&server, signer.jwks(KID)).await;
@@ -395,13 +396,60 @@ async fn a_push_for_a_different_mailbox_is_acknowledged_and_ignored() {
     assert_eq!(jobs_for(&app, crate::sync::incremental::KIND).await, 0);
     assert!(!webhook_stamped(&app, account).await);
 
-    let audited: i64 = sqlx::query_scalar(
-        "select count(*) from audit_log where action = 'gmail_push_wrong_mailbox'",
+    let audited: Vec<Option<Uuid>> = sqlx::query_scalar(
+        "select account_id from audit_log where action = 'gmail_push_unknown_mailbox'",
+    )
+    .fetch_all(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        audited,
+        vec![None],
+        "the unrouted push must leave evidence, owned by nobody"
+    );
+}
+
+/// The point of routing by address: with two accounts on one server, each push
+/// drives its own mailbox's cursor and nobody else's.
+#[tokio::test]
+async fn a_push_routes_to_the_account_its_address_names() {
+    let server = MockServer::start().await;
+    let signer = Signer::new();
+    serve_jwks(&server, signer.jwks(KID)).await;
+    let (app, first) = app_trusting(&server).await;
+    let second: Uuid = sqlx::query_scalar(
+        "insert into accounts (email, status) values ('someone.else@gmail.com', 'ok') returning id",
     )
     .fetch_one(&app.db.pool)
     .await
     .unwrap();
-    assert_eq!(audited, 1, "the misdirected push must leave evidence");
+    let token = signer.sign(KID, &claims());
+
+    // EDGE (unicode/case): Gmail echoes whatever the consent typed, so the
+    // match must ignore case.
+    let response = post_push(
+        &app,
+        Some(&format!("Bearer {token}")),
+        push_body("Someone.Else@Gmail.com", 7, true),
+    )
+    .await;
+
+    assert_eq!(response.status(), 204);
+    assert!(webhook_stamped(&app, second).await);
+    assert!(
+        !webhook_stamped(&app, first).await,
+        "the other account's cursor must not move"
+    );
+    let dedupe: String = sqlx::query_scalar("select dedupe_key from jobs where kind = $1")
+        .bind(crate::sync::incremental::KIND)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        dedupe,
+        format!("{}:{}", crate::sync::incremental::KIND, second),
+        "the job is deduplicated per account, keyed by the addressed one"
+    );
 }
 
 // ------------------------------------------------- the forgery matrix --

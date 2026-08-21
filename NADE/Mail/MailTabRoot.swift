@@ -47,6 +47,12 @@ struct MailTabRoot: View {
         }
     }
 
+    /// Quantised to the minute — `NADEClock.nowToTheMinute()`, shared with
+    /// `HomeTabRoot` and for its reason: this body re-runs on every tab tap,
+    /// and a raw `clock.now()` re-rendered every visible `MailRow` and re-split
+    /// every `ThreadMessageBlock` for a change no row can show.
+    private var now: Date { clock.nowToTheMinute() }
+
     @ViewBuilder
     private func destination(_ route: MailRoute) -> some View {
         switch route {
@@ -56,12 +62,12 @@ struct MailTabRoot: View {
                 mailboxes: models.mailboxes.mailboxes,
                 accountEmail: models.mailboxes.account?.email ?? "",
                 mailboxID: mailboxID,
-                now: clock.now()
+                now: now
             )
         case .thread(let id, let mailboxID):
             ThreadView(model: models.thread, threadID: id, mailboxID: mailboxID,
                        backTitle: models.mailboxes.name(of: mailboxID),
-                       now: clock.now())
+                       now: now)
         case .settings:
             SettingsView(model: models.settings)
         }

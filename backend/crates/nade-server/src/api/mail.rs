@@ -19,7 +19,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::cursor;
+use super::{auth::Auth, cursor};
 use crate::{
     error::{ApiError, ApiResult},
     gmail::client::GmailError,
@@ -162,15 +162,14 @@ pub struct SearchQuery {
 /// `GET /v1/me`.
 ///
 /// # Errors
-/// Returns an error only if the database is unreachable.
-pub async fn me(State(state): State<AppState>) -> ApiResult<Json<MeResponse>> {
-    // JUDGEMENT: with no account connected yet, `/me` answers rather than
-    // 404s. The client's whole job with a `needs_reauth` status is to show the
-    // "sign in" row in Settings, which is exactly the right screen for "not
-    // connected yet". Keeping `/me` total also means the iOS lane never has to
-    // special-case a missing body. Reported to the contract lane.
-    let account = state.account().await?;
-    Ok(Json(match account {
+/// Never - the resolved account rides in on [`Auth`].
+pub async fn me(auth: Auth) -> Json<MeResponse> {
+    // JUDGEMENT: with no account resolved for this device, `/me` answers
+    // rather than 404s. The client's whole job with a `needs_reauth` status is
+    // to show the "sign in" row in Settings, which is exactly the right screen
+    // for "not connected yet". Keeping `/me` total also means the iOS lane
+    // never has to special-case a missing body. Reported to the contract lane.
+    Json(match auth.account {
         Some(account) => MeResponse {
             email: account.email,
             status: account.status,
@@ -179,7 +178,7 @@ pub async fn me(State(state): State<AppState>) -> ApiResult<Json<MeResponse>> {
             email: String::new(),
             status: "needs_reauth".to_owned(),
         },
-    }))
+    })
 }
 
 /// `GET /v1/mailboxes`. Not paginated - a bounded collection returns a plain
@@ -187,8 +186,11 @@ pub async fn me(State(state): State<AppState>) -> ApiResult<Json<MeResponse>> {
 ///
 /// # Errors
 /// Returns an error only if the database is unreachable.
-pub async fn mailboxes(State(state): State<AppState>) -> ApiResult<Json<MailboxesResponse>> {
-    let Some(account) = state.account().await? else {
+pub async fn mailboxes(
+    State(state): State<AppState>,
+    auth: Auth,
+) -> ApiResult<Json<MailboxesResponse>> {
+    let Some(account) = auth.account else {
         return Ok(Json(MailboxesResponse {
             mailboxes: Vec::new(),
         }));
@@ -205,13 +207,14 @@ pub async fn mailboxes(State(state): State<AppState>) -> ApiResult<Json<Mailboxe
 /// failure.
 pub async fn threads(
     State(state): State<AppState>,
+    auth: Auth,
     Path(mailbox_id): Path<String>,
     Query(page): Query<PageQuery>,
 ) -> ApiResult<Json<ThreadsResponse>> {
     let limit = cursor::clamp_limit(page.limit, 50, 100);
     let keyset = page.cursor.as_deref().map(cursor::decode).transpose()?;
 
-    let Some(account) = state.account().await? else {
+    let Some(account) = auth.account else {
         return Ok(Json(empty_page()));
     };
 
@@ -256,10 +259,12 @@ pub async fn threads(
 /// it a result.
 pub async fn search(
     State(state): State<AppState>,
+    auth: Auth,
     Query(query): Query<SearchQuery>,
 ) -> ApiResult<Json<ThreadsResponse>> {
     let page = crate::search::search(
         &state,
+        auth.account.as_ref().map(|account| account.id),
         query.q.as_deref().unwrap_or_default(),
         query.cursor.as_deref(),
     )
@@ -277,9 +282,10 @@ pub async fn search(
 /// `404 not_found` when the thread is not this account's.
 pub async fn thread(
     State(state): State<AppState>,
+    auth: Auth,
     Path(thread_id): Path<String>,
 ) -> ApiResult<Json<ThreadDetail>> {
-    let account = state.account().await?.ok_or_else(ApiError::not_found)?;
+    let account = auth.account.ok_or_else(ApiError::not_found)?;
 
     let head = |thread_id: String| {
         let pool = state.pool.clone();
@@ -378,9 +384,10 @@ pub async fn thread(
 /// fails after retries.
 pub async fn attachment(
     State(state): State<AppState>,
+    auth: Auth,
     Path((gmail_id, att_id)): Path<(String, String)>,
 ) -> ApiResult<Response> {
-    let account = state.account().await?.ok_or_else(ApiError::not_found)?;
+    let account = auth.account.ok_or_else(ApiError::not_found)?;
 
     // Every attachment on the message, not just the one asked for: two parts
     // can share a name and a size, so identifying the requested one against
@@ -591,12 +598,24 @@ async fn visible_mailboxes(state: &AppState, account_id: Uuid) -> ApiResult<Vec<
 /// `INBOX` and some `CATEGORY_*`, so showing those would make the footer say
 /// "Inbox" for every thread; the label the user filed it under is the one that
 /// carries information. Ties break on raw byte order, like the mailbox list.
+///
+/// Names and kinds only - deliberately **not** [`visible_mailboxes`], whose
+/// unread/total figures cost a whole-mailbox `thread_labels x threads`
+/// aggregate. A footer label must not pay for counts it never renders on every
+/// thread open; `GET /mailboxes` keeps the aggregate. The pick itself is the
+/// mailbox list's, applied to the same candidates in the same order.
 async fn mailbox_name_for(
     state: &AppState,
     account_id: Uuid,
     thread_id: &str,
 ) -> ApiResult<String> {
-    let visible = visible_mailboxes(state, account_id).await?;
+    let labels: Vec<(String, String, String)> = sqlx::query_as(
+        "select label_id, coalesce(name, label_id), coalesce(type, 'user') \
+           from labels where account_id = $1",
+    )
+    .bind(account_id)
+    .fetch_all(&state.pool)
+    .await?;
     let filed: Vec<String> = sqlx::query_scalar(
         "select label_id from thread_labels where account_id = $1 and thread_id = $2",
     )
@@ -604,16 +623,28 @@ async fn mailbox_name_for(
     .bind(thread_id)
     .fetch_all(&state.pool)
     .await?;
+    let is_filed = |id: &str| filed.iter().any(|label| label == id);
 
-    let pick = |kind: &str| {
-        visible
-            .iter()
-            .filter(|mailbox| mailbox.kind == kind)
-            .find(|mailbox| filed.iter().any(|label| label == &mailbox.id))
-            .map(|mailbox| mailbox.name.clone())
-    };
+    // User labels first, in the mailbox list's order: raw byte order, hidden
+    // `[Gmail]` views excluded.
+    let mut user: Vec<(&str, &str)> = labels
+        .iter()
+        .filter(|(_, name, kind)| kind == "user" && !name.starts_with(HIDDEN_PREFIX))
+        .map(|(id, name, _)| (id.as_str(), name.as_str()))
+        .collect();
+    user.sort_by(|(_, left), (_, right)| left.as_bytes().cmp(right.as_bytes()));
+    if let Some((_, name)) = user.into_iter().find(|(id, _)| is_filed(id)) {
+        return Ok(name.to_owned());
+    }
 
-    Ok(pick("user").or_else(|| pick("system")).unwrap_or_default())
+    // Then the whitelist, in the contract's order - and only labels the sync
+    // has actually stored, exactly as `visible_mailboxes` lists them.
+    Ok(SYSTEM_MAILBOXES
+        .iter()
+        .filter(|(id, _)| labels.iter().any(|(label_id, _, _)| label_id == id))
+        .find(|(id, _)| is_filed(id))
+        .map(|(_, name)| (*name).to_owned())
+        .unwrap_or_default())
 }
 
 /// Resolve our stored attachment to Gmail's `attachmentId` and fetch the bytes.

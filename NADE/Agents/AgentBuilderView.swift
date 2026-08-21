@@ -242,8 +242,19 @@ struct AgentBuilderView: View {
     static let doLink = "nade-edit:do"
 
     private var sentence: AttributedString {
-        var result = AttributedString("When ")
-        result.append(Self.span(model.agent?.whenSpan ?? "", link: Self.whenLink))
+        // DESIGN §1c's schedule branch (mockup 1d): a scheduled agent's
+        // sentence *opens with* its when-span — "Every weekday at 8:00, build
+        // today's to-do…" — so there is no "When " prefix and the span itself
+        // carries the capital. Mail and manual agents keep `When {when}, …`.
+        // `commitEdit` composes the identical string back, so what this
+        // renders is exactly what a span edit PATCHes as `nl_definition`.
+        let scheduled = model.agent?.schedule != nil
+        let whenText = model.agent?.whenSpan ?? ""
+        var result = AttributedString(scheduled ? "" : "When ")
+        result.append(Self.span(
+            scheduled ? AgentBuilderModel.capitalisedFirst(whenText) : whenText,
+            link: Self.whenLink
+        ))
         result.append(AttributedString(", "))
         result.append(Self.span(model.agent?.doSpan ?? "", link: Self.doLink))
         result.append(AttributedString("."))

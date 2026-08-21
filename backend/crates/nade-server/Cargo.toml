@@ -23,7 +23,6 @@ base64.workspace = true
 chrono.workspace = true
 dotenvy = "0.15"
 encoding_rs = "0.8"
-futures.workspace = true
 hex = "0.4"
 # Only for the `oauth2` <-> `reqwest` bridge; both already use http 1.x, so this
 # adds no new version to the tree.

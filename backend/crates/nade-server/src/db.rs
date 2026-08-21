@@ -257,9 +257,16 @@ mod tests {
         assert!(find("messages_account_ts_idx").contains("internal_ts DESC"));
         assert!(find("messages_account_thread_idx").contains("thread_id"));
         // `messages_fts_idx` is deliberately absent - see
-        // `nothing_maintains_a_second_index`. `label_ids` keeps its GIN index:
-        // that is a plain SQL predicate over the cache, not a text index.
-        assert!(find("messages_label_ids_idx").contains("USING gin"));
+        // `nothing_maintains_a_second_index` - and so is the `label_ids` GIN:
+        // no query uses a GIN-servable operator on the column (label reads go
+        // through `thread_labels`), so the index only taxed every upsert on
+        // the sync's hottest write path. Migration 0003 dropped it.
+        assert!(
+            !definitions
+                .iter()
+                .any(|(name, _)| name == "messages_label_ids_idx"),
+            "the unused label_ids GIN is back"
+        );
         assert!(find("agent_runs_status_wake_idx").contains("wake_at"));
         assert!(find("feed_items_account_status_created_idx").contains("created_at DESC"));
 
@@ -480,37 +487,78 @@ mod tests {
         assert_eq!(left, 0);
     }
 
-    /// Criteria I3 + I4 - a second settings row is impossible, by DDL.
+    /// Criteria I3 + I4, re-keyed by migration 0003: settings are one row per
+    /// **account** - the server-wide singleton encoded "one server, one
+    /// mailbox" into DDL, and resolution is per-account now (D45/D46).
     #[tokio::test]
-    async fn settings_is_a_singleton() {
+    async fn settings_are_one_row_per_account() {
         let db = test_db().await;
-        let (singleton, default): (bool, bool) =
-            sqlx::query_as("select singleton, approval_required_default from settings")
-                .fetch_one(&db.pool)
-                .await
-                .unwrap();
-        assert!(singleton);
+
+        // A fresh database has no accounts and therefore no settings rows.
+        let rows: i64 = sqlx::query_scalar("select count(*) from settings")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0, "no account, no settings row to misread");
+
+        let account: uuid::Uuid = sqlx::query_scalar(
+            "insert into accounts (email) values ('s@example.com') returning id",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        let default: bool = sqlx::query_scalar(
+            "insert into settings (account_id) values ($1) returning approval_required_default",
+        )
+        .bind(account)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
         assert!(default, "approval_required_default is true by default");
 
-        // Same key: unique violation.
-        let err = sqlx::query("insert into settings (singleton) values (true)")
+        // One row per account, by primary key.
+        let err = sqlx::query("insert into settings (account_id) values ($1)")
+            .bind(account)
             .execute(&db.pool)
             .await
             .unwrap_err();
         assert_eq!(constraint_code(&err), "23505");
 
-        // Different key: the check constraint refuses it, so there is no way in.
-        let err = sqlx::query("insert into settings (singleton) values (false)")
+        // A second account carries its own row, and the two can disagree -
+        // which is the whole reason the singleton had to go.
+        let other: uuid::Uuid = sqlx::query_scalar(
+            "insert into accounts (email) values ('t@example.com') returning id",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "insert into settings (account_id, approval_required_default) values ($1, false)",
+        )
+        .bind(other)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let first: bool = sqlx::query_scalar(
+            "select approval_required_default from settings where account_id = $1",
+        )
+        .bind(account)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert!(first, "one account's setting must not leak into another's");
+
+        // And the row dies with its account, not before.
+        sqlx::query("delete from accounts where id = $1")
+            .bind(other)
             .execute(&db.pool)
             .await
-            .unwrap_err();
-        assert_eq!(constraint_code(&err), "23514");
-
-        let rows: i64 = sqlx::query_scalar("select count(*) from settings")
+            .unwrap();
+        let left: i64 = sqlx::query_scalar("select count(*) from settings")
             .fetch_one(&db.pool)
             .await
             .unwrap();
-        assert_eq!(rows, 1);
+        assert_eq!(left, 1);
     }
 
     /// Criterion I5 - API.md §5: a created agent is always a draft.
@@ -811,6 +859,35 @@ mod tests {
         ] {
             assert_eq!(by_name.get(column), Some(&ty), "sync_state.{column}");
         }
+    }
+
+    /// Migration 0003's wire fields: `API.md` §3's note unread marker and §6's
+    /// run summary exist now, so P4 serves them without another migration.
+    #[tokio::test]
+    async fn notes_unread_and_run_summary_exist() {
+        let db = test_db().await;
+        let (ty, nullable, default): (String, String, Option<String>) = sqlx::query_as(
+            "select data_type, is_nullable, column_default from information_schema.columns \
+             where table_name = 'notes' and column_name = 'unread'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!((ty.as_str(), nullable.as_str()), ("boolean", "NO"));
+        assert!(default.as_deref().unwrap_or_default().contains("true"));
+
+        let (ty, nullable): (String, String) = sqlx::query_as(
+            "select data_type, is_nullable from information_schema.columns \
+             where table_name = 'agent_runs' and column_name = 'summary'",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (ty.as_str(), nullable.as_str()),
+            ("text", "YES"),
+            "a run that died before its first step has nothing to say"
+        );
     }
 
     fn constraint_code(error: &sqlx::Error) -> String {

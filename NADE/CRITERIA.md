@@ -271,8 +271,10 @@ carries the criteria that expansion owes.
 8. **`msg_count` is the server's number, not a count of what we hold.** The
    client never reconciles them; `partial` is how the difference is explained.
 9. **A visible timestamp does not re-render when the day turns.** `clock.now()`
-   is captured when SwiftUI builds a screen, so a row left on screen across
-   midnight keeps saying "23:59" until something else invalidates it. A timer
+   is captured when SwiftUI builds a screen — and quantised to the minute
+   (`NADEClock.nowToTheMinute()`, D98), so equal renders compare equal — so a
+   row left on screen across midnight keeps saying "23:59" until something
+   else invalidates it. A timer
    that fires at the day boundary is the fix and is not built here — P3 brings
    push, which invalidates these screens far more often than a clock would.
 10. **`Retry-After` is honoured by refusing to ask again before it elapses**,

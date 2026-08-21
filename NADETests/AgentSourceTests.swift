@@ -232,6 +232,81 @@ final class AgentSourceTests: XCTestCase {
             "When x, y."
         )
     }
+
+    // MARK: The schedule branch (DESIGN §1c; mockup 1d)
+
+    /// A scheduled agent's sentence opens with its when-span and carries no
+    /// "When" — "Every weekday at 8:00, build today's to-do…". The universal
+    /// form rendered "When every weekday at 08:00, …", and `commitEdit`
+    /// PATCHed that composition back as `nl_definition`. Driven off the
+    /// contract's own scheduled agent, so the shape being composed is the one
+    /// the wire actually carries.
+    func testComposeDropsTheWhenPrefixForAScheduledAgent() throws {
+        let agent = try ContractFixture.decode(WireAgent.self, from: "agent_scheduled")
+        XCTAssertNotNil(agent.schedule, "the fixture stopped being scheduled — this test is aimed wrong")
+        let sentence = AgentBuilderModel.compose(
+            when: try XCTUnwrap(agent.whenSpan),
+            doing: try XCTUnwrap(agent.doSpan),
+            trailing: agent.trailing,
+            scheduled: agent.schedule != nil
+        )
+        XCTAssertEqual(sentence, "Every weekday at 08:00, save today's to-do list as a note.")
+        XCTAssertFalse(sentence.hasPrefix("When"), "a scheduled sentence must not open with 'When'")
+    }
+
+    /// The mail form is untouched by the schedule branch, trailing included.
+    func testComposeKeepsTheWhenPrefixForAMailAgent() {
+        XCTAssertEqual(
+            AgentBuilderModel.compose(when: "a recruiter emails", doing: "save the next steps",
+                                      trailing: "Ask me first.", scheduled: false),
+            "When a recruiter emails, save the next steps. Ask me first."
+        )
+    }
+
+    /// Only the first character, and only upward. EDGE: empty input (the blank
+    /// guard upstream owns that case), an uncased leading character, unicode
+    /// case mapping, and capitals past the first character surviving.
+    func testCapitalisedFirstTouchesExactlyTheFirstCharacter() {
+        XCTAssertEqual(AgentBuilderModel.capitalisedFirst("every weekday at 08:00"),
+                       "Every weekday at 08:00")
+        XCTAssertEqual(AgentBuilderModel.capitalisedFirst(""), "")
+        XCTAssertEqual(AgentBuilderModel.capitalisedFirst("8 o'clock daily"), "8 o'clock daily")
+        XCTAssertEqual(AgentBuilderModel.capitalisedFirst("über alles"), "Über alles")
+        XCTAssertEqual(AgentBuilderModel.capitalisedFirst("each Monday, in May"),
+                       "Each Monday, in May")
+    }
+
+    /// The fixture world's decompiler is `compose`'s inverse, schedule branch
+    /// included: a span edit on the scheduled agent PATCHes a sentence with no
+    /// "When", and the recompile must return fresh spans — not drop 1c to its
+    /// compile-failure fallback for a well-formed sentence.
+    func testEditingAScheduledSentenceRoundTripsWithoutAWhenPrefix() async throws {
+        let source = source()
+        let id = "a0000002-0000-4000-8000-000000000002"
+        let sentence = AgentBuilderModel.compose(when: "every weekday at 07:30",
+                                                 doing: "save the to-do list as a note",
+                                                 trailing: nil, scheduled: true)
+        XCTAssertEqual(sentence, "Every weekday at 07:30, save the to-do list as a note.")
+
+        let updated = try await source.updateAgent(id: id, patch: AgentPatch(nlDefinition: sentence))
+        XCTAssertNil(updated.compileError, "the fixture compiler rejected the scheduled shape")
+        XCTAssertEqual(updated.whenSpan, "Every weekday at 07:30")
+        XCTAssertEqual(updated.doSpan, "save the to-do list as a note")
+        XCTAssertEqual(updated.nlDefinition, sentence)
+    }
+
+    /// EDGE: `.whole` lets the user type either shape into a scheduled agent —
+    /// a "When …" sentence still decompiles rather than failing compile.
+    func testAScheduledAgentStillAcceptsAWhenShapedSentence() async throws {
+        let source = source()
+        let id = "a0000002-0000-4000-8000-000000000002"
+        let updated = try await source.updateAgent(
+            id: id,
+            patch: AgentPatch(nlDefinition: "When Friday comes, save the week's summary as a note.")
+        )
+        XCTAssertNil(updated.compileError)
+        XCTAssertEqual(updated.whenSpan, "Friday comes")
+    }
 }
 
 private extension APIFailure {

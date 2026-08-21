@@ -25,9 +25,12 @@ run *args:
 build:
     cargo build -p {{ crate }} --all-targets
 
-# The whole suite. Each test gets its own freshly migrated database.
+# The whole suite, at the WORKSPACE root. Cargo unifies features across the
+# workspace, so a per-crate run can pass on a feature set the real build never
+# uses - the workspace command is the one that tells the truth (DECISIONS.md
+# D27). Each test gets its own freshly migrated database.
 test *args:
-    cargo test -p {{ crate }} -- "$@"
+    cargo test --workspace -- "$@"
 
 # Create/upgrade the database, then exit.
 migrate:
@@ -111,5 +114,13 @@ fmt-check:
 lint:
     cargo clippy -p {{ crate }} --all-targets -- -D warnings
 
-# Exactly what the acceptance gate runs, P1 and P2 alike.
-ci: build lint fmt-check test
+# The injection red-team harness is a deliberately detached workspace (see its
+# Cargo.toml), so nothing else here ever builds it - and a detached crate rots
+# silently. At minimum it must still compile; the full run is
+# `cd testdata/injection/harness && cargo test`.
+red-team:
+    cargo check --manifest-path testdata/injection/harness/Cargo.toml --all-targets
+
+# Exactly what the acceptance gate runs. `test` is the workspace suite (D27);
+# `red-team` keeps the detached harness compiling.
+ci: build lint fmt-check test red-team

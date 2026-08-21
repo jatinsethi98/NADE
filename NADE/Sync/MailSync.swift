@@ -178,8 +178,37 @@ final class MailSync {
     /// that put us in. Safe to call on every foreground and every appearance —
     /// D29 keeps all four screens in the tree, so this runs more often than a
     /// tab switch and has to be cheap and idempotent.
+    ///
+    /// **Single-flight, not debounce-and-drop.** Three triggers fire this at
+    /// launch alone — the root `.task`, the scenePhase observer and 1g's own
+    /// `.task` — and each used to run the whole `GET /me` + `GET /mailboxes`
+    /// chain for one answer. A caller arriving *while* one pass runs awaits
+    /// that pass and shares its result; a caller arriving *after* completion
+    /// still runs fresh, which is what keeps the scenePhase trigger's purpose
+    /// — noticing a Gmail consent that completed in Safari — working (D73).
     @discardableResult
     func refresh() async -> AppState {
+        if let running = refreshTask { return await running.value }
+        let task = Task { await self.runRefreshClearingTheSlot() }
+        refreshTask = task
+        return await task.value
+    }
+
+    /// The in-flight pass, when there is one. Cleared by the pass itself.
+    private var refreshTask: Task<AppState, Never>?
+
+    /// The slot is cleared *inside* the task, in the same synchronous stretch
+    /// as its return — so by the moment any awaiter resumes, the slot is empty
+    /// and that awaiter's own follow-up `refresh()` starts a fresh pass rather
+    /// than re-joining a finished one. Clearing from the creating caller
+    /// instead would leave a window where a joiner resumes first, calls again,
+    /// and is handed the stale result of a pass that already ended.
+    private func runRefreshClearingTheSlot() async -> AppState {
+        defer { refreshTask = nil }
+        return await performRefresh()
+    }
+
+    private func performRefresh() async -> AppState {
         guard (try? source.isPaired()) == true else {
             stopPolling()
             state = .unpaired
@@ -263,6 +292,31 @@ final class MailSync {
     private func ensureListRow(for threadID: String, in mailboxID: String) async throws {
         if try await store.hasThreadRow(id: threadID) { return }
         _ = await loadThreads(mailboxID: mailboxID, resetting: true)
+    }
+
+    /// How long a landed page spares a mailbox the resetting re-fetch that a
+    /// routine re-appearance would otherwise run.
+    static let listFreshWindow: TimeInterval = 60
+
+    /// Whether a page for `mailboxID` landed within `listFreshWindow`.
+    ///
+    /// 1e's `.task(id:)` re-fires on every pop back from 1f, and the
+    /// `loadThreads(resetting: true)` under it deletes the join rows and
+    /// truncates the list to page 1 — under the user's scroll position, for
+    /// rows that arrived seconds ago. `lastPageAt` is written by
+    /// `applyThreadPage` from this same clock, so the comparison is one clock
+    /// against itself. Explicit refreshes keep calling
+    /// `loadThreads(resetting: true)` directly and stay resetting.
+    func hasFreshThreadPage(for mailboxID: String) async -> Bool {
+        guard let lastPageAt = try? await store.syncState(for: mailboxID)?.lastPageAt else {
+            return false
+        }
+        let age = clock.now().timeIntervalSince(lastPageAt)
+        // EDGE: clock skew. A zone change or an NTP correction can put
+        // `lastPageAt` ahead of `now`. A negative age reads *stale*, because
+        // the failure modes are asymmetric: an extra fetch costs one request,
+        // while "fresh forever" pins the list until the clock catches up.
+        return age >= 0 && age < Self.listFreshWindow
     }
 
     /// A page of a mailbox. `resetting` is a pull back to the top, which bumps
@@ -400,16 +454,27 @@ final class MailSync {
             try await ensureListRow(for: id, in: mailboxID)
             let thread = try await source.thread(id: id)
             try await store.applyThreadDetail(thread, now: clock.now())
+            // `applyThreadDetail` deliberately *skips* a detail whose thread no
+            // list row mentions rather than inventing the list half — and a
+            // skip has to be said out loud. This is P5's feed→thread jump and
+            // P6's push deep link being built early: a cold open whose mailbox
+            // page happens not to list the thread would otherwise land on 1f
+            // with a nav bar over nothing — no rows, no caption, nothing to
+            // act on. `hasDetail` is the read that tells a silent skip apart
+            // from a write that landed.
+            guard try await store.hasDetail(id: id) else {
+                problems[.thread] = ConnectionProblem(message: StateCopy.threadOpenFailed)
+                return
+            }
             clear(.thread)
         } catch let failure as APIFailure {
             await handle(failure, from: .thread)
         } catch is CancellationError {
             // The screen went away mid-request.
         } catch {
-            problems[.thread] = ConnectionProblem(
-                message: String(localized: "Couldn't open that conversation.",
-                                comment: "Shown on the thread screen when its detail could not be loaded")
-            )
+            // EDGE: the store failing to write or read the detail lands here —
+            // same sentence, same slot, because the screen's remedy is the same.
+            problems[.thread] = ConnectionProblem(message: StateCopy.threadOpenFailed)
         }
     }
 
@@ -492,11 +557,24 @@ final class MailSync {
             state = .unpaired
         }
         _ = try await source.pair(code: code, deviceName: deviceName)
+        // EDGE: a refresh already in flight when the pair landed started
+        // before the credential existed — joining it would report `.unpaired`
+        // for a device that just paired, until the next foreground. Let it
+        // finish, then run a fresh pass that can see the new token.
+        await refreshTask?.value
         await refresh()
         await drainOutbox()
     }
 
     func unpair() async throws {
+        // EDGE: a refresh in flight holds pre-unpair answers, and left running
+        // it could write the account row back after `removeEverything` and
+        // lift `state` off `.unpaired`. Cancellation is cooperative — the
+        // request throws `CancellationError`, which `performRefresh` treats as
+        // "change nothing" — so this narrows the race rather than closing it;
+        // the token below is already gone, so a request that does slip out
+        // fails as unauthorized.
+        refreshTask?.cancel()
         try source.unpair()
         try await store.removeEverything()
         stopPolling()

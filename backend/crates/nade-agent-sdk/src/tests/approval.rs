@@ -321,10 +321,14 @@ async fn approve_after_expiry_expires_run() {
         .expect("paused")
         .expires_at
         .expect("a ttl was set");
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    // Stamps are whole seconds (`Entry::new`), so a zero TTL expires only once
+    // the clock crosses the *next* second boundary — sleep just past it.
+    let to_boundary =
+        1_000_000_000u64.saturating_sub(u64::from(chrono::Utc::now().timestamp_subsec_nanos()));
+    tokio::time::sleep(Duration::from_nanos(to_boundary + 50_000_000)).await;
     assert!(
-        chrono::Utc::now() > expires_at,
-        "the approval really is stale"
+        chrono::SubsecRound::trunc_subsecs(chrono::Utc::now(), 0) > expires_at,
+        "the approval really is stale at second granularity"
     );
 
     let outcome = engine

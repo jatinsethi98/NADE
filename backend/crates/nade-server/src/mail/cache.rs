@@ -74,7 +74,14 @@ pub async fn fetch_missing(
         return Ok(unresolved);
     }
 
+    // The same one-batch-per-interval pacing the syncs use. The token bucket
+    // alone does not provide it: a full bucket funds 250 units and a
+    // ten-message batch costs 50, so five batches would leave back to back.
+    // A single-batch page - the warm-cache common case - never sleeps.
+    let mut pacer = crate::sync::Pacer::new(std::time::Duration::from_secs(1));
+
     for chunk in misses.chunks(MAX_BATCH) {
+        pacer.wait().await;
         let outcomes = client
             .batch_get_raw(chunk)
             .await

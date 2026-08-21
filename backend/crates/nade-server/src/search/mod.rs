@@ -77,6 +77,10 @@ impl SearchPage {
 /// `search_mail` tool both come through here, so the validation, the
 /// hydration, the ordering and the cursor cannot diverge between them.
 ///
+/// `account_id` is the **resolved** account - the handler's [`crate::api::
+/// auth::Auth`], or the agent run's own account at P4 - never a fresh "the
+/// account" lookup, which no longer exists (backend/DECISIONS.md D45).
+///
 /// # Errors
 /// * `400 bad_request` - the query was refused ([`query::validate`] says why),
 ///   or the cursor is not one of ours.
@@ -85,11 +89,12 @@ impl SearchPage {
 ///   the cache and calling it a result.
 pub async fn search(
     state: &AppState,
+    account_id: Option<Uuid>,
     raw_query: &str,
     cursor: Option<&str>,
 ) -> ApiResult<SearchPage> {
-    let Some(account) = state.account().await? else {
-        // No Gmail connected. Validate anyway: "nothing is connected" must not
+    let Some(account_id) = account_id else {
+        // No Gmail resolved. Validate anyway: "nothing is connected" must not
         // turn a malformed query into an empty page, which is the exact
         // ambiguity this module exists to remove.
         let valid = query::validate(raw_query, &LabelIndex::empty())?;
@@ -101,7 +106,7 @@ pub async fn search(
         return Ok(SearchPage::empty());
     };
 
-    let labels = label_index(state, account.id).await?;
+    let labels = label_index(state, account_id).await?;
     let valid = query::validate(raw_query, &labels)?;
     // Opaque in, opaque out, and a corrupt one is a 400 rather than a silent
     // reset to page one - the same rule as the keyset cursors (`API.md` §0).
@@ -117,17 +122,17 @@ pub async fn search(
         "searching gmail"
     );
 
-    let client = state.gmail.client_for(account.id);
+    let client = state.gmail.client_for(account_id);
     let listed = client
         .list_message_page(valid.as_str(), page_token.as_deref(), PAGE_SIZE)
         .await
         .map_err(crate::api::mail::upstream)?;
 
-    hydrate(state, account.id, &client, &listed.messages).await?;
+    hydrate(state, account_id, &client, &listed.messages).await?;
 
     let order = thread_order(&listed.messages);
-    let rows = rows_in_gmail_order(state, account.id, &order).await?;
-    let notes = agent_notes(state, account.id, &rows).await?;
+    let rows = rows_in_gmail_order(state, account_id, &order).await?;
+    let notes = agent_notes(state, account_id, &rows).await?;
 
     Ok(SearchPage {
         threads: rows

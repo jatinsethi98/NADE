@@ -301,3 +301,31 @@ fn run_id_is_transparent_on_the_wire() {
     assert_eq!(run.to_string(), run.as_uuid().hyphenated().to_string());
     assert_eq!(run.to_string().parse::<RunId>().expect("parses"), run);
 }
+
+/// The wire contract (API.md §0) admits second precision only, and `run_journal`
+/// rows are rendered verbatim — so the stamp itself must carry no sub-second
+/// part. Ordering is `seq`'s job; a fractional stamp would only force a second
+/// date format on every consumer.
+///
+// EDGE: a stamp taken at xx.999999 truncates down, never rounds up — two
+// entries in one second share a timestamp and stay ordered by seq alone.
+#[test]
+fn stamps_are_whole_seconds() {
+    for _ in 0..64 {
+        let payload = RunWaiting {
+            step_seq: 1,
+            wake_at: Utc::now(),
+        };
+        let entry = Entry::new(1, EntryKind::RunWaiting, &payload).expect("serialises");
+        assert_eq!(
+            entry.created_at.timestamp_subsec_nanos(),
+            0,
+            "Entry::new stamped a fractional second"
+        );
+        let wire = serde_json::to_string(&entry.created_at).expect("serialises");
+        assert!(
+            !wire.contains('.'),
+            "a journal timestamp serialised with a fractional part: {wire}"
+        );
+    }
+}

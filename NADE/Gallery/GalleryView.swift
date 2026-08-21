@@ -388,7 +388,7 @@ struct GalleryView: View {
 
             GalleryLabel("1f thread — 13.5 pt · 10/15 · `sparkles` 16")
             HStack(spacing: 10) {
-                NTextField("Reply, or ask for a draft…", text: $emptyField, metrics: .askThread)
+                NTextField("Ask for a draft or an answer…", text: $emptyField, metrics: .askThread)
                 NButton(systemImage: "sparkles", label: "Ask for a draft", glyph: 16, corner: .pill, box: 38) {}
             }
 

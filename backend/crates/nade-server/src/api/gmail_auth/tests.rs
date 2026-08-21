@@ -568,6 +568,26 @@ async fn callback_binds_the_account_and_renders_a_close_page() {
     assert_eq!(email, "jatinsethi98@gmail.com");
     assert_eq!(status, "ok");
 
+    // ...and so is the device that initiated the consent (D45): from here its
+    // requests resolve to this mailbox by binding, not by being the only one.
+    let device_account: Option<uuid::Uuid> = sqlx::query_scalar("select account_id from devices")
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    let account_id: uuid::Uuid = sqlx::query_scalar("select id from accounts")
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(device_account, Some(account_id), "consent binds its device");
+
+    // Every account has a settings row from birth (migration 0003).
+    let settings: i64 = sqlx::query_scalar("select count(*) from settings where account_id = $1")
+        .bind(account_id)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(settings, 1);
+
     let (access, refresh): (String, String) =
         sqlx::query_as("select access_token, refresh_token from gmail_tokens")
             .fetch_one(&app.db.pool)
@@ -857,9 +877,50 @@ async fn callback_reports_a_refusal_or_a_missing_code() {
     }
 }
 
-/// v1 is single-account. A second mailbox would repoint every stored message.
+/// D45 narrowed the guard to the device: a **bound** device consenting a
+/// different mailbox is refused, because rebinding would silently repoint its
+/// whole view of its mail at a new owner.
 #[tokio::test]
-async fn a_second_google_account_is_refused() {
+async fn a_second_google_account_on_a_bound_device_is_refused() {
+    let server = MockServer::start().await;
+    google_token(&server).mount(&server).await;
+    google_profile("someone.else@gmail.com")
+        .mount(&server)
+        .await;
+    let app = app_with_oauth(&server).await;
+
+    // A device already bound to the first mailbox, as a completed consent
+    // leaves it.
+    let token = app.device_token().await;
+    let account: uuid::Uuid = sqlx::query_scalar(
+        "insert into accounts (email) values ('jatinsethi98@gmail.com') returning id",
+    )
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    sqlx::query("update devices set account_id = $1")
+        .bind(account)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+
+    let cap = capability_for(&app, &token).await;
+    let started = start_flow_with(&app, &cap).await;
+    let response = complete(&app, &started).await;
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(body_text(response).await.contains("already connected"));
+
+    let emails: Vec<String> = sqlx::query_scalar("select email from accounts")
+        .fetch_all(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(emails, vec!["jatinsethi98@gmail.com"]);
+}
+
+/// ...and the same consent from a second, **unbound** device is a second user,
+/// not a conflict - the point of the narrowing.
+#[tokio::test]
+async fn a_second_google_account_on_a_fresh_device_succeeds() {
     let server = MockServer::start().await;
     google_token(&server).mount(&server).await;
     google_profile("someone.else@gmail.com")
@@ -872,27 +933,43 @@ async fn a_second_google_account_is_refused() {
         .await
         .unwrap();
 
+    // `start_flow` pairs its own fresh - unbound - device.
     let started = start_flow(&app).await;
     let response = complete(&app, &started).await;
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert!(body_text(response).await.contains("already connected"));
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(body_text(response).await.contains("someone.else@gmail.com"));
 
-    let emails: Vec<String> = sqlx::query_scalar("select email from accounts")
+    let mut emails: Vec<String> = sqlx::query_scalar("select email from accounts")
         .fetch_all(&app.db.pool)
         .await
         .unwrap();
-    assert_eq!(emails, vec!["jatinsethi98@gmail.com"]);
+    emails.sort();
+    assert_eq!(
+        emails,
+        vec!["jatinsethi98@gmail.com", "someone.else@gmail.com"],
+        "two users, two mailboxes, one server"
+    );
+    let bound: i64 = sqlx::query_scalar(
+        "select count(*) from devices d join accounts a on a.id = d.account_id \
+          where a.email = 'someone.else@gmail.com'",
+    )
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    assert_eq!(bound, 1, "the new device is bound to the new mailbox");
 }
 
-/// F2 at the route, deterministically: the loser of the **in-transaction** race
-/// gets the same 409 page, not a 500 and not a second account.
+/// F2 at the route, narrowed by D45 to the device, still deterministic: the
+/// loser of the **in-transaction** race gets the same 409 page, not a 500 and
+/// not a rebound device.
 ///
-/// The window the defect lived in is between `existing_account_email` (which
-/// sees nothing) and `save_consent` (which writes). The test opens that window
-/// by hand: it takes [`ACCOUNT_SINGLETON_LOCK`] itself, lets the callback sail
-/// past the cheap pre-check and block inside `save_consent`, then binds a
-/// *different* mailbox and commits. When the callback finally gets the lock the
-/// world has changed underneath it - which is exactly the race, made repeatable.
+/// The window the defect lived in is between `bound_account_email` (which sees
+/// an unbound device) and `save_consent` (which writes). The test opens that
+/// window by hand: it takes [`ACCOUNT_SINGLETON_LOCK`] itself, lets the
+/// callback sail past the cheap pre-check and block inside `save_consent`,
+/// then binds the *device* to a different mailbox and commits. When the
+/// callback finally gets the lock the world has changed underneath it - which
+/// is exactly the race, made repeatable.
 ///
 /// If the advisory lock were ever removed, the callback would not block at all,
 /// `wait_for` would time out, and this test would fail loudly.
@@ -953,8 +1030,17 @@ async fn a_callback_that_loses_the_bind_race_renders_the_conflict_page() {
     })
     .await;
 
-    // Somebody else binds the mailbox first, and commits.
-    sqlx::query("insert into accounts (email) values ('jatinsethi98@gmail.com')")
+    // Somebody else binds the *device* to another mailbox first, and commits.
+    // (`start_flow` paired exactly one device - the one whose capability opened
+    // the blocked callback.)
+    let winner: uuid::Uuid = sqlx::query_scalar(
+        "insert into accounts (email) values ('jatinsethi98@gmail.com') returning id",
+    )
+    .fetch_one(&mut *holder)
+    .await
+    .unwrap();
+    sqlx::query("update devices set account_id = $1")
+        .bind(winner)
         .execute(&mut *holder)
         .await
         .unwrap();
@@ -964,7 +1050,7 @@ async fn a_callback_that_loses_the_bind_race_renders_the_conflict_page() {
     assert_eq!(
         response.status(),
         StatusCode::CONFLICT,
-        "the loser gets the 409 page, not a 500 and not a second mailbox"
+        "the loser gets the 409 page, not a 500 and not a rebound device"
     );
     assert!(body_text(response).await.contains("already connected"));
 
@@ -973,11 +1059,128 @@ async fn a_callback_that_loses_the_bind_race_renders_the_conflict_page() {
         .await
         .unwrap();
     assert_eq!(emails, vec!["jatinsethi98@gmail.com"]);
+    let still_bound: Option<uuid::Uuid> = sqlx::query_scalar("select account_id from devices")
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        still_bound,
+        Some(winner),
+        "the binding the race won survives"
+    );
     let tokens: i64 = sqlx::query_scalar("select count(*) from gmail_tokens")
         .fetch_one(&app.db.pool)
         .await
         .unwrap();
     assert_eq!(tokens, 0, "the losing transaction rolled back whole");
+}
+
+/// Revocation must be authoritative at the consent **commit**, not only at the
+/// two route checks: a revoke that lands after the pre-exchange check passed
+/// but before `save_consent` commits must abort the consent whole. Made
+/// deterministic the same way as the bind-race test: hold the account lock so
+/// the callback blocks at `save_consent`'s first statement, revoke the device,
+/// release - the bind's `revoked_at is null` then matches zero rows.
+#[tokio::test]
+async fn a_revocation_during_the_consent_transaction_aborts_it_whole() {
+    let server = MockServer::start().await;
+    google_token(&server).mount(&server).await;
+    google_profile("jatinsethi98@gmail.com")
+        .mount(&server)
+        .await;
+    let app = app_with_oauth(&server).await;
+
+    let started = start_flow(&app).await;
+
+    // Hold the account lock, so `save_consent` stops dead.
+    let mut holder = app.db.pool.begin().await.unwrap();
+    sqlx::query("select pg_advisory_xact_lock($1)")
+        .bind(ACCOUNT_SINGLETON_LOCK)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+
+    let router = app.router.clone();
+    let uri = format!(
+        "/v1/auth/gmail/callback?state={}&code=4/0Aauth-code",
+        started.state
+    );
+    let cookie = started.cookie.clone();
+    let callback = tokio::spawn(async move {
+        router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    });
+
+    // It has passed both revocation route-checks and the token exchange, and
+    // is now waiting on the lock. Scoped to this test's own database.
+    let pool = app.db.pool.clone();
+    crate::test_support::wait_for(Duration::from_secs(20), || {
+        let pool = pool.clone();
+        async move {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*) from pg_locks \
+                  where locktype = 'advisory' and not granted \
+                    and database = (select oid from pg_database \
+                                     where datname = current_database())",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0);
+            waiting > 0
+        }
+    })
+    .await;
+
+    // The revoke lands - committed before the lock is released, so the
+    // consent's own transaction is guaranteed to see it.
+    sqlx::query("update devices set revoked_at = now()")
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+
+    let response = callback.await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "same refusal class as the pre-exchange revocation check"
+    );
+    assert!(body_text(response).await.contains("expired"));
+
+    // Nothing persisted: the bind aborted the whole transaction.
+    for (what, query) in [
+        ("accounts", "select count(*) from accounts"),
+        ("settings", "select count(*) from settings"),
+        ("gmail_tokens", "select count(*) from gmail_tokens"),
+        (
+            "consent audit rows",
+            "select count(*) from audit_log where action = 'gmail_consent'",
+        ),
+        (
+            "first-sync jobs",
+            "select count(*) from jobs where kind = 'gmail_sync'",
+        ),
+    ] {
+        let count: i64 = sqlx::query_scalar(query)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "{what} must not survive the aborted consent");
+    }
+    let bound: Option<uuid::Uuid> = sqlx::query_scalar("select account_id from devices")
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(bound, None, "the revoked device stays unbound");
 }
 
 /// A server without `secrets/web_client.json` must still boot and say so - and

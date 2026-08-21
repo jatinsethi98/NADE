@@ -618,14 +618,15 @@ impl std::fmt::Debug for SyncHandler {
 #[async_trait]
 impl Handler for SyncHandler {
     async fn handle(&self, job: Job, _ctx: JobContext) -> Result<()> {
-        // The payload may name an account; with none, we sync the single one
-        // this server serves.
+        // The payload may name an account; a payload without one - a legacy or
+        // hand-inserted row - can only mean the sole account, and with several
+        // there is no honest guess, so the job completes as a no-op.
         let account_id = match job.payload.get("account_id").and_then(|v| v.as_str()) {
             Some(raw) => Uuid::parse_str(raw).context("the account_id in the job payload")?,
-            None => match self.state.account().await? {
+            None => match self.state.sole_account().await? {
                 Some(account) => account.id,
                 None => {
-                    tracing::info!("no Gmail account is connected yet; nothing to sync");
+                    tracing::info!("no sole Gmail account to fall back to; nothing to sync");
                     return Ok(());
                 }
             },

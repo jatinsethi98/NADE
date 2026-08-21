@@ -20,9 +20,10 @@ pub struct AppState {
     pub pairing: Arc<PairingStore>,
     /// Guards `POST /v1/auth/pair` against brute force. Process-wide rather
     /// than per-IP: the 6-digit space is small enough that a global cap is the
-    /// honest defence, and NADE is a single-user server.
+    /// honest defence, and pairing is rare enough that users never contend.
     pub pair_limiter: Arc<RateLimiter>,
-    /// OAuth, the token store, the quota bucket and the REST endpoints.
+    /// OAuth, the token store, the per-account quota buckets and the REST
+    /// endpoints.
     pub gmail: Arc<GmailRuntime>,
     /// Single-use permission slips for `GET /v1/auth/gmail/start`, minted only
     /// behind the bearer guard. Lives here rather than on [`GmailRuntime`]
@@ -71,27 +72,38 @@ impl AppState {
         })
     }
 
-    /// The single account this server serves, if one has been connected.
+    /// The **sole** account on this server - `Some` iff exactly one exists.
     ///
-    /// v1 is single-account by design (`API.md` §0), so "the account" is a
-    /// query rather than a parameter on every route.
+    /// This is the fallback half of account resolution (backend/DECISIONS.md
+    /// D45): the resolved account is the authenticated device's *bound* one,
+    /// and only an unbound principal falls back here. With two or more
+    /// accounts there is no honest answer to "the account", so the fallback
+    /// refuses rather than picking one - the old `limit 1` would have handed
+    /// an arbitrary user's mailbox to every unbound device.
     ///
-    /// `order by created_at, id`: `created_at` alone is **not** a total order,
-    /// so two rows stamped at the same instant made "the account" an arbitrary
-    /// choice that could differ between two calls inside one request.
+    /// The name is the contract: no caller may mean "the current user" by it.
+    /// Legitimate callers are the resolver's fallback and the job handlers'
+    /// payload fallback (a job row with no `account_id`).
     ///
     /// # Errors
     /// Returns an error if the query fails.
-    pub async fn account(&self) -> sqlx::Result<Option<Account>> {
-        sqlx::query_as::<_, Account>(
-            "select id, email, status from accounts order by created_at, id limit 1",
+    pub async fn sole_account(&self) -> sqlx::Result<Option<Account>> {
+        // `limit 2`, not a count: one row answers "which", two rows answer
+        // "too many", and either way it is one cheap index read.
+        let mut rows = sqlx::query_as::<_, Account>(
+            "select id, email, status from accounts order by created_at, id limit 2",
         )
-        .fetch_optional(&self.pool)
-        .await
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.len() == 1 {
+            Ok(rows.pop())
+        } else {
+            Ok(None)
+        }
     }
 }
 
-/// The single `accounts` row.
+/// One `accounts` row - the shape every resolved-account consumer reads.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Account {
     pub id: uuid::Uuid,

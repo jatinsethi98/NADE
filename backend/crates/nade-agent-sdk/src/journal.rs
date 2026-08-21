@@ -44,8 +44,18 @@ pub struct Entry {
 
 impl Entry {
     /// Build an entry, serialising a typed payload and stamping it now.
+    ///
+    /// Stamped to whole seconds: the wire contract renders journal rows
+    /// verbatim and admits no fractional seconds anywhere, and ordering is
+    /// `seq`'s job, never the timestamp's — so sub-second precision would be
+    /// dead weight that forced a second date format on every consumer.
     pub fn new<P: Serialize>(seq: Seq, kind: EntryKind, payload: &P) -> Result<Self> {
-        Self::at(seq, kind, payload, Utc::now())
+        Self::at(
+            seq,
+            kind,
+            payload,
+            chrono::SubsecRound::trunc_subsecs(Utc::now(), 0),
+        )
     }
 
     /// Build an entry with an explicit `created_at`.

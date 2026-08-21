@@ -15,9 +15,13 @@ pub mod oauth;
 pub mod quota;
 pub mod types;
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Result;
+use uuid::Uuid;
 
 use crate::config::Config;
 
@@ -30,7 +34,12 @@ pub struct GmailRuntime {
     pub oauth: Option<Arc<oauth::OAuthConfig>>,
     pub pending: Arc<oauth::PendingAuths>,
     pub tokens: Arc<oauth::TokenStore>,
-    pub quota: Arc<quota::Bucket>,
+    /// One [`quota::Bucket`] per account, created on first use. Gmail's 250
+    /// units/second and its concurrency count are both **per user**, so one
+    /// shared bucket made every account queue behind every other's sync -
+    /// keeping a limit Gmail never imposed. Entries are never removed: the map
+    /// is bounded by the number of accounts, and a stale bucket is idle state.
+    quota: Mutex<HashMap<Uuid, Arc<quota::Bucket>>>,
     pub endpoints: client::Endpoints,
     pub http: reqwest::Client,
 }
@@ -86,31 +95,50 @@ impl GmailRuntime {
             )),
             oauth,
             pending: Arc::new(oauth::PendingAuths::new()),
-            quota: Arc::new(quota::Bucket::new()),
+            quota: Mutex::new(HashMap::new()),
             endpoints: config.gmail.endpoints.clone(),
             http,
         })
     }
 
+    /// This account's bucket, created on first use. The bucket's internals -
+    /// including `MAX_CONCURRENT_REQUESTS = 1`, the live-tested value - are
+    /// unchanged; only its scope narrowed from the process to the account.
+    fn bucket_for(&self, account_id: Uuid) -> Arc<quota::Bucket> {
+        let mut buckets = self
+            .quota
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Arc::clone(
+            buckets
+                .entry(account_id)
+                .or_insert_with(|| Arc::new(quota::Bucket::new())),
+        )
+    }
+
     /// A client holding one fixed access token, for the single call the OAuth
     /// callback makes before an account row exists: "who just consented?".
+    ///
+    /// With no account yet, the probes share one bucket under the nil uuid -
+    /// an id `gen_random_uuid()` can never mint - so a burst of consents is
+    /// still throttled as the single anonymous caller it is.
     #[must_use]
     pub fn probe_client(&self, access_token: &str) -> client::GmailClient {
         client::GmailClient::new(
             self.http.clone(),
             self.endpoints.clone(),
-            Arc::clone(&self.quota),
+            self.bucket_for(Uuid::nil()),
             Arc::new(oauth::StaticTokens(access_token.to_owned())),
         )
     }
 
-    /// A client bound to one account.
+    /// A client bound to one account, debiting that account's own quota.
     #[must_use]
-    pub fn client_for(&self, account_id: uuid::Uuid) -> client::GmailClient {
+    pub fn client_for(&self, account_id: Uuid) -> client::GmailClient {
         client::GmailClient::new(
             self.http.clone(),
             self.endpoints.clone(),
-            Arc::clone(&self.quota),
+            self.bucket_for(account_id),
             Arc::new(oauth::AccountTokens {
                 store: Arc::clone(&self.tokens),
                 account_id,
@@ -147,6 +175,33 @@ pub fn http_client() -> Result<reqwest::Client> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D47: Gmail's limits are per user, so the buckets are per account - one
+    /// account's sync must not queue behind another's. Same id, same bucket
+    /// (or the budget would reset per call); different id, different bucket;
+    /// and the pre-account probe shares the nil-keyed one.
+    #[tokio::test]
+    async fn quota_buckets_are_per_account_and_stable() {
+        let db = crate::test_support::test_db().await;
+        let config = crate::test_support::test_config(crate::config::Env::Prod);
+        let runtime = GmailRuntime::build(db.pool.clone(), &config).unwrap();
+
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        assert!(Arc::ptr_eq(&runtime.bucket_for(a), &runtime.bucket_for(a)));
+        assert!(!Arc::ptr_eq(&runtime.bucket_for(a), &runtime.bucket_for(b)));
+        assert!(Arc::ptr_eq(
+            &runtime.bucket_for(Uuid::nil()),
+            &runtime.bucket_for(Uuid::nil())
+        ));
+
+        // The per-account narrowing must not have widened the per-user figure:
+        // each bucket still admits one request at a time.
+        assert_eq!(
+            runtime.bucket_for(a).free_slots(),
+            quota::MAX_CONCURRENT_REQUESTS
+        );
+    }
 
     /// The whole reason for the `rustls-no-provider` dance: this must not panic
     /// or fail, and calling it twice must be safe.

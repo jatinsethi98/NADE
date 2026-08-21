@@ -759,8 +759,9 @@ async fn the_search_seam_is_callable_without_the_http_layer() {
     let harness = harness().await;
     harness.seed(300, "Kettle offer letter", "attached, please sign");
 
-    // What a tool call looks like: no router, no bearer token, no `Json`.
-    let page = super::search(&harness.app.state, "Kettle", None)
+    // What a tool call looks like: no router, no bearer token, no `Json` -
+    // the run's own resolved account, passed in.
+    let page = super::search(&harness.app.state, Some(harness.account), "Kettle", None)
         .await
         .expect("the tool path is the endpoint path");
     assert_eq!(page.threads.len(), 1);
@@ -769,9 +770,14 @@ async fn the_search_seam_is_callable_without_the_http_layer() {
 
     // And a query the model got wrong comes back as a sentence it can act on,
     // not as an empty list it cannot distinguish from an empty mailbox.
-    let error = super::search(&harness.app.state, "label:Label_25", None)
-        .await
-        .expect_err("a label id must not silently match nothing");
+    let error = super::search(
+        &harness.app.state,
+        Some(harness.account),
+        "label:Label_25",
+        None,
+    )
+    .await
+    .expect_err("a label id must not silently match nothing");
     assert_eq!(error.code, crate::error::ErrorCode::BadRequest);
     assert!(
         error.message.contains("label id") && error.message.contains("name"),

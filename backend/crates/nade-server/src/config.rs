@@ -205,6 +205,7 @@ impl Config {
         }
 
         let workers = parse::<usize>("NADE_WORKERS", 2)?;
+        guard_pool_capacity(workers, db_max_connections)?;
         let max_attempts = parse::<i32>("NADE_JOB_MAX_ATTEMPTS", 5)?;
         if max_attempts < 1 {
             bail!("NADE_JOB_MAX_ATTEMPTS must be at least 1");
@@ -358,6 +359,26 @@ impl Config {
         }
         self.dev_token.as_deref()
     }
+}
+
+/// Refuse a pool the workers alone could drain.
+///
+/// Each running sync **pins** a pooled connection for the life of its account
+/// lock (backend/DECISIONS.md D38), so `workers` syncs can hold `workers`
+/// connections while every request handler still needs to acquire. With
+/// `workers >= pool`, a busy queue starves the API outright - a hang with no
+/// error anywhere - so the process refuses to start instead. The documented
+/// rule of thumb is pool >= workers + 5.
+fn guard_pool_capacity(workers: usize, db_max_connections: u32) -> anyhow::Result<()> {
+    if workers >= db_max_connections as usize {
+        bail!(
+            "NADE_WORKERS ({workers}) must be smaller than NADE_DB_MAX_CONNECTIONS \
+             ({db_max_connections}): each running sync pins a pooled connection for its \
+             account lock, so this many workers can hold every connection and starve every \
+             request handler. Keep the pool at least NADE_WORKERS + 5."
+        );
+    }
+    Ok(())
 }
 
 /// Read a variable, treating "present but blank" as absent.
@@ -541,6 +562,22 @@ pub(crate) mod tests {
         assert_eq!(classify("dev "), Env::Prod); // already trimmed by `string`
         assert_eq!(classify(""), Env::Prod);
         assert_eq!(classify("prod"), Env::Prod);
+    }
+
+    /// D38: a running sync pins a connection, so the pool must outnumber the
+    /// workers - checked from both sides, boundary included.
+    #[test]
+    fn the_config_refuses_a_pool_the_workers_could_drain() {
+        // The defaults (2 workers, 10 connections) must boot.
+        assert!(guard_pool_capacity(2, 10).is_ok());
+        // Zero workers is a valid quiet server, whatever the pool.
+        assert!(guard_pool_capacity(0, 1).is_ok());
+        // Equality is refused: `workers` pinned connections leave zero for the
+        // API, and `>` would let exactly that configuration boot.
+        let error = guard_pool_capacity(10, 10).unwrap_err().to_string();
+        assert!(error.contains("NADE_WORKERS"), "{error}");
+        assert!(error.contains("NADE_DB_MAX_CONNECTIONS"), "{error}");
+        assert!(guard_pool_capacity(11, 10).is_err());
     }
 
     #[test]

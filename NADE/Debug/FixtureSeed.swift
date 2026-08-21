@@ -490,7 +490,8 @@ nonisolated final class FixtureMailSource: MailSource {
     /// honest.
     private static func apply(_ patch: AgentPatch, to agent: WireAgent) -> WireAgent {
         let sentence = patch.nlDefinition
-        let spans = sentence.flatMap(decompose(_:))
+        let scheduled = (patch.schedule ?? agent.schedule) != nil
+        let spans = sentence.flatMap { decompose($0, scheduled: scheduled) }
         return WireAgent(id: agent.id,
                          name: sentence.flatMap(name(from:)) ?? agent.name,
                          nlDefinition: sentence ?? agent.nlDefinition,
@@ -510,16 +511,27 @@ nonisolated final class FixtureMailSource: MailSource {
                          spec: sentence == nil ? agent.spec : (spans == nil ? nil : agent.spec))
     }
 
-    /// `When {when}, {do}.` plus an optional trailing sentence, split back out.
+    /// `When {when}, {do}.` plus an optional trailing sentence, split back out —
+    /// the exact inverse of `AgentBuilderModel.compose`, scheduled branch
+    /// included: a scheduled sentence *opens with* its when-span ("Every
+    /// weekday at 08:00, …" — DESIGN §1c's schedule branch), so for one there
+    /// is no prefix to strip. The "When " form is still accepted there, because
+    /// `.whole` lets the user type either.
     ///
     /// Returns nil when the sentence is not that shape, which is what makes the
     /// compile-failure path reachable from the builder.
     private static func decompose(
-        _ sentence: String
+        _ sentence: String, scheduled: Bool
     ) -> (when: String, doing: String, trailing: String?)? {
         let trimmed = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.lowercased().hasPrefix("when ") else { return nil }
-        let body = String(trimmed.dropFirst("when ".count))
+        let body: String
+        if trimmed.lowercased().hasPrefix("when ") {
+            body = String(trimmed.dropFirst("when ".count))
+        } else if scheduled {
+            body = trimmed
+        } else {
+            return nil
+        }
         // The period is searched for **after the comma**, and only one that ends
         // a clause counts.
         //

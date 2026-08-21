@@ -1581,3 +1581,138 @@ state. It went red partway through a session that had already run it green.
 Both rows now take the fixture's own instant, so the tie is real and the result
 does not depend on the day. **A test that mixes a wall clock with a fixed
 fixture is not testing what its name says; it is scheduling a failure.**
+
+---
+
+## P3 — the architecture-review pass (2026-08-21)
+
+An architecture review of the shipped lane, implemented here. Eight findings;
+the ones that changed behaviour or semantics each get an entry.
+
+### D98. `now` is quantised to the minute, once, on the clock
+
+`RootTabView.body` reads `navigation.selection`, so every tab tap re-runs both
+tab-root bodies. `HomeTabRoot` already floored its `now` for exactly that
+reason; `MailTabRoot` passed raw `clock.now()` at both destinations, so every
+tab tap handed 1e/1f a fresh `Date` — every visible `MailRow` differed from its
+previous self and re-formatted, and every `ThreadMessageBlock` re-rendered, for
+a change nothing on those screens can show (they render nothing finer than a
+minute). The floor is now `NADEClock.nowToTheMinute()` — one definition, both
+tab roots — with the negative-interval edge (a pre-2001 stamp must floor toward
+the past, not toward zero) pinned in `NADEClockTests`.
+
+On the same path, `ListTime.calendar` built a `Calendar` per call — twice per
+`MailRow` per render — and is now memoised by time-zone identifier with
+`DateFormatterCache`'s keying (D88), so a device that changes zone still
+re-bins its rows.
+
+### D99. A skipped thread detail is a stated failure, not a blank screen
+
+`applyThreadDetail` deliberately skips a detail whose thread no list row
+mentions (it refuses to invent the list half), and `MailStore.hasDetail`
+existed to tell that skip apart from a landed write — with zero callers. So the
+P5/P6 cold-open path (feed→thread jump, push deep link), whose mailbox page can
+legitimately not list the target thread, ended on 1f as a nav bar over nothing:
+no rows, no caption, nothing to act on. `MailSync.loadThread` now asks
+`hasDetail` after the apply and puts `StateCopy.threadOpenFailed` ("Couldn't
+open that conversation.") in the thread's problem slot, which 1f's existing
+caption path renders. The same operation succeeding clears it (D75's rule).
+
+### D100. `refresh()` is single-flight — join while running, fresh after
+
+Three launch triggers — the root `.task`, the scenePhase observer, 1g's own
+`.task` — each ran the whole `GET /me` + `GET /mailboxes` chain. Concurrent
+callers now await the one in-flight pass; a call arriving **after** completion
+still runs fresh, which is what keeps the scenePhase trigger's purpose —
+noticing a Gmail consent that finished in Safari (D73) — working. Single-flight,
+not debounce-and-drop.
+
+Two details are load-bearing:
+
+- **The slot is cleared inside the task**, in the same synchronous stretch as
+  its return, so by the moment any awaiter resumes the slot is already empty
+  and a follow-up call starts fresh. Clearing from the creating caller would
+  leave a window where a joiner resumes first, calls again, and re-joins a
+  finished pass — getting a stale answer for a call that arrived after
+  completion.
+- **`pair()` does not join.** A refresh in flight when the pair lands started
+  before the credential existed and would report `.unpaired` for a device that
+  just paired; `pair()` drains the in-flight pass and then runs its own.
+  `unpair()` cancels the in-flight pass for the mirror-image reason — a
+  completing pass could write the account row back after `removeEverything`.
+  Cancellation is cooperative, so this narrows that race rather than closes it;
+  the token is already gone, so a request that slips out dies unauthorized.
+
+### D101. A pop back from 1f no longer resets 1e under the scroll
+
+1e's `.task(id:)` re-fires on every pop back, and `model.refresh` ran
+`loadThreads(resetting: true)` unconditionally — deleting the mailbox's join
+rows and truncating the list to page 1 under the user's scroll position, for
+rows that landed seconds ago. `MailListModel.refresh` now consults
+`MailboxSyncRecord.lastPageAt` (written by `applyThreadPage` from the same
+clock) through `MailSync.hasFreshThreadPage(for:)` and skips the resetting
+fetch while the newest page is younger than `MailSync.listFreshWindow` (60 s).
+The skip still sets `hasFetched`, so a fresh-but-empty mailbox keeps its earned
+"No mail here" caption. Explicit resets — `loadThreads(resetting: true)` call
+sites — and the generation machinery are untouched.
+
+Skew is handled asymmetrically on purpose: `lastPageAt` *ahead* of `now` (zone
+change, NTP correction) reads **stale**, because an extra fetch costs one
+request while "fresh until the clock catches up" pins the list.
+
+### D102. The shared `ThreadModel` answers only for the observed thread
+
+The model has process lifetime (D87), so when 1f was pushed for thread B it
+still held thread A until the new screen's `.task` ran `observe(id:)` — and the
+first frame rendered A's subject, messages and mailbox name over the thread
+just tapped. `ThreadModel` now exposes `observedID` and gated accessors
+(`thread(for:)` / `row(for:)`), and `ThreadView` reads only through them: until
+`observedID == threadID` the screen renders the designed nothing-yet path.
+Once `observe` runs, the store's first value is synchronous (`.immediate`), so
+the gate adds no frame of its own. `isPartial` moved into the view, derived
+from the gated thread, because a stale `partial` caption is the same flash.
+
+### D103. A scheduled agent's sentence has no "When"
+
+1c hardcoded `When {when_span}, {do_span}.` for every agent, so the scheduled
+one rendered "When every weekday at 08:00, …" — ungrammatical, and
+`commitEdit` PATCHed that composition back as `nl_definition`. The design
+source (mockup 1d: "Every weekday at 8:00, build today's to-do…"; DESIGN §1c's
+schedule branch, being amended by the docs lane) makes the scheduled sentence
+*open with* its when-span, first letter capitalised. `AgentBuilderModel.compose`
+gained a `scheduled:` branch keyed on `schedule != nil` on the wire model; the
+view composes the identical string, so what 1c renders is exactly what a span
+edit sends. `/ask` drafts carry no schedule and keep the mail form.
+
+The fixture world's `decompose` — `compose`'s inverse, which re-derives spans
+after a PATCH — accepts the prefix-less shape for scheduled agents (and still
+accepts "When …" there, because `.whole` lets the user type either); without
+that, editing the scheduled agent in the fixture world dropped 1c to its
+compile-failure fallback for a well-formed sentence.
+
+### D104. 1f's ask bar no longer promises a reply
+
+"Reply, or ask for a draft…" promises replying, which v1 cannot do — no
+outbound actions (PLAN C1/C2, DESIGN §4). The placeholder is now exactly
+"Ask for a draft or an answer…" in both places it appears (`ThreadView`'s
+chrome bar and the gallery's 1f row). The docs lane records the deviation from
+the mockup's string; this is the commit-side landing. The bar itself remains
+chrome — hidden from VoiceOver, untappable — until P6 makes it a control.
+
+### D105. Dead code and false comments from the same review
+
+- `MailStore.replaceAgents` deleted: zero callers (verified by grep), and it
+  duplicated `saveAgents` with a hand-rolled record build.
+- `feedForTests`'s comment claimed the outbox's post-`409` refetch used it; the
+  outbox actually goes through `source.feedItem` + `saveFeedItem`
+  (`OutboxDriver.refresh(feedItemID:)`). The comment now says tests-only, and
+  the "one item, refreshed on its own" sentence moved to `saveFeedItem`, the
+  method it was written about.
+- `HomeFeedView`'s `onDisappear` comment claimed the flush covered "a tab
+  switch or a push". D29 hides inactive tabs with opacity, so a tab switch
+  never fires `onDisappear` — those receipts reach the server through the
+  400 ms debounce in `scheduleSeenFlush`, which runs regardless of visibility.
+  The comment now says what the modifier actually covers: a push, promptly,
+  instead of waiting out the debounce. No scenePhase flush was added — a lost
+  seen receipt costs a badge that corrects itself on the next refresh
+  (`markSeen`'s own contract), which does not justify a fourth flush trigger.

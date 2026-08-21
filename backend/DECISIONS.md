@@ -715,3 +715,127 @@ needed to retry — was cleared from the only copy the client had.
 
 Durability first, optimism second. A failed enqueue leaves the card actionable
 and surfaces the error.
+
+# Scale-out review — many accounts, one server
+
+## D45 — Account resolution is the device's binding, with a sole-account fallback.
+
+The schema was fully account-scoped from 0001; the *resolution layer* was not.
+Every handler asked `state.account()` — "the earliest `accounts` row" — so the
+server could hold any number of mailboxes and would still show everyone the
+first one. `devices.account_id` existed from P1 and was never written.
+
+Resolution is now: **the authenticated device's bound account; else the sole
+account iff exactly one exists; else nothing.** Consent writes the binding —
+`save_consent` binds the initiating `device_id` in the same transaction that
+creates the account — and `AlreadyBound` narrowed from "this *server* already
+has a mailbox" to "this *device* is already bound to a different mailbox". A
+second user with their own unbound device and their own Gmail now just
+succeeds. The dev token is a synthetic unbound device and resolves the same
+way.
+
+The full table, with what each row preserves:
+
+| Device | Accounts | Resolves to | Why |
+|---|---|---|---|
+| bound to X | any | X | the binding is the answer; other accounts are other people's |
+| unbound | 0 | none | byte-identical to the old no-account path (D17's `/me` answer included) |
+| unbound | 1 | the one | byte-identical to the old single-user behaviour |
+| unbound | ≥2 | none | there is no honest guess; the device must link its own Gmail |
+| bound, account deleted mid-request | any | none | falling back would silently adopt somebody else's mailbox |
+
+No new error codes: every "no account" row above lands on a path the contract
+already defines (`/me` answers `needs_reauth`, lists are empty, thread/
+attachment are `not_found`), and the 409 consent page is the same page with the
+guard narrowed. A new code would have forced an iOS change for states the
+client already renders correctly.
+
+`AppState::account()` is renamed `sole_account()` and *means* it — `Some` iff
+exactly one row — because the old name was exactly how "the current user" and
+"the only user" stayed conflated for three phases. Its remaining callers are
+the resolver's fallback and the job handlers' payload fallback (a job row with
+no `account_id`).
+
+The `nadeacct` advisory lock (D28) survives, still global, still necessary:
+it closes the same-email insert race (`accounts.email` is unique but
+case-sensitive, and the compare is not) and now also the same-device bind race
+— two callbacks racing one device both see "unbound" outside it.
+
+## D46 — `settings` re-keyed per account, row born with the account.
+
+The singleton `settings` table was "one server, one mailbox" written in DDL:
+with D45 it had no owner, and two users would have shared one
+`approval_required_default`. Migration 0003 re-keys it
+(`account_id uuid primary key references accounts on delete cascade`),
+backfills existing accounts with the singleton's value — a migration must not
+flip a mailbox back to requiring approvals it had turned off — and
+`save_consent` inserts the row (`on conflict do nothing`) in the transaction
+that creates the account, so P4's `GET /settings` never invents a default at
+read time.
+
+## D47 — Quota buckets and refresh gates are per account.
+
+Gmail's 250 units/second and its concurrency count are **per user**; ours were
+per process. One shared bucket made every account queue behind every other's
+sync — enforcing a limit Gmail never imposed, and turning "add a user" into
+"halve everyone's sync rate". Same shape for the refresh gate: one global
+mutex serialised account B's refresh behind account A's slow token endpoint,
+protecting nothing, because each account rotates its own refresh token.
+
+Both are now `Mutex<HashMap<Uuid, Arc<…>>>`, get-or-create, never evicted (the
+maps are bounded by the number of accounts). Bucket internals are unchanged —
+`MAX_CONCURRENT_REQUESTS = 1` was live-tested *as a per-user figure*, and per
+account is the scope that makes that measurement true. The pre-account probe
+(`probe_client`, the callback's "who consented?" call) shares one bucket keyed
+by the nil uuid, which `gen_random_uuid()` can never mint.
+
+## D48 — The `messages.label_ids` GIN is dropped.
+
+`messages_label_ids_idx` was insurance for a query that never arrived: no
+statement in the crate uses a GIN-servable operator on the column — label
+reads go through `thread_labels`, which has its own keyset index (D13). The
+GIN was not free where it did sit: every `upsert_message` paid its maintenance
+on the sync's hottest write path. Dropped in migration 0003;
+`db::tests::required_indexes_exist` now asserts the absence, so it cannot
+quietly return.
+
+## D49 — Consent bumps `gmail_tokens.generation`; a refresh spends only what it read.
+
+Found by the cross-model review of D45's diff. `save_consent` serialises
+against other *consents* (the `nadeacct` lock) and `refresh` against other
+*refreshes* (the per-account gate) — nothing serialised the two against each
+other, and both end in unconditional writes. A refresh reads the stored
+refresh token, waits on Google, and a consent commits fresh credentials
+meanwhile; the stale refresh then either overwrites them with its old-lineage
+result, or — having met `invalid_grant` on the token it spent — flips the
+account back to `needs_reauth` seconds after the user fixed it. Not
+theoretical: Testing-mode consents expire every 7 days, so re-consent racing a
+background refresh is the *weekly* recovery path.
+
+Migration 0004 adds `generation bigint` (an explicit integer, not a token
+fingerprint — a fingerprint equals itself again after re-consent with an
+unrotated token, and "same bytes" is not "same lineage"). Consent bumps it in
+the statement that writes the tokens; the refresh's write-back carries
+`and generation = $read` with `rows_affected` checked, and its `needs_reauth`
+marking re-checks the generation under the `nadeacct` lock — the lock consent
+holds for its whole transaction, so "still current" cannot turn false between
+check and commit. A stale refresh discards its result, serves the consent's
+cached token, or re-reads and retries once; a second staleness inside one
+refresh returns an error rather than looping. Both interleavings are pinned by
+barrier-controlled tests (a gated wiremock token endpoint parks Google's
+answer until the consent has committed).
+
+Two smaller findings landed in the same pass:
+
+* **Revocation is authoritative at the consent commit.** The two route checks
+  (`start`, pre-exchange in `callback`) close most of the window; the bind
+  inside `save_consent` now requires `revoked_at is null` with exactly one
+  affected row, and zero rows aborts the transaction whole — account, settings,
+  tokens, audit and first-sync job. Same refusal page as the pre-exchange
+  check, so the revocation's timing is not an oracle. `TokenError::
+  DeviceRevoked` is a browser-page class, not a new wire code.
+* **A deviceless consent keeps the old server-wide guard.** The `NADE_TOKEN`
+  principal resolves through the sole-account fallback, so letting it mint a
+  second mailbox would strand it: `sole_account` rightly refuses two rows, and
+  the new account would be reachable by nobody. Deviceless consent may
+  re-consent an existing mailbox or create the first — never a second.

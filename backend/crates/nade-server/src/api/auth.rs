@@ -59,18 +59,16 @@ impl Device {
     }
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct Account {
-    pub id: Uuid,
-    pub email: String,
-    pub status: String,
-}
+pub use crate::state::Account;
 
 /// Who is making this request. Put in the request extensions by
 /// [`require_bearer`]; P2+ handlers pull it out with the extractor below.
 ///
-/// `account` is `None` until Gmail OAuth runs (P2) - a device pairs first and
-/// gets a mailbox later.
+/// `account` is the **resolved** account (backend/DECISIONS.md D45): the
+/// device's bound mailbox (`devices.account_id`, written at consent), or -
+/// for an unbound device - the server's sole account iff exactly one exists.
+/// `None` means this principal has no mailbox: nothing is connected yet, or
+/// several accounts exist and this device has not linked its own.
 #[derive(Debug, Clone)]
 pub struct Auth {
     pub device: Device,
@@ -259,9 +257,11 @@ async fn authenticate(state: &AppState, presented: &str) -> Result<Auth, ApiErro
     // there is no reachable path to this branch in production.
     if let Some(expected) = state.config.usable_dev_token() {
         if bool::from(expected.as_bytes().ct_eq(presented.as_bytes())) {
+            // The dev principal is synthetic and never bound, so it resolves
+            // like any unbound device: the sole account, or nothing.
             return Ok(Auth {
                 device: Device::dev(),
-                account: singleton_account(state).await?,
+                account: state.sole_account().await?,
             });
         }
     }
@@ -284,31 +284,25 @@ async fn authenticate(state: &AppState, presented: &str) -> Result<Auth, ApiErro
         return Err(ApiError::unauthorized());
     }
 
+    // Account resolution (backend/DECISIONS.md D45). Bound wins outright;
+    // an unbound device adopts the sole account iff exactly one exists, which
+    // is byte-identical to the single-user behaviour this server shipped with.
     let account = match device.account_id {
+        // EDGE (concurrent account delete): between reading the device row and
+        // this select, the account - and with it, via FK cascade, the device -
+        // can be deleted. Resolve to `None` rather than falling back: silently
+        // adopting whatever account remains would hand this request somebody
+        // else's mailbox.
         Some(id) => {
             sqlx::query_as("select id, email, status from accounts where id = $1")
                 .bind(id)
                 .fetch_optional(&state.pool)
                 .await?
         }
-        None => None,
+        None => state.sole_account().await?,
     };
 
     Ok(Auth { device, account })
-}
-
-/// v1 is single-account (PLAN.md §Design parity map), so the dev token adopts
-/// whichever account exists. At P1 there is none yet.
-///
-/// `order by created_at, id` for the same reason as [`AppState::account`]:
-/// `created_at` alone is not a total order, and "the account" must be the same
-/// row every time it is asked for.
-async fn singleton_account(state: &AppState) -> Result<Option<Account>, ApiError> {
-    Ok(
-        sqlx::query_as("select id, email, status from accounts order by created_at, id limit 1")
-            .fetch_optional(&state.pool)
-            .await?,
-    )
 }
 
 #[cfg(test)]
@@ -655,6 +649,97 @@ mod tests {
             )
             .await;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ------------------------------------------- account resolution (D45) --
+
+    async fn insert_account(app: &TestApp, email: &str) -> Uuid {
+        sqlx::query_scalar("insert into accounts (email, status) values ($1, 'ok') returning id")
+            .bind(email)
+            .fetch_one(&app.db.pool)
+            .await
+            .unwrap()
+    }
+
+    async fn me_email(app: &TestApp, token: &str) -> String {
+        let response = get(app, "/v1/me", Some(token)).await;
+        assert_eq!(response.status(), StatusCode::OK, "/me is total");
+        response_json(response).await["email"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// D45's whole table, through the API: bound wins, sole-account falls
+    /// back, and anything else resolves to nothing.
+    #[tokio::test]
+    async fn a_device_resolves_its_bound_account_and_falls_back_only_to_a_sole_one() {
+        let app = test_app(Env::Prod).await;
+        let token = app.device_token().await;
+
+        // EDGE (empty input): no accounts - today's no-account path.
+        assert_eq!(me_email(&app, &token).await, "");
+
+        // Exactly one account: the unbound device adopts it, unchanged.
+        let first = insert_account(&app, "jatinsethi98@gmail.com").await;
+        assert_eq!(me_email(&app, &token).await, "jatinsethi98@gmail.com");
+
+        // A second account appears: the unbound device is back to nothing -
+        // it must link its own Gmail, not inherit an arbitrary one.
+        let second = insert_account(&app, "someone.else@gmail.com").await;
+        assert_eq!(me_email(&app, &token).await, "");
+
+        // Bound, each device sees its own mailbox, whatever else exists.
+        sqlx::query("update devices set account_id = $1")
+            .bind(second)
+            .execute(&app.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(me_email(&app, &token).await, "someone.else@gmail.com");
+        sqlx::query("update devices set account_id = $1")
+            .bind(first)
+            .execute(&app.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(me_email(&app, &token).await, "jatinsethi98@gmail.com");
+    }
+
+    /// Two bound devices on one server stay in their own mailboxes - the list
+    /// endpoints scope by the resolved account, not by "the" account.
+    #[tokio::test]
+    async fn two_bound_devices_see_only_their_own_mail() {
+        let app = test_app(Env::Prod).await;
+        let token_a = app.device_token().await;
+        let token_b = app.device_token().await;
+        let account_a = insert_account(&app, "a@example.com").await;
+        let account_b = insert_account(&app, "b@example.com").await;
+        for (token, account) in [(&token_a, account_a), (&token_b, account_b)] {
+            let hash = pairing::token_hash(token);
+            sqlx::query("update devices set account_id = $1 where bearer_hash = $2")
+                .bind(account)
+                .bind(hash)
+                .execute(&app.db.pool)
+                .await
+                .unwrap();
+        }
+        // One label and one thread rollup, in account A only.
+        sqlx::query(
+            "insert into labels (account_id, label_id, name, type) \
+             values ($1, 'INBOX', 'INBOX', 'system')",
+        )
+        .bind(account_a)
+        .execute(&app.db.pool)
+        .await
+        .unwrap();
+
+        let a = response_json(get(&app, "/v1/mailboxes", Some(&token_a)).await).await;
+        assert_eq!(a["mailboxes"][0]["id"], "INBOX");
+        let b = response_json(get(&app, "/v1/mailboxes", Some(&token_b)).await).await;
+        assert_eq!(
+            b["mailboxes"].as_array().unwrap().len(),
+            0,
+            "device B must not see device A's labels"
+        );
     }
 
     #[tokio::test]

@@ -91,16 +91,20 @@ final class AgentBuilderModel {
         // than its two siblings used.
         guard !text.nadeIsBlank else { editing = nil; return }
 
+        // The schedule decides the sentence's shape — DESIGN §1c's schedule
+        // branch. Composing the mail form here would PATCH "When every weekday
+        // at 08:00, …" back as `nl_definition`.
+        let scheduled = agent.schedule != nil
         let sentence: String
         switch target {
         case .whole:
             sentence = text
         case .when:
             sentence = Self.compose(when: text, doing: agent.doSpan ?? "",
-                                    trailing: agent.trailing)
+                                    trailing: agent.trailing, scheduled: scheduled)
         case .doing:
             sentence = Self.compose(when: agent.whenSpan ?? "", doing: text,
-                                    trailing: agent.trailing)
+                                    trailing: agent.trailing, scheduled: scheduled)
         }
         guard sentence != agent.nlDefinition else { editing = nil; return }
 
@@ -122,10 +126,31 @@ final class AgentBuilderModel {
 
     /// `When {when_span}, {do_span}.` plus `trailing` when it is non-null —
     /// the exact string both 1c and the `/ask` draft card render.
-    static func compose(when: String, doing: String, trailing: String?) -> String {
-        var sentence = "When \(when), \(doing)."
+    ///
+    /// A **scheduled** agent (`schedule != nil` on the wire) has no "When":
+    /// its sentence *opens with* the when-span, first letter capitalised —
+    /// "Every weekday at 8:00, build today's to-do…" (mockup 1d, DESIGN §1c's
+    /// schedule branch). The universal form rendered the ungrammatical "When
+    /// every weekday at 08:00, …" and `commitEdit` PATCHed that composition
+    /// back as `nl_definition`. `/ask` drafts carry no schedule, so the
+    /// default keeps them on the mail form.
+    static func compose(when: String, doing: String, trailing: String?,
+                        scheduled: Bool = false) -> String {
+        var sentence = scheduled
+            ? "\(capitalisedFirst(when)), \(doing)."
+            : "When \(when), \(doing)."
         if let trailing, !trailing.isEmpty { sentence += " \(trailing)" }
         return sentence
+    }
+
+    /// The first character only — "every weekday" → "Every weekday". A span
+    /// that already opens with a capital, a digit or an uncased character is
+    /// returned as typed; nothing past the first character is touched.
+    /// EDGE: empty input returns empty — `commitEdit`'s blank guard is what
+    /// keeps an empty span out of a sentence, not this.
+    static func capitalisedFirst(_ text: String) -> String {
+        guard let first = text.first else { return text }
+        return first.uppercased() + text.dropFirst()
     }
 
     var sentenceTrailing: String? {

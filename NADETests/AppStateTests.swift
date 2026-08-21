@@ -29,7 +29,27 @@ private final class ScriptedSource: MailSource, @unchecked Sendable {
     var threadDetail: Result<WireThread, Error>?
 
     private(set) var mailboxCalls = 0
+    private(set) var meCalls = 0
+    private(set) var threadsCalls = 0
     private(set) var unpaired = false
+
+    /// When true, `me()` parks after counting the call until `releaseMe()` —
+    /// how the single-flight test holds one refresh pass verifiably in flight
+    /// while a second caller arrives. A sleep instead would make the overlap a
+    /// bet on the scheduler.
+    var holdMe = false
+    private let meLock = NSLock()
+    private var meWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func releaseMe() {
+        let waiters = meLock.withLock {
+            let held = meWaiters
+            meWaiters.removeAll()
+            holdMe = false
+            return held
+        }
+        waiters.forEach { $0.resume() }
+    }
 
     func isPaired() throws -> Bool { paired }
     func pair(code: String, deviceName: String) async throws -> Credential {
@@ -38,7 +58,15 @@ private final class ScriptedSource: MailSource, @unchecked Sendable {
     }
     func unpair() throws { paired = false; unpaired = true }
 
-    func me() async throws -> WireMe { try meResult.get() }
+    func me() async throws -> WireMe {
+        meCalls += 1
+        if meLock.withLock({ holdMe }) {
+            await withCheckedContinuation { continuation in
+                meLock.withLock { meWaiters.append(continuation) }
+            }
+        }
+        return try meResult.get()
+    }
     func gmailLink() async throws -> WireGmailLink {
         WireGmailLink(url: origin.absoluteString, expiresAt: Date())
     }
@@ -50,7 +78,8 @@ private final class ScriptedSource: MailSource, @unchecked Sendable {
     }
 
     func threads(mailboxID: String, cursor: String?) async throws -> WireThreadPage {
-        try threadPage.get()
+        defer { threadsCalls += 1 }
+        return try threadPage.get()
     }
 
     func thread(id: String) async throws -> WireThread {
@@ -403,6 +432,168 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(after, [], "server A's mail survived a move to server B")
         let account = try await Self.read(store) { try $1.account($0) }
         XCTAssertNil(account, "server A's account survived a move to server B")
+    }
+
+    // MARK: - Single-flight refresh
+
+    /// Three launch triggers — the root `.task`, the scenePhase observer, 1g's
+    /// own `.task` — all call `refresh()` at once, and each used to run its own
+    /// `GET /me` + `GET /mailboxes` chain. One pass must go out, every caller
+    /// must get that pass's answer — and a call arriving **after** completion
+    /// must still run fresh, because that is how a Gmail consent finished in
+    /// Safari gets noticed (D73). Single-flight, not debounce-and-drop.
+    func testConcurrentRefreshesShareOnePassAndALaterOneRunsFresh() async throws {
+        source.mailboxPages = [.success(try boxes())]
+        source.holdMe = true
+        let sync = sync()
+
+        let first = Task { await sync.refresh() }
+        try await waitFor { self.source.meCalls == 1 }
+
+        // Arrives while the first pass is verifiably parked inside `me()`.
+        let second = Task { await sync.refresh() }
+        // One yield hands the main actor to `second`, which runs to its join
+        // (its first suspension) before the release below can finish the pass.
+        await Task.yield()
+        source.releaseMe()
+
+        let firstState = await first.value
+        let secondState = await second.value
+        XCTAssertEqual(firstState, .ready)
+        XCTAssertEqual(secondState, .ready, "a joining caller did not get the shared pass's answer")
+        XCTAssertEqual(source.meCalls, 1, "concurrent refreshes each ran their own chain")
+
+        // After completion is not during. The next call asks again.
+        _ = await sync.refresh()
+        XCTAssertEqual(source.meCalls, 2, "a refresh after completion was dropped, not run fresh")
+    }
+
+    // MARK: - A skipped detail is said, not blanked
+
+    /// The cold-open path — P5's feed→thread jump and P6's push deep link,
+    /// built early. The mailbox page fetched to satisfy the prerequisite does
+    /// not list the thread, `applyThreadDetail` skips it (it refuses to invent
+    /// the list half), and the screen used to render a nav bar over nothing:
+    /// no rows, no caption, nothing to act on.
+    func testADetailTheStoreSkipsBecomesTheThreadsProblemNotABlankScreen() async throws {
+        source.mailboxPages = [.success(try boxes())]
+        // The default `threadPage` is empty, so no fetch can produce a list
+        // row for the id below.
+        let detail = try ContractFixture.thread()
+        source.threadDetail = .success(WireThread(
+            id: "not-in-any-list", subject: detail.subject,
+            mailboxName: detail.mailboxName, accountEmail: detail.accountEmail,
+            messages: detail.messages, agentCards: detail.agentCards, partial: detail.partial
+        ))
+        let sync = sync()
+        _ = await sync.refresh()
+
+        await sync.loadThread(id: "not-in-any-list", in: "INBOX")
+        XCTAssertEqual(sync.threadProblem?.message, "Couldn't open that conversation.")
+
+        // EDGE: replay. The same cold open again is the same answer, not a crash.
+        await sync.loadThread(id: "not-in-any-list", in: "INBOX")
+        XCTAssertEqual(sync.threadProblem?.message, "Couldn't open that conversation.")
+
+        // Recovery: once a page does list the thread, the open lands and the
+        // caption clears — the same operation succeeding is what clears it (D75).
+        source.threadPage = .success(try ContractFixture.page())
+        source.threadDetail = .success(detail)
+        await sync.loadThread(id: detail.id, in: "INBOX")
+        XCTAssertNil(sync.threadProblem, "a successful open left the failure caption up")
+    }
+
+    // MARK: - A pop back is not a reset
+
+    /// A ticking clock. `NADEClock` is a closure over state, so the box *is*
+    /// the clock; the lock is because the closure is `@Sendable`.
+    private final class SteppingClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var instant: Date
+        init(_ instant: Date) { self.instant = instant }
+        var nade: NADEClock { NADEClock(now: { [self] in lock.withLock { instant } }) }
+        func advance(by seconds: TimeInterval) {
+            lock.withLock { instant += seconds }
+        }
+    }
+
+    /// 1e's `.task(id:)` re-fires on every pop back from 1f, and it used to run
+    /// `loadThreads(resetting: true)` unconditionally — deleting the join rows
+    /// and truncating the list to page 1 under the user's scroll. Inside
+    /// `MailSync.listFreshWindow` the fetch is skipped; at the boundary and
+    /// beyond, it runs. Explicit resets (`loadThreads(resetting: true)` called
+    /// directly) are untouched by the gate.
+    func testAPopBackInsideTheFreshWindowDoesNotResetTheList() async throws {
+        source.mailboxPages = [.success(try boxes())]
+        source.threadPage = .success(try ContractFixture.page())
+        let clock = SteppingClock(ContractFixture.pinnedNow)
+        let sync = MailSync(source: source, store: store, clock: clock.nade, sleep: { _ in })
+        let model = MailListModel(sync: sync)
+
+        await model.refresh(mailboxID: "INBOX")
+        XCTAssertEqual(source.threadsCalls, 1)
+        XCTAssertTrue(model.hasFetched)
+
+        // The pop back, moments later.
+        await model.refresh(mailboxID: "INBOX")
+        XCTAssertEqual(source.threadsCalls, 1, "a pop back re-reset a fresh list")
+        // EDGE: the skip must still count as fetched, or an empty-but-fresh
+        // mailbox would show nothing instead of its earned "No mail here".
+        XCTAssertTrue(model.hasFetched, "a skipped fetch left the screen claiming it never asked")
+
+        // EDGE: the boundary. At exactly the window's edge the page is stale.
+        clock.advance(by: MailSync.listFreshWindow)
+        await model.refresh(mailboxID: "INBOX")
+        XCTAssertEqual(source.threadsCalls, 2, "a stale list was never refreshed")
+    }
+
+    /// EDGE: clock skew. A zone change or NTP correction can put `lastPageAt`
+    /// ahead of `now`; that must read *stale*, because an extra fetch costs one
+    /// request while "fresh until the clock catches up" pins the list.
+    func testAClockThatJumpedBackwardsReadsStaleRatherThanFreshForever() async throws {
+        source.mailboxPages = [.success(try boxes())]
+        source.threadPage = .success(try ContractFixture.page())
+        let clock = SteppingClock(ContractFixture.pinnedNow)
+        let sync = MailSync(source: source, store: store, clock: clock.nade, sleep: { _ in })
+        let model = MailListModel(sync: sync)
+
+        await model.refresh(mailboxID: "INBOX")
+        clock.advance(by: -1)
+        await model.refresh(mailboxID: "INBOX")
+        XCTAssertEqual(source.threadsCalls, 2, "a backwards clock jump pinned the list as fresh")
+    }
+
+    // MARK: - The shared ThreadModel answers only for the observed thread
+
+    /// The model has process lifetime, so when 1f is pushed for thread B it
+    /// still holds thread A until the screen's `.task` runs `observe(id:)` —
+    /// and the first frame used to render A's subject, messages and mailbox
+    /// name over the thread just tapped. The gated accessors answer only for
+    /// the id under observation.
+    func testTheSharedThreadModelDoesNotAnswerForAThreadItIsNotObserving() async throws {
+        try await ContractFixture.seedInbox(store)
+        try await store.applyThreadDetail(try ContractFixture.thread(),
+                                          now: ContractFixture.pinnedNow)
+        let model = ThreadModel(sync: sync())
+
+        let threadA = "18f2a1b3c4d5e6f7"
+        model.observe(id: threadA)
+        XCTAssertNotNil(model.thread(for: threadA))
+        XCTAssertNotNil(model.row(for: threadA))
+
+        // B is pushed. The screen renders before `.task` calls `observe`.
+        let threadB = "18f28c5d6e7f8a9b"
+        XCTAssertNil(model.thread(for: threadB), "the previous thread flashed under a new push")
+        XCTAssertNil(model.row(for: threadB), "the previous row flashed under a new push")
+
+        model.observe(id: threadB)
+        XCTAssertNil(model.thread(for: threadB), "no detail has landed for B — nothing-yet, not A's detail")
+        XCTAssertNotNil(model.row(for: threadB), "B's cached list row should answer immediately")
+        XCTAssertNil(model.thread(for: threadA), "A is no longer the observed thread")
+
+        // EDGE: re-observing the same id is a no-op that keeps the values.
+        model.observe(id: threadB)
+        XCTAssertNotNil(model.row(for: threadB))
     }
 
     // MARK: -

@@ -230,7 +230,8 @@ nonisolated final class MailStore: Sendable {
 
     /// Whether `GET /threads/{id}`'s answer is actually stored — which is not
     /// the same as "the write did not throw". `applyThreadDetail` skips a
-    /// thread no list row mentions, and the caller needs to know that happened.
+    /// thread no list row mentions, and `MailSync.loadThread` asks this to turn
+    /// that silent skip into 1f's problem caption.
     func hasDetail(id: String) async throws -> Bool {
         try await writer.read { db in try self.thread(db, id: id) != nil }
     }
@@ -477,14 +478,14 @@ nonisolated final class MailStore: Sendable {
         _ = try await writer.write { db in try AgentRecord.deleteOne(db, key: id) }
     }
 
-    /// The feed as the screens see it, read once rather than observed.
-    /// Used by tests and by the outbox's post-`409` refetch check.
+    /// The feed as the screens see it, read once rather than observed. Tests
+    /// only — the outbox's post-`409` reconciliation goes through
+    /// `source.feedItem` + `saveFeedItem` (`OutboxDriver.refresh(feedItemID:)`),
+    /// not through this.
     func feedForTests() async throws -> [WireFeedItem] {
         try await writer.read { db in try self.feed(db) }
     }
 
-    /// One item, refreshed on its own — what the outbox does after a `409`,
-    /// and what P6's push deep link will do.
     /// `POST /feed/seen`'s local half: the rows stop being new, and the badge
     /// takes the server's own `new_count`.
     ///
@@ -506,6 +507,8 @@ nonisolated final class MailStore: Sendable {
         }
     }
 
+    /// One item, refreshed on its own — what the outbox does after a `409`,
+    /// and what P6's push deep link will do.
     func saveFeedItem(_ item: WireFeedItem) async throws {
         try await writer.write { db in try Self.upsertFeedItem(item, in: db) }
     }
@@ -563,26 +566,6 @@ nonisolated final class MailStore: Sendable {
                     """,
                 arguments: [status.rawValue, note, id]
             )
-        }
-    }
-
-    func replaceAgents(_ agents: [WireAgentRow]) async throws {
-        try await writer.write { db in
-            try AgentRecord.deleteAll(db)
-            for (position, agent) in agents.enumerated() {
-                try AgentRecord(
-                    id: agent.id,
-                    name: agent.name.databaseSafe,
-                    nlDefinition: agent.nlDefinition.databaseSafe,
-                    status: agent.status.rawValue,
-                    triggerSummary: agent.triggerSummary.databaseSafe,
-                    scheduleJson: try agent.schedule.map { try JSONCodec.encode($0) },
-                    lastRunAt: agent.lastRunAt,
-                    approvalRequired: agent.approvalRequired,
-                    position: position
-                )
-                .save(db)
-            }
         }
     }
 

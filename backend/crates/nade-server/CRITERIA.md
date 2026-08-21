@@ -194,9 +194,12 @@ not done. **Nothing is `[ ]`.**
   `db::tests::attachments_table_matches_the_brief`
 - [x] I2 Deleting a message cascades its attachments away.
   `db::tests::attachments_cascade_from_messages`
-- [x] I3 `settings` can hold **one** row and no more: the same key is a unique
-  violation, a different key is a check violation, so there is no way in.
-  `db::tests::settings_is_a_singleton`
+- [x] I3 `settings` is one row per **account** (re-keyed by migration 0003,
+  D45/D46): `account_id` is the primary key, so a second row for one account is
+  a unique violation; the row cascades away with its account; two accounts can
+  disagree - the whole reason the old DDL singleton had to go. The consent path
+  inserts the row at account birth.
+  `db::tests::settings_are_one_row_per_account`
 - [x] I4 `settings.approval_required_default` is `not null default true`. Same test.
 - [x] I5 `agents.status` is `not null default 'draft'` - a bare insert yields a
   draft, and the column default is asserted too.
@@ -666,8 +669,10 @@ checklist is the plan, not a record of what happened to get built.
 - [x] T4 The push body's `historyId` is **never** written to `sync_state`. That
   one rule is what makes at-least-once, out-of-order delivery irrelevant.
   `api::webhooks::tests::the_push_bodys_history_id_is_never_written_to_sync_state`
-- [x] T5 A push for another mailbox is acknowledged, audited and ignored.
-  `api::webhooks::tests::a_push_for_a_different_mailbox_is_acknowledged_and_ignored`
+- [x] T5 A push routes by its **address** (D45): a known mailbox drives its own
+  cursor; an unknown one is acknowledged and audited to no account.
+  `api::webhooks::tests::a_push_for_an_unknown_mailbox_is_acknowledged_and_ignored`,
+  `api::webhooks::tests::a_push_routes_to_the_account_its_address_names`
 - [x] T6 An unreadable body from an **already-verified** sender is `204`, not
   `400` — only Google can send a verified body, so an unreadable shape means the
   shape changed, and a `400` would make Pub/Sub retry a poison message for ever.

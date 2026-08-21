@@ -6,6 +6,12 @@
 //! `refresh_token`, and if you keep using the old one you get `invalid_grant`
 //! forever. So the rule here is absolute - **every refresh writes back**, and a
 //! refresh that returns no new token keeps the old one rather than nulling it.
+//!
+//! One refinement (D49): a refresh writes back only the lineage it *read*.
+//! `gmail_tokens.generation` is bumped by every consent, and both the refresh's
+//! write-back and its `needs_reauth` marking are conditional on the generation
+//! they started from - a consent that lands while Google holds the exchange
+//! wins, and the stale result is discarded rather than clobbering it.
 
 use std::{
     collections::HashMap,
@@ -40,15 +46,20 @@ pub const STATE_TTL: Duration = Duration::from_secs(600);
 /// browser route must not be a memory-growth lever.
 const MAX_PENDING: usize = 64;
 
-/// The advisory-lock key that makes "this server serves exactly one mailbox"
-/// atomic rather than hopeful.
+/// The advisory-lock key every writer of `accounts` and `devices.account_id`
+/// takes, so consent's read-then-write is atomic rather than hopeful.
+///
+/// It used to guard a server-wide singleton; D45 narrowed the *rule* to
+/// per-device binding, but the lock stays global and stays necessary, twice
+/// over. The insert race: two callbacks for one new mailbox spelled in two
+/// cases both see "no row" - `accounts.email` is unique but case-sensitive, so
+/// nothing else stops the second spelling becoming a second row (D28). The
+/// bind race: two callbacks from one device for two different mailboxes both
+/// see "unbound" and would both bind, last write winning silently.
 ///
 /// The value is arbitrary - the ASCII of `nadeacct`, so it is recognisable in
-/// `pg_locks` - and what matters is only that **every** writer of `accounts`
-/// takes the same one. Deliberately *not* a `unique index on accounts ((true))`:
-/// six tests in `db.rs` insert several accounts on purpose, to prove that every
-/// query is scoped per account, and a hard singleton index would forbid exactly
-/// the tests that prove isolation.
+/// `pg_locks` - and what matters is only that every such writer takes the same
+/// one.
 pub const ACCOUNT_SINGLETON_LOCK: i64 = i64::from_be_bytes(*b"nadeacct");
 
 /// Refresh this long before the access token actually dies.
@@ -290,14 +301,24 @@ pub enum TokenError {
     NeedsReauth,
     #[error("no Gmail account is connected")]
     NotConnected,
-    /// A **different** mailbox already owns this server. v1 is single-account,
-    /// and rebinding would silently repoint every stored message at a new owner.
+    /// A **different** mailbox already owns the *device* that started this
+    /// consent. v1 is one mailbox per device, and rebinding would silently
+    /// repoint that device's whole view of its mail at a new owner. A second
+    /// mailbox from a second, unbound device is not this error - that is just
+    /// a second user.
     ///
-    /// Raised from inside `save_consent`'s transaction, under the singleton
-    /// advisory lock, which is what makes it authoritative rather than advisory:
-    /// two callbacks racing for two different addresses cannot both win.
-    #[error("this server is already connected to {existing}")]
+    /// Raised from inside `save_consent`'s transaction, under
+    /// [`ACCOUNT_SINGLETON_LOCK`], which is what makes it authoritative rather
+    /// than advisory: two callbacks racing for one device cannot both win.
+    #[error("this device is already connected to {existing}")]
     AlreadyBound { existing: String },
+    /// The consenting device was revoked (or deleted) between starting the
+    /// flow and `save_consent`'s commit. The two route checks - at `start` and
+    /// before the token exchange in `callback` - close most of the window;
+    /// the in-transaction bind closes the rest, because a revocation is only
+    /// worth anything if it cannot lose the race.
+    #[error("the consenting device is revoked")]
+    DeviceRevoked,
     #[error("gmail oauth: {0}")]
     Other(String),
 }
@@ -354,9 +375,13 @@ pub struct TokenStore {
     cipher: Cipher,
     oauth: Option<std::sync::Arc<OAuthConfig>>,
     http: reqwest::Client,
-    /// Serialises refreshes. Two workers refreshing at once would both spend the
-    /// same rotating refresh token, and the loser's copy would be dead.
-    refresh_gate: tokio::sync::Mutex<()>,
+    /// Serialises refreshes **per account**. Two workers refreshing one account
+    /// at once would both spend the same rotating refresh token, and the
+    /// loser's copy would be dead; two *accounts* refreshing at once share
+    /// nothing and must not queue behind each other. Entries are never
+    /// removed: the map is bounded by the number of accounts, and a stale
+    /// entry is a mutex nobody holds.
+    refresh_gates: Mutex<HashMap<Uuid, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl std::fmt::Debug for TokenStore {
@@ -372,6 +397,10 @@ struct StoredRow {
     access_token: Option<String>,
     access_expiry: Option<DateTime<Utc>>,
     refresh_token: Option<String>,
+    /// The credential generation this row was read at. Every consent bumps it,
+    /// and a refresh may only write back - or mark `needs_reauth` - under the
+    /// generation it read (D49).
+    generation: i64,
 }
 
 impl TokenStore {
@@ -387,8 +416,20 @@ impl TokenStore {
             cipher,
             oauth,
             http,
-            refresh_gate: tokio::sync::Mutex::new(()),
+            refresh_gates: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// This account's refresh gate, created on first use.
+    ///
+    /// The `Arc` is cloned out so the std lock on the map is held only for the
+    /// lookup, never across the `.await` on the gate itself.
+    fn refresh_gate(&self, account_id: Uuid) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self
+            .refresh_gates
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::sync::Arc::clone(gates.entry(account_id).or_default())
     }
 
     #[must_use]
@@ -417,27 +458,38 @@ impl TokenStore {
         Ok(shape(response))
     }
 
-    /// Persist a fresh consent, creating or updating the single account row.
+    /// Persist a fresh consent: create or update the account row for `email`,
+    /// and bind the initiating device to it, all in one transaction.
     ///
-    /// **This is the authoritative singleton check.** The handler's
-    /// [`existing_account_email`] pre-check is a courtesy that buys the friendly
+    /// **This is the authoritative check.** The handler's
+    /// [`bound_account_email`] pre-check is a courtesy that buys the friendly
     /// path; only the re-check below, inside this transaction and under
     /// [`ACCOUNT_SINGLETON_LOCK`], is a guarantee.
     ///
+    /// `device_id: None` is the dev-token principal, which has no `devices`
+    /// row: nothing is bound, and the guard is the old **server-wide** one -
+    /// a deviceless consent may re-consent an existing mailbox or create the
+    /// first, never a second (see below for why).
+    ///
     /// # Errors
-    /// [`TokenError::AlreadyBound`] when a different mailbox already owns this
-    /// server, or an error if the write fails.
+    /// [`TokenError::AlreadyBound`] when the device is already bound to a
+    /// different mailbox (or, deviceless, when any other mailbox exists),
+    /// [`TokenError::DeviceRevoked`] when the device was revoked before the
+    /// commit, or an error if the write fails.
     pub async fn save_consent(
         &self,
         email: &str,
         tokens: &FreshTokens,
+        device_id: Option<Uuid>,
     ) -> Result<Uuid, TokenError> {
         let mut tx = self.pool.begin().await?;
 
-        // First statement in the transaction, before anything is read: two
-        // concurrent callbacks used to both observe "no account" and both
-        // insert. `accounts.email` being unique did not stop them, because the
-        // whole point of the race is that the two addresses differ.
+        // First statement in the transaction, before anything is read: without
+        // it, two concurrent callbacks both observe "no row for this email" /
+        // "this device is unbound" and both write. `accounts.email` being
+        // unique does not close either race - the case-insensitive compare
+        // below is wider than the constraint, and `devices.account_id` has no
+        // constraint at all.
         //
         // EDGE (crash mid-step): `pg_advisory_xact_lock` is released by COMMIT
         // *and* by ROLLBACK, and by the backend dying - so a consent that fails
@@ -447,44 +499,110 @@ impl TokenStore {
             .execute(&mut *tx)
             .await?;
 
-        // EDGE (duplicate delivery): the *same* mailbox re-consenting is
-        // idempotent and must not 409 - that is the `needs_reauth` recovery
-        // path. Only a different address is refused, and case is ignored
-        // because Gmail echoes whatever the user typed.
-        let existing: Option<(Uuid, String)> =
-            sqlx::query_as("select id, email from accounts order by created_at, id limit 1")
-                .fetch_optional(&mut *tx)
-                .await?;
-
-        let account_id: Uuid = match existing {
-            Some((id, bound)) => {
+        // The guard is per-device (backend/DECISIONS.md D45): a device already
+        // bound to a different mailbox is refused; a second *user* - an unbound
+        // device consenting a new mailbox - simply succeeds.
+        //
+        // EDGE (duplicate delivery): the same mailbox re-consenting on its own
+        // device is idempotent and must not 409 - that is the `needs_reauth`
+        // recovery path. Case is ignored because Gmail echoes whatever the
+        // user typed.
+        if let Some(device) = device_id {
+            let bound: Option<String> = sqlx::query_scalar(
+                "select a.email from devices d join accounts a on a.id = d.account_id \
+                  where d.id = $1",
+            )
+            .bind(device)
+            .fetch_optional(&mut *tx)
+            .await?;
+            if let Some(bound) = bound {
                 if !bound.eq_ignore_ascii_case(email) {
                     return Err(TokenError::AlreadyBound { existing: bound });
                 }
-                // EDGE (case): `accounts.email` is unique but PostgreSQL text
-                // is case-sensitive, so `on conflict (email)` would happily
-                // insert a *second* row for the same mailbox spelled
-                // differently. Update the row we already have instead.
+            }
+        }
+
+        // EDGE (case): `accounts.email` is unique but PostgreSQL text is
+        // case-sensitive, so `on conflict (email)` would happily insert a
+        // *second* row for the same mailbox spelled differently. Look the row
+        // up case-insensitively and update it by id instead; the insert arm
+        // only runs under the lock, where there provably is none.
+        let existing: Option<Uuid> = sqlx::query_scalar(
+            "select id from accounts where lower(email) = lower($1) \
+              order by created_at, id limit 1",
+        )
+        .bind(email)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        // The deviceless principal (`NADE_TOKEN`) resolves through the
+        // sole-account fallback, so a second mailbox would strand it:
+        // `sole_account` rightly refuses to pick between two rows, and the
+        // account this consent would mint could be reached by nobody. The old
+        // server-wide guard therefore survives for exactly this caller - a
+        // deviceless consent may only re-consent an existing mailbox or
+        // create the first one.
+        if device_id.is_none() && existing.is_none() {
+            let bound: Option<String> =
+                sqlx::query_scalar("select email from accounts order by created_at, id limit 1")
+                    .fetch_optional(&mut *tx)
+                    .await?;
+            if let Some(bound) = bound {
+                return Err(TokenError::AlreadyBound { existing: bound });
+            }
+        }
+
+        let account_id: Uuid = match existing {
+            Some(id) => {
                 sqlx::query("update accounts set status = 'ok' where id = $1")
                     .bind(id)
                     .execute(&mut *tx)
                     .await?;
                 id
             }
-            // Under the lock there is provably no account, so this cannot
-            // conflict; `on conflict` is kept only so a row inserted outside
-            // the lock (a test fixture, a manual `psql`) is absorbed rather
-            // than raising a unique violation.
             None => {
                 sqlx::query_scalar(
-                    "insert into accounts (email, status) values ($1, 'ok') \
-                     on conflict (email) do update set status = 'ok' returning id",
+                    "insert into accounts (email, status) values ($1, 'ok') returning id",
                 )
                 .bind(email)
                 .fetch_one(&mut *tx)
                 .await?
             }
         };
+
+        // Every account has a settings row from the moment it exists, so
+        // `GET /settings` (P4) never invents a default at read time.
+        // EDGE (duplicate delivery): re-consent finds the row already there.
+        sqlx::query("insert into settings (account_id) values ($1) on conflict do nothing")
+            .bind(account_id)
+            .execute(&mut *tx)
+            .await?;
+
+        // Bind the initiating device in the same transaction as the account it
+        // is being bound to: a crash between the two would leave a mailbox no
+        // device resolves to.
+        //
+        // `revoked_at is null` makes revocation authoritative at the commit,
+        // not only at the two earlier route checks: revoking a stolen token
+        // while its consent is mid-flight must abort the consent whole, or
+        // the thief's mailbox lands bound to a corpse of a device and the
+        // revocation closed nothing.
+        // EDGE (crash mid-step / revoke racing the commit): zero affected rows
+        // - revoked, or deleted outright - aborts this transaction, so the
+        // account, settings and tokens above roll back with it.
+        if let Some(device) = device_id {
+            let bound = sqlx::query(
+                "update devices set account_id = $2 where id = $1 and revoked_at is null",
+            )
+            .bind(device)
+            .bind(account_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if bound != 1 {
+                return Err(TokenError::DeviceRevoked);
+            }
+        }
 
         let access = self
             .cipher
@@ -497,6 +615,11 @@ impl TokenStore {
 
         // `coalesce` on refresh: a re-consent that somehow returns no refresh
         // token must not wipe the one we already have.
+        //
+        // GENERATION (D49): bumped in the same statement that writes the
+        // tokens, so a refresh that read the pre-consent row can never write
+        // its stale-lineage result - or mark `needs_reauth` off its stale
+        // `invalid_grant` - over these fresh credentials.
         sqlx::query(
             "insert into gmail_tokens \
                  (account_id, access_token, access_expiry, refresh_token, scopes, updated_at) \
@@ -506,6 +629,7 @@ impl TokenStore {
                  access_expiry = excluded.access_expiry, \
                  refresh_token = coalesce(excluded.refresh_token, gmail_tokens.refresh_token), \
                  scopes = excluded.scopes, \
+                 generation = gmail_tokens.generation + 1, \
                  updated_at = now()",
         )
         .bind(account_id)
@@ -564,7 +688,7 @@ impl TokenStore {
 
     async fn row(&self, account_id: Uuid) -> Result<StoredRow, TokenError> {
         sqlx::query_as::<_, StoredRow>(
-            "select access_token, access_expiry, refresh_token from gmail_tokens \
+            "select access_token, access_expiry, refresh_token, generation from gmail_tokens \
               where account_id = $1",
         )
         .bind(account_id)
@@ -573,71 +697,119 @@ impl TokenStore {
         .ok_or(TokenError::NotConnected)
     }
 
-    /// Refresh, and **persist the result** - including a rotated refresh token.
+    /// Refresh, and **persist the result**, including a rotated refresh token.
+    /// The one exception: a consent that replaced the credential mid-flight
+    /// wins, and the stale result is discarded instead of persisted (D49).
     async fn refresh(&self, account_id: Uuid) -> Result<String, TokenError> {
         let oauth = self.oauth.as_ref().ok_or(TokenError::NotConnected)?;
-        let _gate = self.refresh_gate.lock().await;
+        let gate = self.refresh_gate(account_id);
+        let _gate = gate.lock().await;
 
         // Somebody else may have refreshed while we waited for the gate.
         if let Some(live) = self.cached_access_token(account_id).await? {
             return Ok(live);
         }
 
-        let row = self.row(account_id).await?;
-        let sealed = row.refresh_token.ok_or(TokenError::NeedsReauth)?;
-        let refresh_token = self
-            .cipher
-            .decrypt(&sealed)
-            .map_err(|_| TokenError::NeedsReauth)?;
+        // Two passes: the second runs only when a consent bumped `generation`
+        // while Google held our exchange, and it re-reads the *fresh*
+        // credential. A second staleness means two consents landed inside one
+        // refresh; stop and let the caller retry rather than looping.
+        for _ in 0..2 {
+            let row = self.row(account_id).await?;
+            let generation = row.generation;
+            let sealed = row.refresh_token.ok_or(TokenError::NeedsReauth)?;
+            let refresh_token = self
+                .cipher
+                .decrypt(&sealed)
+                .map_err(|_| TokenError::NeedsReauth)?;
 
-        let bridge = bridge(self.http.clone());
-        let response = oauth
-            .client
-            .exchange_refresh_token(&RefreshToken::new(refresh_token.clone()))
-            .request_async(&bridge)
-            .await;
+            let bridge = bridge(self.http.clone());
+            let response = oauth
+                .client
+                .exchange_refresh_token(&RefreshToken::new(refresh_token.clone()))
+                .request_async(&bridge)
+                .await;
 
-        let tokens = match response {
-            Ok(response) => shape(response),
-            Err(error) => {
-                let classified = classify(error);
-                if matches!(classified, TokenError::NeedsReauth) {
-                    self.mark_needs_reauth(account_id, "invalid_grant").await?;
+            let tokens = match response {
+                Ok(response) => shape(response),
+                Err(error) => {
+                    let classified = classify(error);
+                    if !matches!(classified, TokenError::NeedsReauth) {
+                        return Err(classified);
+                    }
+                    // GENERATION (D49): `invalid_grant` proves the credential
+                    // *we spent* is dead, not the stored one. Re-consent is a
+                    // weekly event (7-day Testing-mode expiry), so "refresh
+                    // reads the dead token -> the user re-consents -> Google
+                    // answers the old exchange" is a live interleaving, and
+                    // marking unconditionally would flip the account back to
+                    // `needs_reauth` seconds after the user fixed it.
+                    if self
+                        .mark_needs_reauth_if_current(account_id, generation, "invalid_grant")
+                        .await?
+                    {
+                        return Err(classified);
+                    }
+                    tracing::info!(
+                        "a consent replaced the credential mid-refresh; \
+                         discarding the stale invalid_grant"
+                    );
+                    if let Some(live) = self.cached_access_token(account_id).await? {
+                        return Ok(live);
+                    }
+                    continue;
                 }
-                return Err(classified);
+            };
+
+            let access = self
+                .cipher
+                .encrypt(&tokens.access_token)
+                .map_err(TokenError::from)?;
+            // ROTATION: Google may hand back a new refresh token on any refresh.
+            // Writing it back is the entire reason this code exists.
+            let rotated = match &tokens.refresh_token {
+                Some(new) if *new != refresh_token => {
+                    tracing::info!("gmail rotated the refresh token; persisting the new one");
+                    Some(self.cipher.encrypt(new).map_err(TokenError::from)?)
+                }
+                _ => None,
+            };
+
+            // GENERATION (D49): the write spends only the credential it read.
+            // A consent that committed while Google held this exchange bumped
+            // `generation`, and overwriting its fresh tokens with this
+            // stale-lineage result would hand every later refresh a dead
+            // refresh token. `rows_affected` is the check, not a hope.
+            let written = sqlx::query(
+                "update gmail_tokens set \
+                     access_token = $2, \
+                     access_expiry = $3, \
+                     refresh_token = coalesce($4, refresh_token), \
+                     updated_at = now() \
+                  where account_id = $1 and generation = $5",
+            )
+            .bind(account_id)
+            .bind(&access)
+            .bind(tokens.expires_at)
+            .bind(rotated.as_ref())
+            .bind(generation)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            if written == 1 {
+                return Ok(tokens.access_token);
             }
-        };
 
-        let access = self
-            .cipher
-            .encrypt(&tokens.access_token)
-            .map_err(TokenError::from)?;
-        // ROTATION: Google may hand back a new refresh token on any refresh.
-        // Writing it back is the entire reason this code exists.
-        let rotated = match &tokens.refresh_token {
-            Some(new) if *new != refresh_token => {
-                tracing::info!("gmail rotated the refresh token; persisting the new one");
-                Some(self.cipher.encrypt(new).map_err(TokenError::from)?)
+            tracing::info!(
+                "a consent replaced the credential mid-refresh; discarding the stale result"
+            );
+            if let Some(live) = self.cached_access_token(account_id).await? {
+                return Ok(live);
             }
-            _ => None,
-        };
-
-        sqlx::query(
-            "update gmail_tokens set \
-                 access_token = $2, \
-                 access_expiry = $3, \
-                 refresh_token = coalesce($4, refresh_token), \
-                 updated_at = now() \
-              where account_id = $1",
-        )
-        .bind(account_id)
-        .bind(&access)
-        .bind(tokens.expires_at)
-        .bind(rotated.as_ref())
-        .execute(&self.pool)
-        .await?;
-
-        Ok(tokens.access_token)
+        }
+        Err(TokenError::Other(
+            "the stored credential changed twice during one refresh; retry".to_owned(),
+        ))
     }
 
     /// Force the next call to refresh. Used after a 401 from Gmail.
@@ -657,6 +829,11 @@ impl TokenStore {
     ///
     /// Idempotent: a second failure does not stack a second card on the feed.
     ///
+    /// Unconditional - for a caller that knows the *stored* credential is the
+    /// dead one. The refresh path must not use this directly: it knows only
+    /// that the credential it *read* is dead, which is
+    /// [`Self::mark_needs_reauth_if_current`]'s job to tell apart.
+    ///
     /// # Errors
     /// Returns an error if the transaction fails.
     pub async fn mark_needs_reauth(
@@ -665,13 +842,58 @@ impl TokenStore {
         reason: &str,
     ) -> Result<(), TokenError> {
         let mut tx = self.pool.begin().await?;
+        Self::mark_needs_reauth_in(&mut tx, account_id, reason).await?;
+        tx.commit().await?;
+        tracing::warn!(%account_id, reason, "gmail credential is dead; sync paused");
+        Ok(())
+    }
 
+    /// [`Self::mark_needs_reauth`], but only if the stored credential is still
+    /// the one the caller read - `false` means a consent replaced it and the
+    /// verdict is stale (D49).
+    ///
+    /// Takes [`ACCOUNT_SINGLETON_LOCK`], the lock `save_consent` holds for its
+    /// whole transaction, so "still current" cannot turn false between the
+    /// check and the commit: either the consent committed first and this
+    /// returns `false`, or this commits first and the consent's `status='ok'`
+    /// lands after - the fresh consent wins either way.
+    async fn mark_needs_reauth_if_current(
+        &self,
+        account_id: Uuid,
+        generation: i64,
+        reason: &str,
+    ) -> Result<bool, TokenError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("select pg_advisory_xact_lock($1)")
+            .bind(ACCOUNT_SINGLETON_LOCK)
+            .execute(&mut *tx)
+            .await?;
+        let current: Option<i64> =
+            sqlx::query_scalar("select generation from gmail_tokens where account_id = $1")
+                .bind(account_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if current != Some(generation) {
+            return Ok(false);
+        }
+        Self::mark_needs_reauth_in(&mut tx, account_id, reason).await?;
+        tx.commit().await?;
+        tracing::warn!(%account_id, reason, "gmail credential is dead; sync paused");
+        Ok(true)
+    }
+
+    /// The three writes of the lifecycle, inside the caller's transaction.
+    async fn mark_needs_reauth_in(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        account_id: Uuid,
+        reason: &str,
+    ) -> Result<(), TokenError> {
         let changed = sqlx::query(
             "update accounts set status = 'needs_reauth' \
               where id = $1 and status <> 'needs_reauth'",
         )
         .bind(account_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected();
 
@@ -694,7 +916,7 @@ impl TokenStore {
             "note_id": serde_json::Value::Null,
             "thread_id": serde_json::Value::Null,
         }))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
         sqlx::query(
@@ -703,11 +925,9 @@ impl TokenStore {
         )
         .bind(account_id)
         .bind(serde_json::json!({ "reason": reason, "first_time": changed > 0 }))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
-        tx.commit().await?;
-        tracing::warn!(%account_id, reason, "gmail credential is dead; sync paused");
         Ok(())
     }
 }
@@ -823,27 +1043,26 @@ async fn send(
 #[error("http: {0}")]
 pub struct BridgeError(String);
 
-/// Guard against a second Gmail account quietly replacing the first.
+/// The mailbox the consenting device is already bound to, if any.
 ///
-/// v1 is single-account by design. If somebody completes consent for a different
-/// mailbox, binding it would silently repoint every stored message at a new
-/// owner. Refuse instead.
+/// Guard against a device quietly swapping its mailbox: if this device already
+/// resolves to an account, consenting a *different* one would silently repoint
+/// its whole view of its mail at a new owner. A second mailbox from a second,
+/// unbound device is fine - that is just a second user.
 ///
 /// This is the **cheap pre-check**, outside any transaction, and it exists only
 /// so the friendly path renders a friendly page. The guarantee lives in
 /// [`TokenStore::save_consent`], under [`ACCOUNT_SINGLETON_LOCK`].
 ///
-/// `order by created_at, id`: `created_at` alone is not a total order - two rows
-/// inserted in the same transaction, or on a clock with coarse resolution, tie -
-/// and "the account" must be the same row on every call.
-///
 /// # Errors
 /// Returns an error if the query fails.
-pub async fn existing_account_email(pool: &PgPool) -> Result<Option<String>> {
-    let email: Option<String> =
-        sqlx::query_scalar("select email from accounts order by created_at, id limit 1")
-            .fetch_optional(pool)
-            .await?;
+pub async fn bound_account_email(pool: &PgPool, device_id: Uuid) -> Result<Option<String>> {
+    let email: Option<String> = sqlx::query_scalar(
+        "select a.email from devices d join accounts a on a.id = d.account_id where d.id = $1",
+    )
+    .bind(device_id)
+    .fetch_optional(pool)
+    .await?;
     Ok(email)
 }
 
@@ -1145,6 +1364,7 @@ mod tests {
                     expires_at: Some(Utc::now() + chrono::TimeDelta::seconds(3600)),
                     scopes: vec![SCOPE.to_owned()],
                 },
+                None,
             )
             .await
             .unwrap();
@@ -1365,6 +1585,7 @@ mod tests {
                     expires_at: Some(Utc::now() + chrono::TimeDelta::seconds(3600)),
                     scopes: vec![SCOPE.to_owned()],
                 },
+                None,
             )
             .await
             .unwrap();
@@ -1448,7 +1669,218 @@ mod tests {
         );
     }
 
-    // ------------------------------------------- the singleton account (F2) --
+    // ------------------------------------ consent racing a refresh (D49) --
+
+    /// A token endpoint that parks the request until the test says go, so the
+    /// interleaving "refresh reads the credential -> consent commits -> Google
+    /// answers the old exchange" is barrier-controlled rather than hoped for.
+    ///
+    /// `respond` runs on the mock server's own thread, so the blocking `recv`
+    /// stalls only the parked response - the test body keeps running (the
+    /// tests using this are `multi_thread` for exactly that reason).
+    struct GatedToken {
+        arrived: std::sync::mpsc::Sender<()>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        status: u16,
+        body: String,
+    }
+
+    impl wiremock::Respond for GatedToken {
+        fn respond(&self, _request: &wiremock::Request) -> ResponseTemplate {
+            let _ = self.arrived.send(());
+            let _ = self
+                .release
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recv();
+            ResponseTemplate::new(self.status)
+                .set_body_raw(self.body.clone().into_bytes(), "application/json")
+        }
+    }
+
+    /// Mount a gated token endpoint; returns (arrived, release) for the test.
+    async fn mount_gated_token(
+        server: &MockServer,
+        status: u16,
+        body: String,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (arrived_tx, arrived_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(GatedToken {
+                arrived: arrived_tx,
+                release: std::sync::Mutex::new(release_rx),
+                status,
+                body,
+            })
+            .expect(1)
+            .mount(server)
+            .await;
+        (arrived_rx, release_tx)
+    }
+
+    fn fresh_consent() -> FreshTokens {
+        FreshTokens {
+            access_token: "access-fresh-consent".to_owned(),
+            refresh_token: Some("refresh-fresh-consent".to_owned()),
+            expires_at: Some(Utc::now() + chrono::TimeDelta::seconds(3600)),
+            scopes: vec![SCOPE.to_owned()],
+        }
+    }
+
+    /// D49, interleaving one: the refresh **succeeds** against the old
+    /// credential after a consent replaced it. Its stale-lineage result must
+    /// be discarded - written back, it would overwrite the consent's fresh
+    /// refresh token with one Google is about to stop honouring.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_refresh_that_loses_to_a_consent_discards_its_result() {
+        let server = MockServer::start().await;
+        let (arrived, release) =
+            mount_gated_token(&server, 200, token_response(Some("refresh-STALE-LINEAGE"))).await;
+        let harness = harness(&server).await;
+        expire_the_access_token(&harness.pool, harness.account).await;
+
+        // The refresh reads the original credential and parks inside Google.
+        let store = std::sync::Arc::new(harness.store);
+        let refreshing = tokio::spawn({
+            let store = std::sync::Arc::clone(&store);
+            let account = harness.account;
+            async move { store.access_token(account).await }
+        });
+        tokio::task::spawn_blocking(move || arrived.recv())
+            .await
+            .unwrap()
+            .expect("the refresh must reach the token endpoint");
+
+        // The user re-consents while Google holds the exchange.
+        store
+            .save_consent("jatinsethi98@gmail.com", &fresh_consent(), None)
+            .await
+            .unwrap();
+
+        // Google answers the *old* exchange. rows_affected says stale; the
+        // caller is served the consent's token, not the stale lineage.
+        release.send(()).unwrap();
+        assert_eq!(
+            refreshing.await.unwrap().unwrap(),
+            "access-fresh-consent",
+            "the caller gets the consent's live token, not the stale refresh's"
+        );
+
+        let (sealed_access, sealed_refresh, generation): (String, String, i64) = sqlx::query_as(
+            "select access_token, refresh_token, generation from gmail_tokens \
+              where account_id = $1",
+        )
+        .bind(harness.account)
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            store.cipher.decrypt(&sealed_refresh).unwrap(),
+            "refresh-fresh-consent",
+            "the consent's refresh token must survive the stale write-back"
+        );
+        assert_eq!(
+            store.cipher.decrypt(&sealed_access).unwrap(),
+            "access-fresh-consent"
+        );
+        assert_eq!(generation, 1, "the stale refresh must not have written");
+    }
+
+    /// D49, interleaving two: the refresh meets **`invalid_grant`** on the old
+    /// credential after a consent replaced it. Marking `needs_reauth` off that
+    /// stale verdict would flip the account back seconds after the user fixed
+    /// it - the exact weekly re-consent experience under the 7-day
+    /// Testing-mode expiry.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_stale_invalid_grant_does_not_undo_a_fresh_consent() {
+        let server = MockServer::start().await;
+        let (arrived, release) = mount_gated_token(
+            &server,
+            400,
+            r#"{"error":"invalid_grant","error_description":"Token has been expired or revoked."}"#
+                .to_owned(),
+        )
+        .await;
+        let harness = harness(&server).await;
+        expire_the_access_token(&harness.pool, harness.account).await;
+
+        let store = std::sync::Arc::new(harness.store);
+        let refreshing = tokio::spawn({
+            let store = std::sync::Arc::clone(&store);
+            let account = harness.account;
+            async move { store.access_token(account).await }
+        });
+        tokio::task::spawn_blocking(move || arrived.recv())
+            .await
+            .unwrap()
+            .expect("the refresh must reach the token endpoint");
+
+        store
+            .save_consent("jatinsethi98@gmail.com", &fresh_consent(), None)
+            .await
+            .unwrap();
+
+        release.send(()).unwrap();
+        assert_eq!(
+            refreshing.await.unwrap().unwrap(),
+            "access-fresh-consent",
+            "a stale invalid_grant is discarded, not surfaced"
+        );
+
+        let status: String = sqlx::query_scalar("select status from accounts where id = $1")
+            .bind(harness.account)
+            .fetch_one(&harness.pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "ok", "the fresh consent must not be undone");
+        let cards: i64 = sqlx::query_scalar(
+            "select count(*) from feed_items where data->>'reason' = 'needs_reauth'",
+        )
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+        assert_eq!(cards, 0, "no card for a credential that is not dead");
+        let audited: i64 = sqlx::query_scalar(
+            "select count(*) from audit_log where action = 'gmail_needs_reauth'",
+        )
+        .fetch_one(&harness.pool)
+        .await
+        .unwrap();
+        assert_eq!(audited, 0);
+    }
+
+    /// D47's other half: the gate that serialises refreshes is **per account**.
+    /// One global mutex would make account B's refresh wait out account A's
+    /// slow token endpoint - and each account rotates its own refresh token,
+    /// so cross-account serialisation protected nothing.
+    #[tokio::test]
+    async fn refresh_gates_are_per_account_and_stable() {
+        let db = crate::test_support::test_db().await;
+        let store = bare_store(db.pool.clone());
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        assert!(std::sync::Arc::ptr_eq(
+            &store.refresh_gate(a),
+            &store.refresh_gate(a)
+        ));
+        assert!(!std::sync::Arc::ptr_eq(
+            &store.refresh_gate(a),
+            &store.refresh_gate(b)
+        ));
+
+        // Holding one account's gate must not block the other's.
+        let held = store.refresh_gate(a);
+        let _held = held.lock().await;
+        let other = store.refresh_gate(b);
+        assert!(
+            other.try_lock().is_ok(),
+            "account B queued behind account A's refresh"
+        );
+    }
+
+    // ----------------------------------------- account binding (F2 -> D45) --
 
     /// A store over a private database with no account bound yet. `oauth: None`
     /// because `save_consent` never touches the OAuth client.
@@ -1470,21 +1902,41 @@ mod tests {
         }
     }
 
-    /// Race `save_consent` for each address, released together.
+    /// A paired-but-unbound device row, as `POST /v1/auth/pair` leaves it.
+    async fn paired_device(pool: &PgPool, name: &str) -> Uuid {
+        sqlx::query_scalar(
+            "insert into devices (bearer_hash, device_name) values ($1, $2) returning id",
+        )
+        .bind(format!("hash-{}", Uuid::new_v4()))
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    async fn bound_to(pool: &PgPool, device: Uuid) -> Option<Uuid> {
+        sqlx::query_scalar("select account_id from devices where id = $1")
+            .bind(device)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Race `save_consent` for each `(email, device)`, released together.
     async fn race_consents(
         store: &std::sync::Arc<TokenStore>,
-        emails: [&'static str; 2],
+        consents: [(&'static str, Option<Uuid>); 2],
     ) -> Vec<Result<(&'static str, Uuid), TokenError>> {
-        let gate = std::sync::Arc::new(tokio::sync::Barrier::new(emails.len()));
-        let tasks: Vec<_> = emails
+        let gate = std::sync::Arc::new(tokio::sync::Barrier::new(consents.len()));
+        let tasks: Vec<_> = consents
             .into_iter()
-            .map(|email| {
+            .map(|(email, device)| {
                 let store = std::sync::Arc::clone(store);
                 let gate = std::sync::Arc::clone(&gate);
                 tokio::spawn(async move {
                     gate.wait().await;
                     store
-                        .save_consent(email, &consent_for(email))
+                        .save_consent(email, &consent_for(email), device)
                         .await
                         .map(|id| (email, id))
                 })
@@ -1498,36 +1950,49 @@ mod tests {
         outcomes
     }
 
-    /// F2 - the defect. `existing_account_email` and `save_consent` used to run
-    /// in **separate** transactions, so two callbacks for two different
-    /// addresses both observed "no account" and both inserted; `accounts.email`
-    /// being unique did not help, because the addresses differ. One survives.
+    /// F2's race, narrowed by D45 to the device: two callbacks racing to bind
+    /// **one device** to two different mailboxes both observe "unbound"
+    /// outside the lock, and only the re-check inside it stops the second from
+    /// silently rebinding. One wins; the loser is `AlreadyBound` naming the
+    /// winner, and its transaction rolled back whole.
     #[tokio::test]
-    async fn two_racing_consents_bind_exactly_one_account() {
+    async fn two_racing_consents_for_one_device_bind_exactly_one_mailbox() {
         let db = crate::test_support::test_db().await;
         let store = std::sync::Arc::new(bare_store(db.pool.clone()));
+        let device = paired_device(&db.pool, "racer").await;
 
-        let outcomes =
-            race_consents(&store, ["jatinsethi98@gmail.com", "impostor@gmail.com"]).await;
+        let outcomes = race_consents(
+            &store,
+            [
+                ("jatinsethi98@gmail.com", Some(device)),
+                ("impostor@gmail.com", Some(device)),
+            ],
+        )
+        .await;
 
         let mut winner = None;
         let mut refusals = Vec::new();
         for outcome in outcomes {
             match outcome {
-                Ok((email, _)) => {
+                Ok((email, account)) => {
                     assert!(winner.is_none(), "two winners is the bug itself");
-                    winner = Some(email);
+                    winner = Some((email, account));
                 }
                 Err(TokenError::AlreadyBound { existing }) => refusals.push(existing),
                 Err(other) => panic!("the loser must be AlreadyBound, not {other}"),
             }
         }
 
-        let winner = winner.expect("one of the two consents has to succeed");
+        let (winner, account) = winner.expect("one of the two consents has to succeed");
         assert_eq!(
             refusals,
             vec![winner.to_owned()],
             "the 409 names the winner"
+        );
+        assert_eq!(
+            bound_to(&db.pool, device).await,
+            Some(account),
+            "the device ends bound to the winner"
         );
 
         let emails: Vec<String> =
@@ -1555,19 +2020,148 @@ mod tests {
         assert_eq!(audited, 1, "the losing transaction rolled back whole");
     }
 
+    /// The point of D45: a second **user** - their own unbound device, their
+    /// own mailbox - is not a conflict. Each device ends bound to its own
+    /// account, and each account gets its own settings row at birth.
+    #[tokio::test]
+    async fn a_second_user_with_their_own_device_gets_their_own_account() {
+        let db = crate::test_support::test_db().await;
+        let store = bare_store(db.pool.clone());
+        let first = paired_device(&db.pool, "first-user").await;
+        let second = paired_device(&db.pool, "second-user").await;
+
+        let one = store
+            .save_consent(
+                "jatinsethi98@gmail.com",
+                &consent_for("jatinsethi98@gmail.com"),
+                Some(first),
+            )
+            .await
+            .unwrap();
+        let two = store
+            .save_consent(
+                "impostor@gmail.com",
+                &consent_for("impostor@gmail.com"),
+                Some(second),
+            )
+            .await
+            .expect("a second user on a second device is not AlreadyBound");
+
+        assert_ne!(one, two, "two mailboxes are two accounts");
+        assert_eq!(bound_to(&db.pool, first).await, Some(one));
+        assert_eq!(bound_to(&db.pool, second).await, Some(two));
+
+        let settings: i64 = sqlx::query_scalar("select count(*) from settings")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(settings, 2, "every account has a settings row from birth");
+
+        // And the *bound* device swapping mailboxes is still refused - the
+        // guard narrowed, it did not vanish.
+        let error = store
+            .save_consent(
+                "impostor@gmail.com",
+                &consent_for("impostor@gmail.com"),
+                Some(first),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, TokenError::AlreadyBound { ref existing }
+                     if existing == "jatinsethi98@gmail.com"),
+            "{error}"
+        );
+    }
+
+    /// The deviceless principal (`NADE_TOKEN`) resolves through the
+    /// sole-account fallback, so a second deviceless mailbox would strand it:
+    /// `sole_account` rightly refuses to pick between two rows, and the
+    /// account the consent just minted would be reachable by nobody. The old
+    /// server-wide guard therefore survives for exactly this caller.
+    #[tokio::test]
+    async fn a_deviceless_consent_for_a_second_mailbox_is_refused() {
+        let db = crate::test_support::test_db().await;
+        let store = bare_store(db.pool.clone());
+
+        // EDGE (empty input): the first-ever deviceless consent still
+        // bootstraps the dev world.
+        let first = store
+            .save_consent(
+                "jatinsethi98@gmail.com",
+                &consent_for("jatinsethi98@gmail.com"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // A different mailbox is refused, naming the one that exists...
+        let error = store
+            .save_consent(
+                "impostor@gmail.com",
+                &consent_for("impostor@gmail.com"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, TokenError::AlreadyBound { ref existing }
+                     if existing == "jatinsethi98@gmail.com"),
+            "{error}"
+        );
+
+        // ...and the refusal persisted nothing.
+        let accounts: i64 = sqlx::query_scalar("select count(*) from accounts")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(accounts, 1);
+
+        // EDGE (unicode/case): deviceless re-consent for the same mailbox,
+        // spelled differently, is still the idempotent recovery path.
+        let again = store
+            .save_consent(
+                "JatinSethi98@Gmail.com",
+                &consent_for("JatinSethi98@Gmail.com"),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(again, first);
+
+        // And the dev principal still resolves: the sole account survived.
+        let state = crate::state::AppState::new(
+            db.pool.clone(),
+            crate::test_support::test_config(crate::config::Env::Prod),
+        );
+        assert_eq!(
+            state.sole_account().await.unwrap().map(|a| a.id),
+            Some(first)
+        );
+    }
+
     /// EDGE (duplicate delivery): two callbacks for the **same** mailbox are
     /// re-consent, not a conflict - that is the `needs_reauth` recovery path,
     /// and it must stay idempotent under a race. The case difference is the
     /// nastier half: `accounts.email` is unique, but PostgreSQL text is
-    /// case-sensitive, so an `on conflict (email)` upsert would have made two
-    /// rows for one mailbox.
+    /// case-sensitive, so without the in-lock `lower()` lookup the second
+    /// spelling would become a second row for one mailbox. Two devices, one
+    /// mailbox: both end bound to the same account.
     #[tokio::test]
     async fn racing_re_consent_for_the_same_email_is_idempotent() {
         let db = crate::test_support::test_db().await;
         let store = std::sync::Arc::new(bare_store(db.pool.clone()));
+        let phone = paired_device(&db.pool, "phone").await;
+        let tablet = paired_device(&db.pool, "tablet").await;
 
-        let outcomes =
-            race_consents(&store, ["jatinsethi98@gmail.com", "JatinSethi98@Gmail.com"]).await;
+        let outcomes = race_consents(
+            &store,
+            [
+                ("jatinsethi98@gmail.com", Some(phone)),
+                ("JatinSethi98@Gmail.com", Some(tablet)),
+            ],
+        )
+        .await;
 
         let ids: Vec<Uuid> = outcomes
             .into_iter()
@@ -1575,6 +2169,8 @@ mod tests {
             .collect();
         assert_eq!(ids.len(), 2, "both consents succeed");
         assert_eq!(ids[0], ids[1], "and both land on the same account row");
+        assert_eq!(bound_to(&db.pool, phone).await, Some(ids[0]));
+        assert_eq!(bound_to(&db.pool, tablet).await, Some(ids[0]));
 
         let rows: i64 = sqlx::query_scalar("select count(*) from accounts")
             .fetch_one(&db.pool)
@@ -1583,45 +2179,62 @@ mod tests {
         assert_eq!(rows, 1, "one mailbox is one row, whatever its spelling");
     }
 
-    /// F2 - `order by created_at` alone is not a total order. Two rows stamped
-    /// at the same instant made "the account" an arbitrary choice that could
-    /// differ between two calls in the same request.
+    /// D45's fallback refuses to guess: `sole_account` answers only when the
+    /// answer is unambiguous, and `bound_account_email` reads the device, not
+    /// "the server".
     #[tokio::test]
-    async fn the_singleton_account_query_is_deterministic() {
+    async fn the_sole_account_fallback_refuses_to_guess() {
         let db = crate::test_support::test_db().await;
-        // The same `created_at` on purpose - `now()` is transaction time, so a
-        // single statement inserting two rows already produces this.
+        let state = crate::state::AppState::new(
+            db.pool.clone(),
+            crate::test_support::test_config(crate::config::Env::Prod),
+        );
+
+        // EDGE (empty input): no accounts at all.
+        assert!(state.sole_account().await.unwrap().is_none());
+
+        let only: Uuid = sqlx::query_scalar(
+            "insert into accounts (email) values ('jatinsethi98@gmail.com') returning id",
+        )
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            state.sole_account().await.unwrap().map(|a| a.id),
+            Some(only),
+            "exactly one account is the single-user behaviour, unchanged"
+        );
+
+        // A second account - same created_at on purpose, the old tie-break
+        // trap - and there is no longer any honest "the account".
         sqlx::query(
-            "insert into accounts (email, created_at) values \
-                 ('b@example.com', timestamptz '2026-01-01 00:00:00Z'), \
-                 ('a@example.com', timestamptz '2026-01-01 00:00:00Z')",
+            "insert into accounts (email, created_at) \
+             select 'b@example.com', created_at from accounts limit 1",
         )
         .execute(&db.pool)
         .await
         .unwrap();
+        assert!(
+            state.sole_account().await.unwrap().is_none(),
+            "with two accounts the fallback must refuse, not pick one"
+        );
 
-        let expected: Uuid =
-            sqlx::query_scalar("select id from accounts order by created_at, id limit 1")
-                .fetch_one(&db.pool)
-                .await
-                .unwrap();
-        let expected_email: String = sqlx::query_scalar("select email from accounts where id = $1")
-            .bind(expected)
-            .fetch_one(&db.pool)
+        // The device pre-check reads the binding, wherever the tie sits.
+        let device = paired_device(&db.pool, "probe").await;
+        assert_eq!(bound_account_email(&db.pool, device).await.unwrap(), None);
+        sqlx::query("update devices set account_id = $2 where id = $1")
+            .bind(device)
+            .bind(only)
+            .execute(&db.pool)
             .await
             .unwrap();
-
-        for _ in 0..5 {
-            assert_eq!(
-                existing_account_email(&db.pool).await.unwrap().as_deref(),
-                Some(expected_email.as_str())
-            );
-            let state = crate::state::AppState::new(
-                db.pool.clone(),
-                crate::test_support::test_config(crate::config::Env::Prod),
-            );
-            assert_eq!(state.account().await.unwrap().map(|a| a.id), Some(expected));
-        }
+        assert_eq!(
+            bound_account_email(&db.pool, device)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("jatinsethi98@gmail.com")
+        );
     }
 
     /// The lock key is a constant other code will one day have to match. Pin it,

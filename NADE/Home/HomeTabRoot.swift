@@ -21,7 +21,8 @@ struct HomeTabRoot: View {
     let models: MailModels
     let clock: NADEClock
 
-    /// Quantised to the minute.
+    /// Quantised to the minute — `NADEClock.nowToTheMinute()`, shared with
+    /// `MailTabRoot`.
     ///
     /// `clock.now()` straight from `body` gives a new `Date` on every render,
     /// and `RootTabView.body` reads `navigation.selection` — so every tab tap
@@ -29,10 +30,7 @@ struct HomeTabRoot: View {
     /// SwiftUI re-rendered and re-formatted all of them. Nothing on these
     /// screens is finer-grained than a minute (`CRITERIA.md` §9 already accepts
     /// that `now` is captured at build time), so equal renders now compare equal.
-    private var now: Date {
-        let seconds = clock.now().timeIntervalSinceReferenceDate
-        return Date(timeIntervalSinceReferenceDate: (seconds / 60).rounded(.down) * 60)
-    }
+    private var now: Date { clock.nowToTheMinute() }
 
     var body: some View {
         @Bindable var navigation = navigation

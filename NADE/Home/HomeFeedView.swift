@@ -173,8 +173,13 @@ struct HomeFeedView: View {
             }
             .refreshable { await model.refresh() }
         }
-        // A receipt gathered but not yet flushed must not be lost to a tab
-        // switch or a push.
+        // Covers a **push** (1a/1b replace this screen in the stack, which does
+        // fire `onDisappear`) — and only a push. A tab switch never fires it:
+        // D29 hides the inactive tabs with opacity, so this view stays in the
+        // tree. Receipts gathered before a tab switch reach the server through
+        // `scheduleSeenFlush`'s 400 ms debounce, which runs regardless of
+        // visibility; this exists so a push does not leave one waiting out the
+        // debounce on a screen that is gone.
         .onDisappear { Task { await model.flushSeen() } }
 
     }

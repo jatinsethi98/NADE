@@ -1,0 +1,19 @@
+-- The credential generation: bumped by every consent, required by every
+-- refresh write-back.
+--
+-- A fourth migration rather than an amendment (backend/DECISIONS.md D23).
+--
+-- Without it, consent races refresh (backend/DECISIONS.md D49): a refresh
+-- reads the stored refresh token, waits on Google's token endpoint, and a
+-- fresh consent commits new credentials meanwhile. The stale refresh then
+-- either overwrites the fresh tokens with its old-lineage result, or - having
+-- met `invalid_grant` on the token it spent - marks the account needs_reauth
+-- seconds after the user fixed it. Re-consent is a weekly event here (Google
+-- Testing-mode consents expire after 7 days), so the window is routinely
+-- exercised, not theoretical.
+--
+-- `save_consent` bumps this in the same statement that writes the tokens; the
+-- refresh's UPDATE and its needs_reauth marking both carry
+-- `generation = <the one they read>` and treat zero affected rows as "a
+-- consent won; discard and re-read".
+alter table gmail_tokens add column generation bigint not null default 0;

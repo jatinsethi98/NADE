@@ -75,6 +75,21 @@ final class ListTimeTests: XCTestCase {
         XCTAssertEqual(try listTime("2027-01-01T00:00:00Z"), "12:00")
     }
 
+    /// The shared calendar is memoised by zone (D88's pattern), and the memo
+    /// must not change what it answers: current zone, POSIX locale, Gregorian,
+    /// and the same value on every read. The zone-change path itself cannot be
+    /// exercised here — `TimeZone.current` is not settable in-process — which
+    /// is why the cache is keyed on the zone identifier rather than proven by
+    /// a test.
+    func testTheSharedCalendarIsStableAndCorrectAcrossReads() {
+        let first = ListTime.calendar
+        let second = ListTime.calendar
+        XCTAssertEqual(first.identifier, .gregorian)
+        XCTAssertEqual(first.timeZone, TimeZone.current)
+        XCTAssertEqual(first.locale?.identifier, "en_US_POSIX")
+        XCTAssertEqual(second, first, "the memoised calendar drifted between reads")
+    }
+
     /// The fixture world, rendered against the clock the screenshots pin.
     func testTheFixtureRowsRenderTheStringsTheScreenshotsShow() throws {
         let page = try ContractFixture.decode(WireThreadPage.self, from: "threads")

@@ -1693,7 +1693,6 @@ dependencies = [
  "chrono",
  "dotenvy",
  "encoding_rs",
- "futures",
  "hex",
  "http",
  "http-body-util",

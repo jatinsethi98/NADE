@@ -271,6 +271,8 @@ async fn walk(
         return Ok(());
     };
 
+    // Every thread the walk touched, across all pages - counted for
+    // `report.threads` and nothing else. Rollups are refreshed per page.
     let mut threads: BTreeSet<String> = BTreeSet::new();
 
     // The outer loop is the drain. After the last page, the cursor is re-read
@@ -310,10 +312,17 @@ async fn walk(
             // Network first, transaction second.
             let fetched = fetch_added(client, options, &plan.to_fetch).await?;
 
+            // Rollups per page, exactly as the full sync refreshes per batch:
+            // refreshing the cumulative set would re-run every earlier page's
+            // threads on every later page, turning a long catch-up quadratic.
+            // The cumulative `threads` set survives only to count for
+            // `report.threads`.
+            let mut page_threads: BTreeSet<String> = BTreeSet::new();
+
             let mut tx = pool.begin().await?;
             for row in &fetched.rows {
                 store::upsert_message(&mut tx, account_id, row).await?;
-                threads.insert(row.thread_id.clone());
+                page_threads.insert(row.thread_id.clone());
                 report.added.push(row.gmail_id.clone());
             }
             for (gmail_id, error) in &fetched.parse_failures {
@@ -353,7 +362,7 @@ async fn walk(
                 {
                     Some(thread_id) => {
                         report.relabelled += 1;
-                        threads.insert(thread_id);
+                        page_threads.insert(thread_id);
                     }
                     None => report.label_changes_for_uncached += 1,
                 }
@@ -363,12 +372,13 @@ async fn walk(
                     store::soft_delete_message(&mut tx, account_id, gmail_id).await?
                 {
                     report.deleted += 1;
-                    threads.insert(thread_id);
+                    page_threads.insert(thread_id);
                 }
             }
-            for thread_id in &threads {
+            for thread_id in &page_threads {
                 store::refresh_thread(&mut tx, account_id, thread_id).await?;
             }
+            threads.extend(page_threads);
 
             // P5 SEAM: enqueue `triage_message` for each of `plan.to_fetch`
             // here, inside this transaction, so the trigger commits with the
@@ -573,12 +583,14 @@ impl std::fmt::Debug for IncrementalHandler {
 #[async_trait]
 impl Handler for IncrementalHandler {
     async fn handle(&self, job: Job, _ctx: JobContext) -> Result<()> {
+        // A payload without an account - a legacy or hand-inserted row - can
+        // only mean the sole account; with several there is no honest guess.
         let account_id = match job.payload.get("account_id").and_then(|v| v.as_str()) {
             Some(raw) => Uuid::parse_str(raw).context("the account_id in the job payload")?,
-            None => match self.state.account().await? {
+            None => match self.state.sole_account().await? {
                 Some(account) => account.id,
                 None => {
-                    tracing::info!("no Gmail account is connected yet; nothing to walk");
+                    tracing::info!("no sole Gmail account to fall back to; nothing to walk");
                     return Ok(());
                 }
             },

@@ -171,6 +171,18 @@ final class MailListModel {
 
     func refresh(mailboxID: String) async {
         observe(mailboxID: mailboxID)
+        // A pop back from 1f re-fires 1e's `.task(id:)`, and the resetting
+        // fetch it runs deletes every join row and truncates the list to
+        // page 1 — under the user's scroll, for rows that landed seconds ago.
+        // While the newest page is fresh (`MailSync.listFreshWindow`) the
+        // observation above already shows the cached list, so skip the fetch;
+        // the generation machinery underneath is untouched.
+        // EDGE: fresh-but-empty still counts as fetched — the page that landed
+        // moments ago is what earns the "No mail here" caption, not this call.
+        if await sync.hasFreshThreadPage(for: mailboxID) {
+            hasFetched = true
+            return
+        }
         await sync.loadThreads(mailboxID: mailboxID, resetting: true)
         hasFetched = true
     }
@@ -194,11 +206,28 @@ final class ThreadModel {
 
     private let sync: MailSync
     private let observation = StoreObservation()
-    private var observedID: String?
+    /// Which thread the observations are for. Exposed because the model is
+    /// **shared** across pushes — see `thread(for:)`.
+    private(set) var observedID: String?
 
     init(sync: MailSync) { self.sync = sync }
 
-    var isPartial: Bool { thread?.partial ?? false }
+    /// The thread, but only when it is the one asked about.
+    ///
+    /// The model has process lifetime (`MailModels`), so between a push and
+    /// the new screen's `.task` firing it still holds the *previous* thread —
+    /// and 1f's first frame rendered that thread's subject, messages and
+    /// mailbox name over the one just tapped. Gating on the observed id makes
+    /// that frame the designed nothing-yet path instead of a flash of the
+    /// wrong conversation. Once `observe(id:)` runs, the store's first value
+    /// arrives synchronously (`.immediate`), so the gate never adds a frame.
+    func thread(for id: String) -> WireThread? {
+        observedID == id ? thread : nil
+    }
+
+    func row(for id: String) -> WireThreadRow? {
+        observedID == id ? row : nil
+    }
 
     /// The thread's own slot, falling back to an account-level failure —
     /// never another screen's paging error. EDGE (P13): this is a *second* slot
@@ -286,6 +315,13 @@ final class ThreadModel {
     func observe(id: String) {
         guard observedID != id || !observation.isRunning else { return }
         observedID = id
+        // Drop the previous thread's snapshot *before* observing the new one:
+        // if the new observation's first read fails, the old data would
+        // otherwise sit behind the new id and pass the `thread(for:)` gate as
+        // the wrong conversation. On the happy path `.immediate` replaces
+        // these synchronously, so clearing costs no frame.
+        thread = nil
+        row = nil
         observation.stop()
         observation.keep(sync.store.observeThread(
             id: id,

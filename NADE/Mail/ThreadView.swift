@@ -87,17 +87,26 @@ struct ThreadView: View {
     /// piece of state here — the download's lifecycle lives on `ThreadModel`.
     @State private var showsOriginal: Set<String> = []
 
+    /// Read through `ThreadModel.thread(for:)`, never `model.thread` raw: the
+    /// model is shared across pushes, and until its `.task` runs it still
+    /// holds the previous thread. The gate renders the nothing-yet path for
+    /// that frame instead of flashing the wrong conversation.
+    private var thread: WireThread? { model.thread(for: threadID) }
+    private var row: WireThreadRow? { model.row(for: threadID) }
+
     private var subject: String {
-        model.thread?.subject ?? model.row?.subject ?? ""
+        thread?.subject ?? row?.subject ?? ""
     }
+
+    private var isPartial: Bool { thread?.partial ?? false }
 
     var body: some View {
         VStack(spacing: 0) {
-            ThreadNavBar(title: model.thread?.mailboxName ?? backTitle) {
+            ThreadNavBar(title: thread?.mailboxName ?? backTitle) {
                 navigation.popMail()
             }
             Hairline()
-            body(for: model.thread)
+            body(for: thread)
             Hairline()
             askBarChrome
         }
@@ -134,7 +143,7 @@ struct ThreadView: View {
                 // is *produced by* an upstream failure, so a thread with gaps
                 // and a connection that is currently down are routinely true at
                 // the same time. One string would overwrite one of them.
-                if model.isPartial {
+                if isPartial {
                     StateCaption(StateCopy.partialThread, alignment: .leading,
                                  color: Theme.Color.ink62)
                         .padding(.top, Metrics.firstMetaTop)
@@ -197,7 +206,11 @@ struct ThreadView: View {
     /// replaces it with `NTextField.Metrics.askThread` and a live `NButton`.
     private var askBarChrome: some View {
         HStack(spacing: Metrics.barGap) {
-            Text("Reply, or ask for a draft…")
+            // `v1 →` the mockup's "Reply, or ask for a draft…" promises a
+            // reply, which v1 cannot make — no outbound actions (PLAN C1/C2,
+            // DESIGN §4). The docs lane records the deviation; this is the
+            // string's landing.
+            Text("Ask for a draft or an answer…")
                 .font(Theme.Font.body(Metrics.barField.fontSize))
                 .foregroundStyle(Theme.Color.ink62)
                 .lineLimit(1)

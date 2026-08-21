@@ -243,6 +243,67 @@ async fn a_finished_maintenance_job_does_not_block_the_next_one() {
     assert!(again.is_some(), "maintenance stopped after its first run");
 }
 
+/// D45: the ticker serves every account, each with its own due-ness and its
+/// own deduplicated job - one mailbox's overdue work must neither suppress nor
+/// stand in for another's.
+#[tokio::test]
+async fn a_tick_enqueues_one_job_per_due_account() {
+    let db = test_db().await;
+    let state = crate::state::AppState::new(
+        db.pool.clone(),
+        crate::test_support::test_config(crate::config::Env::Prod),
+    );
+    let queue = crate::jobs::Queue::new(db.pool.clone(), crate::jobs::QueueConfig::default());
+
+    // EDGE (empty input): no accounts, no work, no error.
+    assert!(!tick_once(&state, &queue).await.unwrap());
+
+    // Two live accounts with no sync_state - both due for everything - and a
+    // paused one, which must stop the ticker rather than feed it.
+    let mut live = Vec::new();
+    for email in ["a@example.com", "b@example.com"] {
+        let id: Uuid = sqlx::query_scalar(
+            "insert into accounts (email, status) values ($1, 'ok') returning id",
+        )
+        .bind(email)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+        live.push(id);
+    }
+    sqlx::query(
+        "insert into accounts (email, status) values ('paused@example.com', 'needs_reauth')",
+    )
+    .execute(&db.pool)
+    .await
+    .unwrap();
+
+    assert!(tick_once(&state, &queue).await.unwrap());
+    let mut keys: Vec<String> =
+        sqlx::query_scalar("select dedupe_key from jobs where kind = $1 order by dedupe_key")
+            .bind(KIND)
+            .fetch_all(&db.pool)
+            .await
+            .unwrap();
+    let mut expected: Vec<String> = live.iter().map(|id| format!("{DEDUPE_KEY}:{id}")).collect();
+    expected.sort();
+    keys.sort();
+    assert_eq!(
+        keys, expected,
+        "one job per live account, none for the paused one"
+    );
+
+    // EDGE (duplicate delivery): a second tick changes nothing while both jobs
+    // are still pending.
+    assert!(!tick_once(&state, &queue).await.unwrap());
+    let jobs: i64 = sqlx::query_scalar("select count(*) from jobs where kind = $1")
+        .bind(KIND)
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(jobs, 2);
+}
+
 /// Criterion S16 - a renewal slower than Gmail's watch lifetime is refused at
 /// start-up, because it guarantees the registration lapses.
 #[test]

@@ -40,7 +40,8 @@ pub const UNITS_PER_SECOND: f64 = 250.0;
 /// against the same per-user concurrency budget that produced the live 429s.
 /// Every call in this crate is sequential anyway, so this costs nothing and
 /// makes "we never ran two Gmail calls at once" true by construction rather
-/// than by the shape of the current call sites.
+/// than by the shape of the current call sites. The bucket is per account, so
+/// this is the per-user figure it was live-tested as - not a process-wide one.
 pub const MAX_CONCURRENT_REQUESTS: usize = 1;
 
 /// How many sub-requests one `multipart/mixed` batch may carry.
@@ -92,8 +93,10 @@ struct State {
 
 /// A token bucket over quota units, plus the concurrency gate.
 ///
-/// Shared through `GmailRuntime`, so every client for every account debits the
-/// same budget and queues behind the same gate.
+/// **One bucket per account**, handed out by `GmailRuntime::bucket_for`:
+/// Gmail's limits are per user, so every client for one account debits that
+/// account's budget and queues behind that account's gate, and two accounts
+/// never throttle each other.
 #[derive(Debug)]
 pub struct Bucket {
     state: Mutex<State>,

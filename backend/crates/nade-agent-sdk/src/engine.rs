@@ -509,7 +509,10 @@ impl<L: Llm, J: Journal> Engine<L, J> {
     /// last durable entry. See
     /// [`EngineConfig::clock_skew_leeway`](EngineConfig::clock_skew_leeway).
     fn now(&self, state: &RunState) -> DateTime<Utc> {
-        Utc::now().max(state.clock_floor)
+        // Whole seconds, matching `Entry::new`: every timestamp this engine
+        // journals must satisfy the wire contract's second precision, and the
+        // floor is itself built from journaled (already-truncated) instants.
+        chrono::SubsecRound::trunc_subsecs(Utc::now(), 0).max(state.clock_floor)
     }
 
     fn is_expired(&self, expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {

@@ -86,6 +86,11 @@ nonisolated enum StateCopy {
                comment: "Shown when a thread cannot be read out of the local store")
     }
 
+    static var threadOpenFailed: String {
+        String(localized: "Couldn't open that conversation.",
+               comment: "Shown on the thread screen when its detail could not be loaded")
+    }
+
     static var partialThread: String {
         String(localized: "Some of this conversation is missing.",
                comment: "Shown on a thread whose messages could not all be loaded")
