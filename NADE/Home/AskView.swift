@@ -93,7 +93,6 @@ struct AskView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     queryBubble
@@ -104,11 +103,25 @@ struct AskView: View {
                 .padding(.bottom, M.scrollBottom)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            Hairline()
-            dock
+            // Stays a sibling, and takes the glass without taking the overlay.
+            // `M.dockBottom` is measured from the display edge — see
+            // `ChromeBar` for why that rules out `safeAreaInset` here. It also
+            // keeps the keyboard behaviour the screen already had.
+            dock.nadeChromeBar()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Theme.Color.bg)
+        // Both bands are chrome and both now float over the answer (D98).
+        // `safeAreaInset` insets the safe area at each edge, gives each bar
+        // Liquid Glass, and applies the scroll edge effect — so a streaming
+        // answer fades out under the greeting at the top and under the ask
+        // field at the bottom instead of stopping dead at a hairline.
+        //
+        // The bottom bar is the one that earns the change: a docked field is
+        // the single most-looked-at control on this screen, and the keyboard
+        // rides the safe area, so `safeAreaInset` also puts it in the right place
+        // when the keyboard is up.
+        .safeAreaInset(edge: .top, spacing: 0) { header.nadeChromeBar() }
         .task { model.start() }
         .onDisappear { model.cancel() }
         .alert(Self.editTitle, isPresented: Binding(get: { model.editing != nil },

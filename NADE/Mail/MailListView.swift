@@ -47,17 +47,41 @@ struct MailListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            MailListHeader(
-                title: selected?.name ?? "",
-                accountEmail: accountEmail,
-                back: { navigation.popMail() }
-            )
-            chipRow
-            Hairline()
             caption
             rows
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // No `.scrollEdgeEffectStyle` here, and it was tried. `.soft` on the
+        // top edge produced a screenshot byte-comparable to the one without it:
+        // the effect exists to keep content legible under a *system* bar, and
+        // this bar carries its own glass through `nadeChromeBar()`, which
+        // already covers the region the effect would fade. A modifier that
+        // changes nothing is a claim nothing checks (D39).
+        // The header and the chip row are chrome, so they leave the content
+        // stack and become a bar floating over it. `safeAreaInset` plus `nadeChromeBar()` is
+        // API for exactly this: it insets the safe area by the bar's height,
+        // gives the bar Liquid Glass, and applies the scroll edge effect that
+        // keeps rows legible as they pass underneath.
+        //
+        // Applied to the whole body rather than to the `ScrollView` inside
+        // `rows`, because `rows` is a `ScrollView` only when there are rows —
+        // the empty and offline branches are a caption and a `Spacer`. One
+        // placement that works for all three beats a conditional one.
+        //
+        // The `Hairline()` that used to close the chip row is gone with it. Its
+        // job was to say where chrome ended and content began, and that is what
+        // the scroll edge effect now says, continuously and while moving.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            VStack(spacing: 0) {
+                MailListHeader(
+                    title: selected?.name ?? "",
+                    accountEmail: accountEmail,
+                    back: { navigation.popMail() }
+                )
+                chipRow
+            }
+            .nadeChromeBar()
+        }
         .task(id: mailboxID) { await model.refresh(mailboxID: mailboxID) }
     }
 

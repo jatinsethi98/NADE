@@ -119,9 +119,7 @@ struct HomeFeedView: View {
     // MARK: - Feed
 
     private var feedState: some View {
-        VStack(spacing: 0) {
-            feedHeader
-            Hairline()
+        Group {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     grabberStrip
@@ -173,10 +171,20 @@ struct HomeFeedView: View {
             }
             .refreshable { await model.refresh() }
         }
+        // The date, the "N NEW" count and the pinned ask field are chrome, so
+        // they leave the content stack and become a bar floating over the feed.
+        // `safeAreaInset` insets the safe area by the bar's height, gives it
+        // Liquid Glass, and applies the scroll edge effect that keeps a feed row
+        // legible as it passes underneath (D98). The `Hairline()` that used to
+        // close the band goes with it — that separation is the edge effect's job
+        // now, and it does it while the content is moving rather than only at
+        // rest.
+        .safeAreaInset(edge: .top, spacing: 0) { feedHeader.nadeChromeBar() }
         // A receipt gathered but not yet flushed must not be lost to a tab
-        // switch or a push.
+        // switch or a push. Since D98 this also fires on every departure from
+        // the Ask tab rather than only when 2a is torn down, which flushes
+        // sooner and is strictly better — `flushSeen` was already idempotent.
         .onDisappear { Task { await model.flushSeen() } }
-
     }
 
     static let footerCopy = String(

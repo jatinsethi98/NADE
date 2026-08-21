@@ -42,18 +42,26 @@ struct SettingsView: View {
     let model: SettingsModel
 
     var body: some View {
-        VStack(spacing: 0) {
-            SettingsHeader { navigation.popMail() }
-            Hairline()
-            ScrollView {
-                VStack(spacing: 0) {
-                    account
-                    connection
-                    Spacer(minLength: Theme.Space.s6)
-                }
+        ScrollView {
+            VStack(spacing: 0) {
+                account
+                connection
+                Spacer(minLength: Theme.Space.s6)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // Chrome leaves the content stack and becomes a bar floating over it.
+        // `safeAreaInset` insets the safe area by the bar's height and
+        // `nadeChromeBar()` gives it
+        // Liquid Glass, and applies the scroll edge effect that keeps content
+        // legible as it passes underneath (D98).
+        //
+        // The `Hairline()` that used to close the band is gone with it. Its job
+        // was to say where chrome ended and content began; that is what the
+        // scroll edge effect now says, continuously and while moving.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            SettingsHeader { navigation.popMail() }.nadeChromeBar()
+        }
         .sheet(isPresented: Bindable(model).isPairing) {
             PairingView(model: model)
         }

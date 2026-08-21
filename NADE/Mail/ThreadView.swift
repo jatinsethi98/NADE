@@ -93,26 +93,38 @@ struct ThreadView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ThreadNavBar(title: model.thread?.mailboxName ?? backTitle) {
-                navigation.popMail()
-            }
-            Hairline()
             body(for: model.thread)
-            Hairline()
-            askBarChrome
+            // Stays a sibling, and takes the glass without taking the overlay.
+            // `Metrics.barBottom` is 30 measured from the display edge — see
+            // `ChromeBar` for why that rules out `safeAreaInset` here.
+            askBarChrome.nadeChromeBar()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .task(id: threadID) { await model.load(id: threadID, in: mailboxID) }
-        .quickLookPreview(Binding(get: { model.previewURL },
-                                  set: { model.previewURL = $0 }))
-        .onDisappear { model.stopAttachments() }
-        .alert(model.attachmentProblem ?? "",
-               isPresented: Binding(get: { model.attachmentProblem != nil },
-                                    set: { if !$0 { model.dismissAttachmentProblem() } })) {
-            Button(String(localized: "OK", comment: "Dismisses an attachment error")) {
-                model.dismissAttachmentProblem()
+            // Nav bar and ask band are chrome, so both float over the thread
+            // (D98). This is the screen where the change reads loudest: 1f is
+            // the app's longest scroll, and a message now fades out under each
+            // bar rather than being cut off at a hairline.
+            //
+            // 1f carries no tab bar — `MailRoute.hidesTabBar`, applied in
+            // `MailTabRoot` — so the bottom bar is the only thing down there and
+            // does not stack glass on glass.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                ThreadNavBar(title: model.thread?.mailboxName ?? backTitle) {
+                    navigation.popMail()
+                }
+                .nadeChromeBar()
             }
-        }
+            .task(id: threadID) { await model.load(id: threadID, in: mailboxID) }
+            .quickLookPreview(Binding(get: { model.previewURL },
+                                      set: { model.previewURL = $0 }))
+            .onDisappear { model.stopAttachments() }
+            .alert(model.attachmentProblem ?? "",
+                   isPresented: Binding(get: { model.attachmentProblem != nil },
+                                        set: { if !$0 { model.dismissAttachmentProblem() } })) {
+                Button(String(localized: "OK", comment: "Dismisses an attachment error")) {
+                    model.dismissAttachmentProblem()
+                }
+            }
     }
 
     // MARK: Body

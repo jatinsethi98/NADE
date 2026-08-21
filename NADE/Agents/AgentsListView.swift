@@ -40,19 +40,33 @@ struct AgentsListView: View {
     let now: Date
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            Hairline()
-            filterRow
-            Hairline()
-            list
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Theme.Color.bg)
-        .task {
-            model.start()
-            await model.refresh()
-        }
+        list
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .background(Theme.Color.bg)
+        // Chrome leaves the content stack and becomes a bar floating over it.
+        // `safeAreaInset` insets the safe area by the bar's height and
+        // `nadeChromeBar()` gives it
+        // Liquid Glass, and applies the scroll edge effect that keeps content
+        // legible as it passes underneath (D98).
+        //
+        // The `Hairline()` that used to close the band is gone with it. Its job
+        // was to say where chrome ended and content began; that is what the
+        // scroll edge effect now says, continuously and while moving.
+            //
+            // The filter row travels with the header rather than staying with
+            // the list: DESIGN.md §1b puts it above the rule, and a filter that
+            // scrolls away is a filter you cannot see is applied.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                VStack(spacing: 0) {
+                    header
+                    filterRow
+                }
+                .nadeChromeBar()
+            }
+            .task {
+                model.start()
+                await model.refresh()
+            }
     }
 
     private var header: some View {

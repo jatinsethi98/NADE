@@ -35,6 +35,16 @@ struct NAskField: View {
                                     glyph: "arrow.up", glyphSize: 17)
     }
 
+    /// How near the field and the button have to be before their glass merges.
+    ///
+    /// `GlassEffectContainer(spacing:)` decides when two effects stop being two
+    /// shapes and start being one: larger blends sooner. The row's own gap is
+    /// 10 (§2), and this is deliberately **below** it — the pill and the circle
+    /// are two controls that do two things, and the design draws them as two
+    /// separate strokes. The container is here for the other thing it buys,
+    /// which is one glass pass for both rather than two.
+    static let glassSpacing: CGFloat = 4
+
     /// `DESIGN.md` §2 gives three of the four rows the same placeholder, so it
     /// is the default rather than something every caller repeats.
     static let defaultPlaceholder = String(
@@ -69,6 +79,20 @@ struct NAskField: View {
     private var canSubmit: Bool { !text.nadeIsBlank }
 
     var body: some View {
+        // The ask field is the app's most-looked-at control and it sits in the
+        // chrome layer on all four screens that draw it, so it is the one
+        // component that takes Liquid Glass (D98). Content keeps its Classical
+        // stroke-not-fill grammar; this is chrome.
+        //
+        // The container is what makes the pill and the circle one glass pass
+        // rather than two, and what lets them morph together if a future state
+        // moves them — see `glassSpacing`.
+        GlassEffectContainer(spacing: Self.glassSpacing) {
+            row
+        }
+    }
+
+    private var row: some View {
         HStack(spacing: Theme.Space.s2 + 0.8) {   // §2: gap 10
             NTextField(placeholder, text: $text, metrics: metrics.field)
                 .accessibilityIdentifier(identifier)
@@ -79,6 +103,13 @@ struct NAskField: View {
                 // C1/C2, DESIGN §4). The gallery's `Send` sweep cannot see it,
                 // because the system keyboard is not in the app's element tree.
                 .submitLabel(.go)
+                // After the field's own modifiers, never before: the effect
+                // captures what is behind the view it is attached to, and
+                // attaching it first would have it capture the bare text.
+                // The design's border still draws on top — `NTextField` strokes
+                // its own capsule, accent when focused — so the stroke reads as
+                // the rim of the glass rather than being replaced by it.
+                .glassEffect(.regular, in: .capsule)
 
             // `NButtonStyle(variant: .icon, corner: .pill)` — the style whose own
             // doc comments read "the ask field's circular send button" and "the
@@ -91,6 +122,14 @@ struct NAskField: View {
                 NIcon(metrics.glyph, size: metrics.glyphSize)
             }
             .buttonStyle(NButtonStyle(variant: .icon, corner: .pill, iconBox: metrics.circle))
+            // `.interactive()` is what makes the glass answer a touch the way
+            // every system control does. The style keeps its own press wash
+            // underneath, which is the design's, so the two read as one press.
+            //
+            // Not `.buttonStyle(.glass)`: that would take the whole control,
+            // and with it the accent stroke, `NButton.disabledOpacity` and the
+            // `nadeHitTarget()` the 38 pt variant needs to clear 44 pt.
+            .glassEffect(.regular.interactive(), in: .circle)
             .nadeHitTarget()
             .disabled(!canSubmit)
             .accessibilityLabel(Text("Ask", comment: "The ask field's submit button"))
