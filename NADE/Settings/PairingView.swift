@@ -88,6 +88,10 @@ struct PairingView: View {
         .padding(.top, Metrics.topPadding)
         .padding(.horizontal, Theme.Space.screen)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Theme.Color.bg)
+        // No `.background(Theme.Color.bg)`, for the same reason `ScheduleSheet`
+        // dropped its `surface` fill: this is presented as a sheet, and on iOS
+        // 26 a sheet's own material, radius and edge inset are the chrome. A
+        // flat ground painted over them throws all three away.
+
     }
 }

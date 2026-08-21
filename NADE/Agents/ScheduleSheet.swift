@@ -14,9 +14,6 @@ struct ScheduleSheet: View {
         static let horizontal = Theme.Space.screen
         static let top: CGFloat = 16
         static let bottom: CGFloat = 34
-        static let grabberW: CGFloat = 38
-        static let grabberH: CGFloat = 4
-        static let grabberBottom: CGFloat = 16
         static let titleSize: CGFloat = 20
         static let titleBottom: CGFloat = 18
 
@@ -49,11 +46,14 @@ struct ScheduleSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Capsule()
-                .fill(Theme.Color.neutral400)
-                .frame(width: M.grabberW, height: M.grabberH)
-                .padding(.bottom, M.grabberBottom)
-                .accessibilityHidden(true)
+            // The 38 x 4 `neutral-400` grabber the mockup draws is the system's
+            // now — `.presentationDragIndicator(.visible)` below. Two grabbers
+            // is one too many, and the drawn one was never the affordance: iOS
+            // has always let you drag the sheet whether or not we painted a
+            // capsule at the top of it. What the design specified was a *look*,
+            // and on iOS 26 the sheet brings its own.
+            //
+            // The `grabberW` / `grabberH` / `grabberBottom` metrics go with it.
 
             Text("How often")
                 .font(Theme.Font.heading(M.titleSize))
@@ -80,9 +80,18 @@ struct ScheduleSheet: View {
         .padding(.top, M.top)
         .padding(.horizontal, M.horizontal)
         .padding(.bottom, M.bottom)
-        .background(Theme.Color.surface)
+        // No `.background(Theme.Color.surface)`. `surface` (`#eae9e9`) is
+        // DESIGN.md §1's "sheets, dialogs" fill, and painting it over the sheet
+        // replaces exactly what iOS 26 gives a sheet for free: the material,
+        // the larger corner radius, the inset that lets the parent show at the
+        // edges, and the opacity that firms up as a half sheet is dragged to
+        // full. A flat fill on top of all that is the "custom background on a
+        // presentation" the adoption guide asks you to delete.
+        //
+        // The sheet is chrome, so it goes glass; its *contents* are unchanged
+        // and still Classical.
         .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.hidden)
+        .presentationDragIndicator(.visible)
     }
 
     // MARK: - Repeat every

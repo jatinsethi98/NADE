@@ -30,6 +30,7 @@ struct GalleryView: View {
     @State private var longField = "supercalifragilisticexpialidocious-token-0123456789"
     @State private var tab: NTab = .ask
     @State private var hitChip = false
+    @State private var askText = ""
 
     enum NoteMode: String, CaseIterable { case read = "Read", write = "Write" }
     enum Invocation: String, CaseIterable { case onMail, onSchedule, manual }
@@ -603,9 +604,16 @@ struct GalleryView: View {
     /// size, and rendering four copies of a system bar would document UIKit
     /// rather than this design.
     ///
-    /// What replaces it is the chrome this app *does* still draw: the bar as
-    /// the system gives it to us, once and live, plus the glass surfaces added
-    /// in Step 3.
+    /// What replaces it is the chrome this app *does* still draw: the system
+    /// bar once and live, and the two surfaces that took Liquid Glass by hand —
+    /// a screen's own header band (`nadeChromeBar`) and the ask field.
+    ///
+    /// **What this section cannot show.** Reduce Transparency and Increase
+    /// Contrast both change how every shape below renders, and both are
+    /// read-only environment values — the same problem the Reduce Motion
+    /// section has, and with the same answer: the setting is turned on in the
+    /// simulator's Settings app and the section is shot again. `docs/BENCH.md`
+    /// records the two legs.
     private var glassSection: some View {
         GallerySection("Glass chrome", id: "glass") {
             GalleryLabel("Tab bar — native TabView, live; tap to change the selection")
@@ -622,8 +630,60 @@ struct GalleryView: View {
             }
             .tint(Theme.Color.accent)
             .frame(height: Self.tabBarSampleHeight)
+
+            // Glass shows what is *behind* it, so a sample on the gallery's flat
+            // `bg` shows almost nothing. Each of the two below sits over the
+            // same band of text, which is what the app puts under them.
+            GalleryLabel("Header band — `nadeChromeBar()`, over scrolling text")
+            glassOverText {
+                HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s2) {
+                    Text("Mailboxes")
+                        .font(Theme.Font.heading(23))
+                        .foregroundStyle(Theme.Color.ink)
+                    Spacer(minLength: 0)
+                    Text("Settings")
+                        .font(Theme.Font.body(13))
+                        .foregroundStyle(Theme.Color.accent)
+                }
+                .padding(.vertical, Theme.Space.s3)
+                .padding(.horizontal, Theme.Space.screen)
+                .nadeChromeBar()
+            }
+
+            GalleryLabel("Ask field — glass pill and interactive glass circle, docked size")
+            glassOverText {
+                NAskField(text: $askText, metrics: .docked, identifier: "gallery.ask.docked") {}
+                    .padding(.vertical, Theme.Space.s2)
+                    .padding(.horizontal, Theme.Space.s4)
+            }
         }
     }
+
+    /// A glass sample over something worth refracting.
+    ///
+    /// The under-layer is deliberately ordinary body text at the app's own 15 pt
+    /// — a screenshot of glass over an empty ground is a screenshot of nothing,
+    /// and every glass surface in this app sits over a list or a thread.
+    @ViewBuilder
+    private func glassOverText<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        ZStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: Theme.Space.s1) {
+                ForEach(0..<4, id: \.self) { _ in
+                    Text(Self.glassUnderlay)
+                        .font(Theme.Font.body(15))
+                        .foregroundStyle(Theme.Color.ink)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityHidden(true)
+
+            content()
+                .padding(.top, Theme.Space.s6)
+        }
+    }
+
+    private static let glassUnderlay =
+        "Priya Raghavan · Staff Product Designer at Kettle · Yesterday"
 
     // MARK: 10 · Edge cases
 
