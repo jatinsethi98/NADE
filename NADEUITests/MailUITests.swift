@@ -24,7 +24,7 @@ final class MailUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["mailboxes.title"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["mailboxes.account"].exists)
         XCTAssertTrue(app.buttons["mailboxes.label.INBOX"].exists)
-        XCTAssertTrue(app.buttons["tab.mail"].exists, "1g carries the tab bar")
+        XCTAssertTrue(app.tab("Mail").exists, "1g carries the tab bar")
     }
 
     /// The mockup's "All inboxes" row, under one account.

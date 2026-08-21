@@ -102,17 +102,13 @@ final class HitTargetUITests: XCTestCase {
         )
     }
 
-    /// The tab bar is the one control whose target grew by moving its own
-    /// padding inside the buttons rather than by an overflowing background, so
-    /// it is checked in the shell rather than the gallery
-    /// (`TabBarUITests.testEachTabsFrameCoversTheWholeColumn`). This asserts the
-    /// gallery's copy agrees, so a regression shows up in both places.
-    func testTabBarColumnsInTheGalleryAreAlso44() {
-        let app = launchGallery(section: "tabbar")
-        for id in ["ask", "mail", "notes", "calendar"] {
-            let tab = app.buttons["tab.\(id)"].firstMatch
-            XCTAssertTrue(tab.waitForExistence(timeout: 10), "tab.\(id) is not in the gallery")
-            XCTAssertGreaterThanOrEqual(tab.frame.height, Self.minimum, "tab.\(id) is \(tab.frame.height) pt tall")
-        }
-    }
+    // `testTabBarColumnsInTheGalleryAreAlso44` stood here. It asserted that
+    // the gallery's copy of `NTabBar` had the same 44 pt columns as the shell's,
+    // so a regression would show up twice. Both copies are gone (D98): the
+    // shell's bar is a native `TabView` and the gallery now shows one live
+    // sample of that same system bar rather than a second hand-drawn one.
+    //
+    // The 44 pt claim did not go away, it moved: `TabBarUITests` checks the bar
+    // that actually ships. Checking UIKit's bar twice, once through the gallery,
+    // would be two readings of one fact rather than two facts.
 }

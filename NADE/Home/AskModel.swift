@@ -27,6 +27,26 @@ final class AskModel {
     /// cache-over-failure rule (A16/D74) restated per screen instead of once.
     private(set) var problem: ConnectionProblem?
     private(set) var isStreaming = false
+    /// **A finished session never runs twice.**
+    ///
+    /// `AskView` pairs `.task { model.start() }` with
+    /// `.onDisappear { model.cancel() }`. Under the old shell that pair fired
+    /// once each, because all four screens stayed in the view tree and a tab
+    /// switch only changed their opacity (D29). D98's native `TabView` really
+    /// does remove the outgoing tab's content, so leaving the Ask tab now calls
+    /// `cancel()` — which clears `task` — and returning calls `start()` again.
+    ///
+    /// With `task == nil` as the only guard, the second run re-asked the same
+    /// question and `apply(.token)` **appended** to prose that was already
+    /// complete: the answer rendered twice, back to back, with no seam.
+    /// `HomeUITests.testAnAnswerSurvivesLeavingAndReturningToTheTab` caught it.
+    ///
+    /// Set on every terminal outcome — the stream ending, an `error` event, a
+    /// thrown `APIFailure` — and deliberately **not** set when the task returns
+    /// because it was cancelled. A session cut off mid-flight is the one case
+    /// where re-asking is right, and `start()` resets the accumulated state
+    /// before it does, so a partial answer is replaced rather than spliced.
+    private(set) var hasFinished = false
     /// Set once "Save as draft" has succeeded, so 1a can render its italic
     /// confirmation instead of the button.
     private(set) var savedAgentID: String?
@@ -49,12 +69,33 @@ final class AskModel {
     )
 
     func start() {
-        guard task == nil else { return }
+        // EDGE: called on every appearance, which since D98 means every return
+        // to the Ask tab and not only the push. Already running, or already
+        // over, both mean there is nothing to do — see `hasFinished`.
+        guard task == nil, !hasFinished else { return }
+
+        // EDGE: what is left here is a session that was cancelled part-way, so
+        // this is a fresh ask and everything the last one accumulated goes.
+        // Appending would splice two answers into one paragraph; keeping the
+        // old `route` would render the new stream in the previous state's
+        // layout for as long as it took the new `route` event to arrive.
+        //
+        // `savedAgentID`, `editing` and `editorText` are **not** cleared: they
+        // are the user's, not the stream's.
+        route = nil
+        prose = ""
+        results = []
+        draft = nil
+        sources = []
+        problem = nil
+
         isStreaming = true
         task = Task { [weak self] in
             guard let self else { return }
             do {
                 for try await event in sync.ask(query: query, threadID: nil, routeHint: routeHint) {
+                    // Returns rather than falls through, so `hasFinished` stays
+                    // false and the interrupted session can be re-asked.
                     if Task.isCancelled { return }
                     apply(event)
                 }
@@ -67,9 +108,16 @@ final class AskModel {
                 problem = ConnectionProblem(message: StateCopy.storeUnreadable)
             }
             isStreaming = false
+            // Every path that reaches here is terminal: the stream ended, or it
+            // threw. A stream that ends in an `error` event is terminal too and
+            // `apply` has already kept the partial answer beside the message —
+            // re-asking on the next appearance would throw that away.
+            hasFinished = true
         }
     }
 
+    /// Stop streaming. Not "give up on this query": `task` is cleared so that
+    /// `start()` can run again, and whether it does is `hasFinished`'s call.
     func cancel() {
         task?.cancel()
         task = nil
@@ -89,6 +137,7 @@ final class AskModel {
         case .done(let sources):
             self.sources = sources
             isStreaming = false
+            hasFinished = true
         case .error(_, let message):
             // The server writes these for the user (`API.md` §0), so it is
             // rendered rather than replaced — **beside** whatever already
@@ -98,6 +147,7 @@ final class AskModel {
             // got.
             problem = ConnectionProblem(message: message)
             isStreaming = false
+            hasFinished = true
         }
     }
 

@@ -65,9 +65,9 @@ final class HomeUITests: XCTestCase {
         let answer = prose.label
         XCTAssertFalse(answer.isEmpty, "the answer stream produced nothing")
 
-        app.buttons["tab.mail"].tap()
+        app.tab("Mail").tap()
         XCTAssertTrue(app.staticTexts["mailboxes.title"].waitForExistence(timeout: 5))
-        app.buttons["tab.ask"].tap()
+        app.tab("Ask").tap()
 
         XCTAssertTrue(prose.waitForExistence(timeout: 5),
                       "1a was rebuilt: the answer is gone and cannot be recovered")
@@ -115,7 +115,7 @@ final class HomeUITests: XCTestCase {
 
         // 1c is a modal with no tab bar (DESIGN §2's navigation map).
         XCTAssertTrue(app.staticTexts["builder.name"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["tab.mail"].isHittable, "1c is modal: the tab bar is covered")
+        XCTAssertFalse(app.tab("Mail").isHittable, "1c is modal: the tab bar is covered")
     }
 
     /// **The second regression.** "New" called `ask("")`, which is correctly

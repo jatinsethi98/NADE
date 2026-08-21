@@ -26,6 +26,30 @@ enum NADELaunch {
 }
 
 extension XCUIApplication {
+    /// One tab in the system tab bar, by the title it shows.
+    ///
+    /// `NTabBar` gave each of its four buttons `tab.<rawValue>`, and seven
+    /// tests addressed them that way. D98's native `TabView` does not: an
+    /// identifier set on a `Tab`, or on an explicit `Label` inside one, arrives
+    /// at the rendered button as the empty string on iOS 26.5. Both forms were
+    /// tried before this helper was written.
+    ///
+    /// So the tabs are addressed by the label VoiceOver actually speaks. That
+    /// is not a new coupling to visible copy — `TabBarUITests` asserts those
+    /// four labels directly, so the suite already fails loudly if a title
+    /// changes rather than quietly finding nothing.
+    ///
+    /// Scoped to `tabBars` rather than to all buttons, which the identifier
+    /// form did not need to be: "Mail" is a plausible label for a mailbox row
+    /// on 1g, and an unscoped query would match it. It also makes the negative
+    /// assertion exact — on 1f the bar is hidden, so there is no tab bar to
+    /// look in and `.exists` is false for the right reason.
+    func tab(_ title: String) -> XCUIElement {
+        tabBars.buttons[title]
+    }
+}
+
+extension XCUIApplication {
     /// A launched app, with everything a UI test needs pinned.
     ///
     /// The time zone matters as much as the clock: "today" is the *device's*

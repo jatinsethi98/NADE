@@ -64,9 +64,15 @@ private struct RootView: View {
         .task { await composition.sync.refresh() }
         // Coming back from the browser after Gmail consent, and coming back at
         // all. Without this the app can sit in `needsGmail` after a successful
-        // sign-in until something else happens to refresh — D29 keeps the Mail
-        // screens resident, so returning from Safari does not re-run a `.task`
-        // — and a first sync that outlasts the poll window never recovers.
+        // sign-in until something else happens to refresh, and a first sync
+        // that outlasts the poll window never recovers.
+        //
+        // The reason used to be D29: all four screens stayed resident, so
+        // returning from Safari re-ran no `.task` anywhere. D98's `TabView`
+        // does rebuild the tab it shows, which weakens that argument without
+        // retiring it — the screen you return to is whichever one you left, and
+        // it may be a tab whose `.task` does not refresh the account. The scene
+        // phase is still the only signal that means "the app is back".
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active else { return }
             Task { await composition.sync.refresh() }

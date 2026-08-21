@@ -6,10 +6,22 @@
 //  come from the store through `ValueObservation`, so a refresh that changes
 //  nothing costs one query and no redraw.
 //
-//  **They start at launch, not at tab selection.** `RootTabView` keeps all four
-//  screens in the tree (D29), so `.task` runs for Mail while Ask is on screen.
-//  That is a requirement on this file, not an accident: every `start()` below
-//  has to be cheap and idempotent.
+//  **They start on first visit, and again on every return.** This used to read
+//  "at launch, not at tab selection": `RootTabView` held all four screens in
+//  the tree at once (D29) and only changed their opacity, so `.task` ran for
+//  Mail while Ask was on screen and never ran twice.
+//
+//  D98's native `TabView` builds a tab's content the first time that tab is
+//  selected and tears it down when you leave, so both halves of that sentence
+//  changed: Mail's observations now begin when Mail is first opened, and every
+//  `.task` here re-fires each time the tab comes back.
+//
+//  The requirement on this file survived the change and got stricter. Every
+//  `start()` below has to be cheap and **idempotent** — each is guarded by
+//  `!observation.isRunning`, so a second call adds no second observation — and
+//  every `refresh()` has to be a re-fetch that replaces rather than appends.
+//  `AskModel` was the one place that appended, and returning to the Ask tab
+//  rendered its answer twice until `hasFinished` was added.
 //
 
 import SwiftUI

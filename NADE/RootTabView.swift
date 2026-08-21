@@ -2,28 +2,42 @@
 //  RootTabView.swift
 //  NADE
 //
-//  The app shell: four tabs over `NTabBar`, with placeholder screens.
+//  The app shell: four tabs in a native `TabView`, with placeholder screens.
 //
 //  P2 replaced `.mail` with `MailTabRoot`; P3/P7 replace the other three
 //  (AskView, NotesListView, CalendarView).
 //
-//  Two things did have to change here at P2, and the P1 note that said nothing
-//  would was optimistic on both counts:
+//  **This reverses D22 and D26.** Both were right for the design they were
+//  written against, and the Liquid Glass ruling replaces that design's chrome
+//  layer:
 //
-//  * The **selection moved out**, into `AppNavigation`. The tab bar has to know
-//    the Mail stack's top route to decide whether to draw itself at all, and a
-//    screenshot launch argument has to be able to write both.
-//  * The bar is now **conditional**. DESIGN.md §2's map gives 1f — a pushed
-//    detail — no tab bar, while 1e, 1g and 1k all keep it.
+//  * D22 kept `TabView` out because it cannot be given the design's 1 pt top
+//    hairline, its 18 pt light-stroke glyphs or its 10.5 pt uppercase 0.09 em
+//    labels. Still true — that type is the price of the system bar, and it is
+//    paid deliberately (DESIGN.md §6, IOS_DECISIONS D98).
+//  * D26 kept the bar a **sibling** of the scrolling band, so content ended at
+//    the hairline and never scrolled underneath. Liquid Glass is a floating
+//    layer that lenses what passes beneath it; a bar with nothing under it is
+//    a bar with nothing to refract. The sibling `VStack` is what had to go.
 //
-//  All four screens are **always in the view tree**; the inactive ones are
-//  hidden, not discarded. A `switch` on the selection destroys the outgoing
-//  screen, and with it every `@State` it owns, its scroll position, its
-//  `NavigationStack` path and any `.task` it has running — which is exactly
-//  what a mail list, a note draft and an SSE stream cannot survive. Getting
-//  that wrong is invisible with placeholder screens and very visible in P2, so
-//  it is fixed here rather than there. `ShellStateUITests` is what keeps
-//  it fixed.
+//  What survives the swap, and had to:
+//
+//  * **All four screens stay alive.** The old shell held them in a `ZStack` of
+//    four `opacity`-toggled children because a `switch` would destroy the
+//    outgoing screen's `@State`, scroll position, `NavigationStack` path and
+//    running `.task`. `TabView` keeps each `Tab`'s content identity for the
+//    same reason, so the property is preserved rather than reimplemented —
+//    but *preserved* is a claim, and `ShellStateUITests` is what checks it.
+//  * **Tab-bar visibility on 1f.** It used to be computed in the shell from
+//    `AppNavigation.showsTabBar`. A system bar is hidden by the screen that
+//    wants it hidden, so the rule moved to the destination — see
+//    `MailTabRoot` — and `MailRoute.hidesTabBar` is still the only place that
+//    decides. It is a property of the top route, never of stack depth.
+//  * **The ground.** Four screens (1g, 1e, 1f, 1k) never set a background;
+//    they inherited one from the old shell's `ZStack`. `TabView` gives its
+//    content no such ground, so it is applied per tab below — and it ignores
+//    the safe area, because the whole point is that `bg` runs under the glass
+//    bar rather than stopping at it.
 //
 
 import SwiftUI
@@ -38,59 +52,45 @@ struct RootTabView: View {
     var body: some View {
         @Bindable var navigation = navigation
 
-        return ZStack {
-            // The ground runs edge to edge, under the status bar and the home
-            // indicator alike (DESIGN.md §1 Color: `bg` is every screen ground).
-            Theme.Color.bg.ignoresSafeArea()
-
-            // A plain VStack, not `safeAreaInset`. Two reasons, both from the
-            // design rather than from taste:
-            //
-            // 1. DESIGN.md §Safe area — the tab bar's 26 pt is measured from
-            //    the display edge. `safeAreaInset` places the bar *above* the
-            //    34 pt indicator region, so the bar's own padding stacks on top
-            //    of it and the labels land at 42.
-            // 2. In the mockup the tab bar is a sibling of the scrolling band,
-            //    not an overlay on it — content ends at the hairline, it never
-            //    scrolls underneath. `safeAreaInset` propagates an inset that
-            //    invites exactly that scroll-under behaviour in P2's lists.
-            VStack(spacing: 0) {
-                ZStack {
-                    ForEach(NTab.allCases) { tab in
-                        screen(for: tab)
-                            // The inactive three are invisible, untappable and
-                            // hidden from VoiceOver — but still constructed, so
-                            // their state survives.
-                            .accessibilityHidden(tab != navigation.selection)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .opacity(tab == navigation.selection ? 1 : 0)
-                            .zIndex(tab == navigation.selection ? 1 : 0)
-                            .allowsHitTesting(tab == navigation.selection)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                // P2: 1f is a pushed detail and DESIGN.md §2's navigation map
-                // gives it no tab bar. The condition is a property of the
-                // **active tab's top route** (see `AppNavigation`), not of how
-                // deep the stack is — 1e, 1g and 1k are all pushes that keep
-                // the bar, so a depth rule would be wrong on the first one.
-                if navigation.showsTabBar {
-                    NTabBar(selection: $navigation.selection)
+        return TabView(selection: $navigation.selection) {
+            ForEach(NTab.allCases) { tab in
+                // No `.accessibilityIdentifier` here, and not for want of
+                // trying: UIKit's tab bar does not carry one. It was applied to
+                // the `Tab` and then to an explicit `Label`, and on iOS 26.5
+                // both compiled and both arrived at the rendered button as the
+                // empty string. The UI tests address the four tabs by the label
+                // VoiceOver speaks instead — see `XCUIApplication.tab(_:)`.
+                Tab(tab.title, systemImage: tab.symbol, value: tab) {
+                    screen(for: tab)
                 }
             }
-            .ignoresSafeArea(.container, edges: .bottom)
         }
+        // The bar shrinks to a pill on scroll-down and returns on scroll-up.
+        // This is the behaviour that pays for losing the design's labels: the
+        // bar gets out of the way of the content instead of reserving 75 pt of
+        // it forever.
+        .tabBarMinimizeBehavior(.onScrollDown)
+        // `AccentColor` is already `#b68235` (D8) so the system would resolve
+        // this correctly on its own. Stated anyway: the selected-tab tint is
+        // now drawn by UIKit rather than by us, and an asset catalogue entry
+        // is a long way from the call site that depends on it.
+        .tint(Theme.Color.accent)
         .foregroundStyle(Theme.Color.ink)
     }
 
     @ViewBuilder
     private func screen(for tab: NTab) -> some View {
-        switch tab {
-        case .ask: HomeTabRoot(sync: sync, models: models, clock: clock)
-        case .mail: MailTabRoot(models: models, clock: clock)
-        case .notes: PlaceholderScreen(tab: .notes, note: "Notes your agents write.")
-        case .calendar: PlaceholderScreen(tab: .calendar, note: "Six days, each a compressed timeline.")
+        Group {
+            switch tab {
+            case .ask: HomeTabRoot(sync: sync, models: models, clock: clock)
+            case .mail: MailTabRoot(models: models, clock: clock)
+            case .notes: PlaceholderScreen(tab: .notes, note: "Notes your agents write.")
+            case .calendar: PlaceholderScreen(tab: .calendar, note: "Six days, each a compressed timeline.")
+            }
         }
+        // DESIGN.md §1 Color: `bg` is every screen ground, edge to edge, under
+        // the status bar and under the tab bar alike.
+        .background(Theme.Color.bg.ignoresSafeArea())
     }
 }
 
@@ -148,4 +148,3 @@ struct PlaceholderScreen: View {
         .preferredColorScheme(.light)
 }
 #endif
-

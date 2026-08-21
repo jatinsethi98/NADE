@@ -39,12 +39,12 @@ final class ShellStateUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["home.greeting"].waitForExistence(timeout: 3),
                       "tapping the grabber did not reach the focus state")
 
-        app.buttons["tab.calendar"].tap()
+        app.tab("Calendar").tap()
         XCTAssertTrue(app.buttons["screen.calendar.taps"].waitForExistence(timeout: 3))
         XCTAssertEqual(app.buttons["screen.calendar.taps"].label, "Taps: 0",
                        "the calendar screen should have its own state")
 
-        app.buttons["tab.ask"].tap()
+        app.tab("Ask").tap()
         XCTAssertTrue(
             app.staticTexts["home.greeting"].waitForExistence(timeout: 3),
             "the Ask screen was rebuilt when the tab changed — its model, scroll position and running tasks would all be gone"
@@ -74,7 +74,7 @@ final class ShellStateUITests: XCTestCase {
         // showing. 2a therefore *exists* from launch and is not tappable until
         // its tab is selected — which is the property this test is about, so
         // asserting on existence alone would have quietly tested nothing.
-        app.buttons["tab.ask"].tap()
+        app.tab("Ask").tap()
         XCTAssertTrue(app.staticTexts["home.date"].waitForExistence(timeout: 10))
         let grabber = app.buttons["home.grabber"]
         XCTAssertTrue(grabber.waitForHittable(timeout: 10))
@@ -82,35 +82,41 @@ final class ShellStateUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["home.greeting"].waitForExistence(timeout: 3))
 
         // Mail: push a list and move off the default mailbox.
-        app.buttons["tab.mail"].tap()
+        app.tab("Mail").tap()
         XCTAssertTrue(app.buttons["mailboxes.label.CATEGORY_UPDATES"].waitForExistence(timeout: 5))
         app.buttons["mailboxes.label.CATEGORY_UPDATES"].tap()
         XCTAssertTrue(app.staticTexts["maillist.title"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.staticTexts["maillist.title"].label, "Updates")
 
         // The two remaining placeholders still carry their counters.
-        let placeholders = ["notes", "calendar"]
-        for (index, id) in placeholders.enumerated() {
-            app.buttons["tab.\(id)"].tap()
-            let counter = app.buttons["screen.\(id).taps"]
+        //
+        // The tab is addressed by title and the screen by the tab's raw value;
+        // the two are written out rather than derived from each other, because
+        // UIKit's bar gives no identifier to match on (see
+        // `XCUIApplication.tab(_:)`) and they agree only by capitalisation.
+        let placeholders = [(title: "Notes", id: "notes"), (title: "Calendar", id: "calendar")]
+        for (index, placeholder) in placeholders.enumerated() {
+            app.tab(placeholder.title).tap()
+            let counter = app.buttons["screen.\(placeholder.id).taps"]
             XCTAssertTrue(counter.waitForExistence(timeout: 3))
             for _ in 0..<(index + 1) { counter.tap() }
             XCTAssertEqual(counter.label, "Taps: \(index + 1)")
         }
 
         // Come back around; nothing was rebuilt.
-        for (index, id) in placeholders.enumerated() {
-            app.buttons["tab.\(id)"].tap()
-            let counter = app.buttons["screen.\(id).taps"]
+        for (index, placeholder) in placeholders.enumerated() {
+            app.tab(placeholder.title).tap()
+            let counter = app.buttons["screen.\(placeholder.id).taps"]
             XCTAssertTrue(counter.waitForExistence(timeout: 3))
-            XCTAssertEqual(counter.label, "Taps: \(index + 1)", "the \(id) screen lost its state")
+            XCTAssertEqual(counter.label, "Taps: \(index + 1)",
+                           "the \(placeholder.id) screen lost its state")
         }
 
-        app.buttons["tab.ask"].tap()
+        app.tab("Ask").tap()
         XCTAssertTrue(app.staticTexts["home.greeting"].waitForExistence(timeout: 3),
                       "the Ask tab was rebuilt: it fell back to the feed state")
 
-        app.buttons["tab.mail"].tap()
+        app.tab("Mail").tap()
         XCTAssertTrue(app.staticTexts["maillist.title"].waitForExistence(timeout: 3),
                       "the Mail tab was rebuilt: its pushed list is gone")
         XCTAssertEqual(app.staticTexts["maillist.title"].label, "Updates",

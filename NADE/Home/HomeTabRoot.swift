@@ -5,10 +5,16 @@
 //  The Ask tab: 2a at the root, 1a and 1b pushed from it, 1c presented over it.
 //
 //  Same shape as `MailTabRoot`, and for the same reasons — the path lives in
-//  `AppNavigation` so `RootTabView` can read it and so it survives a tab switch
-//  (D29). 1c is a `fullScreenCover` rather than a push because `DESIGN.md` §2's
-//  navigation map gives the builder **no tab bar**: a modal covers the bar
-//  instead of asking the shell to hide it.
+//  `AppNavigation` so it survives a tab switch (D29). 1c is a
+//  `fullScreenCover` rather than a push because `DESIGN.md` §2's navigation map
+//  gives the builder **no tab bar**: a modal covers the bar instead of asking
+//  anything to hide it, which is why nothing below mentions 1c.
+//
+//  `HomeRoute.hidesTabBar` is `false` for both routes — 1a and 1b keep the bar
+//  with Ask lit. The modifier is stated anyway rather than left off: with a
+//  native `TabView` (D98) the bar's visibility is a property each destination
+//  asserts, and "no modifier" would read as "nobody thought about it" the day
+//  a third route arrives.
 //
 
 import SwiftUI
@@ -42,7 +48,10 @@ struct HomeTabRoot: View {
                 .toolbar(.hidden, for: .navigationBar)
                 .navigationDestination(for: HomeRoute.self) { route in
                     destination(route)
-                        .toolbar(.hidden, for: .navigationBar)
+                        // `HomeRoute.hidesTabBar` is always false, so this is
+                        // the nav bar alone — but it is written through the same
+                        // helper as `MailTabRoot` so the two stacks cannot drift.
+                        .modifier(HiddenBars(alsoTabBar: route.hidesTabBar))
                         .nadeInteractivePopGesture()
                 }
         }

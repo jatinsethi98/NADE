@@ -465,81 +465,58 @@ final class ComponentGeometryTests: XCTestCase {
         XCTAssertMeasures(draft - ds, (15 - Theme.Space.s3) + (13 - Theme.Space.s3), accuracy: 0.5, "draft card padding delta")
     }
 
-    // MARK: - Tab bar (F17)
+    // MARK: - Icon boxes (F13)
 
-    /// EDGE (E17): the bar's `9 / … / 26` now lives inside each column, so a
-    /// tab's own frame is the full height of the bar rather than the ~43 pt
-    /// glyph-and-label stack it used to be. `TabBarUITests` checks the shipped
-    /// frame; this checks the arithmetic.
-    func testTabBarIsTallEnoughForItsPaddingToBeInsideTheButtons() {
-        let bar = RenderMeasure.size(of: NTabBar(selection: .constant(.ask)), proposedWidth: 402)
-        let chrome = Theme.Stroke.border + Theme.Metrics.TabBar.paddingTop + Theme.Metrics.TabBar.paddingBottom
-        XCTAssertGreaterThan(bar.height, chrome, "tab bar shorter than its own chrome: \(bar)")
-        // A column is the bar minus its top hairline.
-        XCTAssertAtLeast(bar.height - Theme.Stroke.border, Theme.Metrics.minimumHitTarget, "tab column height")
-    }
-
-    func testTabBarFitsTheNarrowestSupportedScreen() {
-        for screen in [CGFloat(320), 375, 402] {
-            let bar = RenderMeasure.size(of: NTabBar(selection: .constant(.calendar)), proposedWidth: screen)
-            XCTAssertMeasures(bar.width, screen, accuracy: 0.5, "tab bar width at \(screen)")
-        }
-    }
+    // Three tab-bar tests stood here: that the bar was taller than its own
+    // chrome, that it fitted a 320 pt screen, and that its height was the
+    // mockup's `1 + 9 + 18 + 5 + 16.275 + 26 = 75.275`. All three measured
+    // `NTabBar`, which D98 deleted in favour of a native `TabView`. The system
+    // bar's height, width behaviour and column geometry are UIKit's; asserting
+    // them here would be asserting UIKit's arithmetic against our guess of it.
+    // `TabBarUITests` checks the shipped bar's behaviour instead.
+    //
+    // What did not go away is the reason the fourth test existed.
 
     /// F13, and then a second time in the same place.
     ///
     /// The first version measured `icon.height` and `label.height` off the very
-    /// same views the bar is built from, then asserted the bar equalled their
+    /// same views the bar was built from, then asserted the bar equalled their
     /// sum plus the padding. That is an identity: it proves the padding is
     /// applied and nothing whatever about the two terms that matter. It stayed
-    /// green with a 24.2 pt glyph box and a 13.4 pt label box — a bar measured
-    /// at **78.67** pt against the mockup's 75.28.
+    /// green with a 24.2 pt glyph box against a design's 18.
     ///
-    /// The mockup's terms are fixed and none of them is read back off the view:
-    /// an `<svg width="18" height="18">`, a label whose flex box is the
-    /// inherited `line-height: 1.55`, and `padding: 9px 10px 26px` under a
-    /// 1 px `border-top`.
-    func testTabBarHeightIsTheMockupsOwnArithmetic() {
-        typealias M = Theme.Metrics.TabBar
-        let bar = RenderMeasure.size(of: NTabBar(selection: .constant(.ask)), proposedWidth: 402)
-
-        let expected = Theme.Stroke.border                // border-top: 1px
-            + M.paddingTop                                // 9
-            + M.iconSize                                  // the svg's own 18
-            + M.iconLabelGap                              // gap: 5
-            + M.labelSize * Theme.LineHeight.body         // 10.5 × 1.55 = 16.275
-            + M.paddingBottom                             // 26
-
-        XCTAssertMeasures(bar.height, expected, accuracy: grid, "tab bar height against the mockup's boxes")
-        // The same number written out, so a `Theme` constant drifting fails
-        // here and not only in `ThemeTests`.
-        XCTAssertMeasures(bar.height, 75.275, accuracy: grid, "the mockup's bar is 75.275 pt")
-    }
-
-    /// Four columns, four SF Symbols, one `VStack` each: if the glyph boxes
-    /// differ the labels land on different baselines, and in `p1-shell.png`
-    /// they did — label ink tops 39.00 / 39.33 / 41.00 / 41.33 pt below the
-    /// rule, a **2.33 pt** spread, because each column was sized by its own
-    /// symbol's font line box (glyph ink 15.0 / 16.0 / 18.67 / 20.0).
+    /// The property it was really protecting is `NIcon`'s: **a symbol gets the
+    /// box it is asked for, not the box its own ink wants.** Four SF Symbols at
+    /// one nominal size reported glyph ink of 15.0 / 16.0 / 18.67 / 20.0 pt — a
+    /// 5 pt spread — and every stack containing one sat at a different height
+    /// because of it. `NIcon` carries the square frame; this is what checks it
+    /// still does.
     ///
-    /// Every glyph in the mockup is an 18 × 18 `<svg>`. Equal boxes is the
-    /// sufficient condition — the label below carries identical modifiers in
-    /// all four columns — so it is the box that is asserted here.
-    func testEveryTabGlyphOccupiesTheSameDesignBox() {
-        typealias M = Theme.Metrics.TabBar
-        var boxes: [String: CGSize] = [:]
-        for tab in NTab.allCases {
-            let glyph = RenderMeasure.size(
-                of: NIcon(tab.symbol, size: M.iconSize, weight: .light, relativeTo: .caption2)
+    /// The tab bar was the first place that mattered and is no longer drawn
+    /// here, but the ask field's send glyph (`NAskField.Metrics.glyphSize`),
+    /// the thread bar's `sparkles` and every `NButton` glyph all still stand on
+    /// it — so the symbols below are the ones this app actually draws, plus the
+    /// four `NTab` glyphs kept for their spread of natural ink.
+    func testNIconOccupiesTheBoxItIsAskedForWhateverTheSymbol() {
+        let symbols = ["sparkles", "arrow.up", "envelope", "doc.text", "calendar"]
+
+        for size in [CGFloat(16), 17, 18] {
+            var boxes: [String: CGSize] = [:]
+            for symbol in symbols {
+                let glyph = RenderMeasure.size(
+                    of: NIcon(symbol, size: size, weight: .light, relativeTo: .caption2)
+                )
+                boxes[symbol] = glyph
+                XCTAssertMeasures(glyph.height, size, accuracy: RenderMeasure.snap,
+                                  "\(symbol) glyph box height at \(size)")
+                XCTAssertMeasures(glyph.width, size, accuracy: RenderMeasure.snap,
+                                  "\(symbol) glyph box width at \(size)")
+            }
+            XCTAssertEqual(
+                Set(boxes.values.map(\.height)).count, 1,
+                "the glyph boxes are not the same height at \(size): \(boxes)"
             )
-            boxes[tab.rawValue] = glyph
-            XCTAssertMeasures(glyph.height, M.iconSize, accuracy: RenderMeasure.snap, "\(tab.rawValue) glyph box height")
-            XCTAssertMeasures(glyph.width, M.iconSize, accuracy: RenderMeasure.snap, "\(tab.rawValue) glyph box width")
         }
-        XCTAssertEqual(
-            Set(boxes.values.map(\.height)).count, 1,
-            "the four tab glyph boxes are not the same height: \(boxes)"
-        )
     }
 
     // MARK: - Padding that only a width can see (F13)

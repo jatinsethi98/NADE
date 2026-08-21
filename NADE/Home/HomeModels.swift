@@ -81,9 +81,11 @@ final class HomeFeedModel {
         // Drain first, by design: a queued approve that lands before the reload
         // means the feed comes back already correct.
         await sync.drainOutbox()
-        // The feed and the agents share no data, and 2a's `.task` runs at every
-        // launch (D29 keeps all four tabs in the tree), so serialising them cost
-        // an avoidable round trip on the cold path.
+        // The feed and the agents share no data, and 2a's `.task` runs on every
+        // arrival at the Ask tab — at launch, because Ask is the opening tab,
+        // and again on every return to it since D98 (`TabView` rebuilds the
+        // tab it shows). Serialising them cost an avoidable round trip on a
+        // path that is now walked more than once.
         async let feed = sync.loadFeed(resetting: true)
         async let agents: Void = sync.loadAgents()
         _ = await (feed, agents)

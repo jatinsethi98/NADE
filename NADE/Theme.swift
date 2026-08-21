@@ -324,23 +324,16 @@ extension Theme {
         /// The pixels stay the design's; only the tappable region grows.
         static let minimumHitTarget: CGFloat = 44
 
-        /// Tab bar, DESIGN.md §2 + the mockup's `padding:9px 10px 26px`.
-        ///
-        /// The 26 is measured **from the bottom edge of the display**, not from
-        /// above the home indicator (DESIGN.md §Safe area). The design frame's
-        /// indicator region is 34 pt tall, so deferring to the safe-area inset
-        /// and adding 8 put the labels 42 pt up — visibly higher than the
-        /// design and inconsistent with every other bottom band. The bar
-        /// therefore extends under the indicator and owns the full 26 itself.
-        enum TabBar {
-            static let iconSize: CGFloat = 18
-            static let labelSize: CGFloat = 10.5
-            static let labelTracking: CGFloat = 0.09   // em
-            static let iconLabelGap: CGFloat = 5
-            static let paddingTop: CGFloat = 9
-            static let paddingHorizontal: CGFloat = 10
-            static let paddingBottom: CGFloat = 26
-        }
+        // `Metrics.TabBar` used to live here: the mockup's `padding: 9px 10px
+        // 26px`, an 18 pt glyph, a 10.5 pt label at 0.09 em, and the 26 pt
+        // measured from the display edge so the bar ran under the home
+        // indicator. Every one of those numbers described `NTabBar`, which the
+        // Liquid Glass pass deleted in favour of a native `TabView` (D98).
+        //
+        // They are not kept "for reference". A constant nothing reads is a
+        // claim nothing checks, and `ThemeTests` was asserting seven of them
+        // against no drawing at all. DESIGN.md §2 and this branch's deviation
+        // rows are where the design's bar is now written down.
     }
 }
 

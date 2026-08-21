@@ -4,12 +4,19 @@
 //
 //  Where the app is, hoisted above the shell.
 //
-//  `RootTabView` keeps all four screens in the tree (D29), so navigation state
-//  cannot live inside the Mail tab: the tab bar has to read it, and a
-//  `PreferenceKey` would be emitted by the three inactive screens as well as
-//  the visible one — a pushed note detail in Notes would hide the bar on Mail.
-//  Hoisting also gives `-NADEScreen` somewhere to write for a deterministic
-//  screenshot, and gives P6's push deep link a place to land.
+//  The shell keeps all four screens in the tree (D29), so navigation state
+//  cannot live inside the Mail tab. Hoisting gives `-NADEScreen` somewhere to
+//  write for a deterministic screenshot, and gives P6's push deep link a place
+//  to land.
+//
+//  It used to also carry `showsTabBar`, because the hand-built `NTabBar` was a
+//  sibling of the screens and the shell had to decide whether to draw it. The
+//  Liquid Glass pass moved to a native `TabView` (D98), where a screen hides
+//  the bar for itself with `.toolbar(.hidden, for: .tabBar)`. The rule did not
+//  change and did not move: `MailRoute.hidesTabBar` below is still the only
+//  place that decides, and `MailTabRoot` is now the only place that reads it.
+//  Deriving it here as well would have been a second answer to one question,
+//  and the shell no longer has a use for the first.
 //
 
 import SwiftUI
@@ -81,17 +88,6 @@ final class AppNavigation {
     /// 1g sets it on the way in, and because a screenshot launch argument has
     /// to be able to.
     var selectedMailboxID: String = "INBOX"
-
-    /// Visibility follows the **active tab's** top route. Switching on
-    /// `selection` first is what stops a thread pushed on Mail from hiding the
-    /// bar while Notes is on screen — all four stacks stay alive underneath.
-    var showsTabBar: Bool {
-        switch selection {
-        case .mail: !(mailPath.last?.hidesTabBar ?? false)
-        case .ask: !(homePath.last?.hidesTabBar ?? false)
-        default: true
-        }
-    }
 
     /// 1a. A fresh submit replaces whatever query was on screen rather than
     /// stacking, so "Make this an agent" - which re-asks the same words with a

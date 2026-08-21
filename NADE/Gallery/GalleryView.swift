@@ -38,6 +38,12 @@ struct GalleryView: View {
     /// A 200-character unbroken token — the worst string this UI can be handed.
     private static let pathological = String(repeating: "Xq7", count: 67)
 
+    /// Tall enough that the system tab bar sits at the bottom of a real box
+    /// rather than being squeezed, and short enough that the sample and its
+    /// label fit one screenshot. Not a design number — the bar's own height is
+    /// UIKit's now (D98) and this frame does not set it.
+    private static let tabBarSampleHeight: CGFloat = 140
+
     /// 1a's draft sentence: `When {when_span}, {do_span}.` The agent object
     /// carries `when_span` / `do_span`, so the sentence is **composed**, never
     /// parsed — DESIGN.md §3 1a.
@@ -78,7 +84,7 @@ struct GalleryView: View {
                     cardSection
                     tagSection
                     controlSection
-                    tabBarSection
+                    glassSection
                     edgeSection
                     accessibilitySizeSection
                     accessibilitySizeSectionContinued
@@ -589,20 +595,33 @@ struct GalleryView: View {
         }
     }
 
-    // MARK: 9 · Tab bar
+    // MARK: 9 · Glass chrome
 
-    private var tabBarSection: some View {
-        GallerySection("Tab bar", id: "tabbar") {
-            GalleryLabel("Live — tap to change the selection")
-            NTabBar(selection: $tab)
-
-            GalleryLabel("Each tab active")
-            VStack(spacing: Theme.Space.s3) {
+    /// Was "Tab bar", and showed four `NTabBar`s — one live, four frozen on
+    /// each selection. The Liquid Glass pass (D98) handed the bar to a native
+    /// `TabView`, so there is no longer a hand-drawn bar to render at its real
+    /// size, and rendering four copies of a system bar would document UIKit
+    /// rather than this design.
+    ///
+    /// What replaces it is the chrome this app *does* still draw: the bar as
+    /// the system gives it to us, once and live, plus the glass surfaces added
+    /// in Step 3.
+    private var glassSection: some View {
+        GallerySection("Glass chrome", id: "glass") {
+            GalleryLabel("Tab bar — native TabView, live; tap to change the selection")
+            TabView(selection: $tab) {
                 ForEach(NTab.allCases) { active in
-                    NTabBar(selection: .constant(active))
-                        .accessibilityHidden(true)
+                    Tab(active.title, systemImage: active.symbol, value: active) {
+                        // The bar is the subject; the content behind it is not.
+                        // `Color.clear` also means the glass has the gallery's
+                        // own `bg` behind it, which is what it will have in the
+                        // app.
+                        Color.clear
+                    }
                 }
             }
+            .tint(Theme.Color.accent)
+            .frame(height: Self.tabBarSampleHeight)
         }
     }
 
@@ -633,7 +652,10 @@ struct GalleryView: View {
                     UnitChip("week")
                 }
                 NSegmented(options: NoteMode.allCases, selection: $segmented, metrics: .noteMode) { $0.rawValue }
-                NTabBar(selection: .constant(.mail)).accessibilityHidden(true)
+                // The tab bar used to be mirrored here too. It is UIKit's now
+                // (D98), and UIKit mirrors its own bar — an `NTabBar` in this
+                // stack was evidence about our code, a `TabView` here would be
+                // evidence about theirs.
             }
             .environment(\.layoutDirection, .rightToLeft)
 
@@ -699,7 +721,10 @@ struct GalleryView: View {
                 NSegmented(options: ["Draft", "Published"], selection: $status, metrics: .status) { $0 }
                 NRadioRow("On a schedule", hint: "Daily, weekly, or a custom repeat",
                           isSelected: true, metrics: .invocation) {}
-                NTabBar(selection: .constant(.calendar)).accessibilityHidden(true)
+                // No tab bar at AX5 any more, for the same reason as the RTL
+                // row above: the system bar has its own ceiling and it is not
+                // `Theme.Metrics.chromeTypeCeiling`. The screens' own AX5 legs
+                // in `docs/screens/` are where the real bar is looked at.
             }
             .dynamicTypeSize(.accessibility5)
         }

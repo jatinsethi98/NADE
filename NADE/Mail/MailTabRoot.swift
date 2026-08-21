@@ -6,10 +6,15 @@
 //
 //  Every screen draws its own nav bar (DESIGN.md gives each one exact numbers),
 //  so the system bar is hidden throughout. The stack's path lives in
-//  `AppNavigation` rather than in an `@State` here, because `RootTabView` has
-//  to read it to decide whether the tab bar is on screen — and because that is
-//  what makes the path survive a tab switch, which is the property D29 exists
-//  to protect.
+//  `AppNavigation` rather than in an `@State` here, because that is what makes
+//  the path survive a tab switch — the property D29 exists to protect.
+//
+//  The **tab bar's** visibility is decided here now. It used to be computed in
+//  the shell from `AppNavigation.showsTabBar`, which a hand-built sibling bar
+//  needed; a native `TabView` bar (D98) is hidden by the screen that wants it
+//  hidden. `MailRoute.hidesTabBar` is unchanged and is still the only place
+//  the rule is written down — 1f hides the bar, 1e / 1g / 1k keep it — and it
+//  is read off the **top route**, never off stack depth.
 //
 
 import SwiftUI
@@ -38,7 +43,7 @@ struct MailTabRoot: View {
                 .toolbar(.hidden, for: .navigationBar)
                 .navigationDestination(for: MailRoute.self) { route in
                     destination(route)
-                        .toolbar(.hidden, for: .navigationBar)
+                        .modifier(HiddenBars(alsoTabBar: route.hidesTabBar))
                         // UIKit turns the edge swipe off with the bar. Every
                         // screen here draws its own back affordance, so the
                         // gesture is restored explicitly.

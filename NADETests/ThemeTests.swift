@@ -244,20 +244,16 @@ final class ThemeTests: XCTestCase {
         XCTAssertEqual(Theme.Metrics.chromeTypeCeiling, .accessibility1)
     }
 
-    // MARK: Tab bar geometry
+    // MARK: Tabs
 
-    func testTabBarMetricsMatchTheDesign() {
-        XCTAssertEqual(Theme.Metrics.TabBar.iconSize, 18)
-        XCTAssertEqual(Theme.Metrics.TabBar.labelSize, 10.5)
-        XCTAssertEqual(Theme.Metrics.TabBar.labelTracking, 0.09)
-        XCTAssertEqual(Theme.Metrics.TabBar.iconLabelGap, 5)
-        XCTAssertEqual(Theme.Metrics.TabBar.paddingTop, 9)
-        XCTAssertEqual(Theme.Metrics.TabBar.paddingHorizontal, 10)
-        // The mockup's `padding: 9px 10px 26px`, verbatim. The 26 is measured
-        // from the display edge, so the bar extends under the home indicator
-        // rather than sitting above it — DESIGN.md §Safe area.
-        XCTAssertEqual(Theme.Metrics.TabBar.paddingBottom, 26)
-    }
+    // `testTabBarMetricsMatchTheDesign` was here, pinning the seven numbers in
+    // `Theme.Metrics.TabBar`. Both are gone with `NTabBar` (D98): the bar is a
+    // native `TabView` now and its metrics are UIKit's, not this design's.
+    // Asserting our own retired constants against nothing on screen is the
+    // "test nobody has seen fail" that D39 is about.
+    //
+    // What survives is the part that is still ours — which four tabs, in which
+    // order, with which glyphs.
 
     func testTabsAreTheFourInTheDesign() {
         XCTAssertEqual(NTab.allCases.map(\.title), ["Ask", "Mail", "Notes", "Calendar"])
@@ -315,10 +311,14 @@ final class ThemeTests: XCTestCase {
         )
     }
 
-    /// EDGE (E6). VoiceOver's own tab bars say "Tab 1 of 4".
-    func testTabBarSpeaksItsPosition() {
-        XCTAssertEqual(NTabBar.positionValue(index: 0), "Tab 1 of 4")
-        XCTAssertEqual(NTabBar.positionValue(index: 3), "Tab 4 of 4")
+    /// EDGE (E6). VoiceOver's own tab bars say "Tab 1 of 4", and `NTabBar` had
+    /// to synthesise that string because SwiftUI does not derive it for four
+    /// loose buttons. A native `TabView` does derive it, so the string is no
+    /// longer ours to build or to assert — `TabBarUITests` checks what is
+    /// actually spoken instead, which is the stronger evidence anyway.
+    ///
+    /// The count stays: "of 4" is only right while there are four.
+    func testThereAreFourTabs() {
         XCTAssertEqual(NTab.allCases.count, 4)
     }
 

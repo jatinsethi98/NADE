@@ -21,14 +21,14 @@ final class ThreadNavigationUITests: XCTestCase {
     func testPushingAThreadHidesTheTabBarAndComingBackRestoresIt() {
         let app = XCUIApplication.nade(screen: "1e")
         XCTAssertTrue(app.buttons["mailrow.18f2a1b3c4d5e6f7"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.buttons["tab.mail"].exists, "1e carries the bar")
+        XCTAssertTrue(app.tab("Mail").exists, "1e carries the bar")
 
         app.buttons["mailrow.18f2a1b3c4d5e6f7"].tap()
         XCTAssertTrue(app.staticTexts["thread.subject"].waitForExistence(timeout: 5))
-        XCTAssertFalse(app.buttons["tab.mail"].exists, "1f is a pushed detail and carries no tab bar")
+        XCTAssertFalse(app.tab("Mail").exists, "1f is a pushed detail and carries no tab bar")
 
         app.buttons["thread.back"].tap()
-        XCTAssertTrue(app.buttons["tab.mail"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.tab("Mail").waitForExistence(timeout: 5))
     }
 
     /// The assertion that kills a depth-based rule: 1e is a push, and it keeps
@@ -38,7 +38,7 @@ final class ThreadNavigationUITests: XCTestCase {
         XCTAssertTrue(app.buttons["mailboxes.label.INBOX"].waitForExistence(timeout: 10))
         app.buttons["mailboxes.label.INBOX"].tap()
         XCTAssertTrue(app.staticTexts["maillist.title"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["tab.mail"].exists)
+        XCTAssertTrue(app.tab("Mail").exists)
     }
 
     /// …and so does 1k, which DESIGN.md §2 says keeps the Mail tab lit.
@@ -47,26 +47,26 @@ final class ThreadNavigationUITests: XCTestCase {
         XCTAssertTrue(app.buttons["mailboxes.settings"].waitForExistence(timeout: 10))
         app.buttons["mailboxes.settings"].tap()
         XCTAssertTrue(app.staticTexts["settings.title"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["tab.mail"].exists)
+        XCTAssertTrue(app.tab("Mail").exists)
     }
 
     /// State restoration across a tab rotation.
     ///
     /// The obvious version of this test — push a thread, tap Notes, come back —
     /// is **impossible**: while 1f is on screen the tab bar is gone, so
-    /// `tab.notes` does not exist to tap. So the thread is restored by launch
+    /// the Notes tab does not exist to tap. So the thread is restored by launch
     /// argument, popped, rotated through the tabs, and re-pushed.
     func testTheMailStackSurvivesAFullTabRotation() {
         let app = XCUIApplication.nade(screen: "1f", thread: "18f2a1b3c4d5e6f7")
         XCTAssertTrue(app.staticTexts["thread.subject"].waitForExistence(timeout: 10))
-        XCTAssertFalse(app.buttons["tab.mail"].exists)
+        XCTAssertFalse(app.tab("Mail").exists)
 
         app.buttons["thread.back"].tap()
         XCTAssertTrue(app.buttons["maillist.chip.CATEGORY_UPDATES"].waitForExistence(timeout: 5))
         app.buttons["maillist.chip.CATEGORY_UPDATES"].tap()
         XCTAssertEqual(app.staticTexts["maillist.title"].label, "Updates")
 
-        for tab in ["tab.ask", "tab.notes", "tab.calendar", "tab.mail"] {
+        for tab in ["Ask", "Notes", "Calendar", "Mail"] {
             app.buttons[tab].tap()
         }
 
