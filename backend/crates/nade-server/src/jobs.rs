@@ -151,6 +151,31 @@ impl Queue {
         run_after: Option<DateTime<Utc>>,
         dedupe_key: &str,
     ) -> sqlx::Result<Option<i64>> {
+        Self::enqueue_unique_in(&self.pool, kind, payload, run_after, dedupe_key).await
+    }
+
+    /// [`Self::enqueue_unique`], against an executor the caller chooses.
+    ///
+    /// Exists so a handler can commit a row **and** the job that acts on it in
+    /// one transaction. `POST /agents/{id}/run` must: a run row without its job
+    /// is a `queued` run nothing will ever move, and `Engine::cancel` refuses an
+    /// empty journal outright. Without this, that handler copied the statement —
+    /// including the `on conflict` target that [`Self::enqueue_unique`]'s own
+    /// documentation says must restate the partial index's predicate verbatim,
+    /// which is not a thing to keep in two files.
+    ///
+    /// # Errors
+    /// Returns an error if the insert fails.
+    pub async fn enqueue_unique_in<'e, E>(
+        executor: E,
+        kind: &str,
+        payload: &Value,
+        run_after: Option<DateTime<Utc>>,
+        dedupe_key: &str,
+    ) -> sqlx::Result<Option<i64>>
+    where
+        E: sqlx::PgExecutor<'e>,
+    {
         sqlx::query_scalar(
             "insert into jobs (kind, payload, run_after, dedupe_key) \
              values ($1, $2, coalesce($3::timestamptz, now()), $4) \
@@ -163,7 +188,7 @@ impl Queue {
         .bind(payload)
         .bind(run_after)
         .bind(dedupe_key)
-        .fetch_optional(&self.pool)
+        .fetch_optional(executor)
         .await
     }
 

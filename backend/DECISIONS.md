@@ -839,3 +839,404 @@ Two smaller findings landed in the same pass:
   second mailbox would strand it: `sole_account` rightly refuses two rows, and
   the new account would be reachable by nobody. Deviceless consent may
   re-consent an existing mailbox or create the first — never a second.
+
+## D50 — Money is an integer, in nano-USD, end to end.
+
+The spend ceiling's whole job is to be right at its boundary: a ledger standing
+at exactly $1.00 blocks, one at $0.999999999 does not. Dollars as `f64` cannot
+promise that — it is the same arithmetic as `0.1 + 0.2 != 0.3` — and the failure
+is silent, intermittent, and shows up only as "the ceiling let one more run
+through sometimes", which is indistinguishable from a race.
+
+So `llm::cost` does everything in `i64` **nano-USD**, `llm_calls.cost_usd` is
+`numeric(14,9)` (never `double precision`), and the value crosses the wire as
+**text** cast by the statement, because `sqlx` is built here without a decimal
+type and binding an `f64` would undo the whole thing in one line.
+
+It is exact for a second reason worth knowing: every published Anthropic price
+is a whole number of dollars per million tokens, so a per-token rate is a whole
+number of nano-USD. $1.00/MTok is exactly 1 000 nano per token, and the cache
+multipliers (1.25x, 0.1x) stay integral too.
+
+`NADE_LLM_DAILY_USD` is parsed by `config::nano_usd`, which reads the digits as
+integers and never constructs a float at all — `1.0` cannot become
+999 999 999.99998 on its way to becoming a ceiling.
+
+## D51 — The column is `trailing_clause`, because `TRAILING` is reserved.
+
+`API.md` §5 calls the field `trailing`. PostgreSQL calls it a **reserved word**
+(it is part of `trim(trailing ...)`), and `add column trailing text` is a syntax
+error — which is how it was found, when migration 0005 failed to apply.
+
+Quoting it everywhere would work, and would be forgotten exactly once, in a
+query no test happened to cover. The column is `trailing_clause` and the
+serialiser renames it back for the wire, where the contract's name is the one
+that matters.
+
+## D52 — The keyset cursor was lossy, and dropped rows.
+
+`cursor::encode` used `SecondsFormat::Secs`. That was harmless for the P2/P3
+endpoints, whose ordering keys come from Gmail at second precision, and wrong
+the moment P4 paginated rows stamped by `now()`: a cursor is one half of a
+keyset comparison — `(ts, id) < (cursor.ts, cursor.id)` — so truncating it
+**skips every row inside the cursor's own second**. `GET /runs` served an empty
+page two with 51 rows in the table.
+
+Now `SecondsFormat::AutoSi`, which emits no fractional part when there is none,
+so a whole-second timestamp still encodes byte-identically and the contract
+fixtures are unaffected.
+
+The test that asserted the truncation was itself wrong, and its reasoning is
+worth recording because it was plausible: *"the iOS side decodes with a fixed
+formatter, so a fractional second would fail to parse there."* A cursor is
+opaque (`API.md` §0, "clients must not parse it"); the app stores it as a
+string and never base64-decodes one; the `ts` inside it is not a wire timestamp.
+The rule the test should have encoded is **a cursor must round-trip its
+ordering key exactly**.
+
+## D53 — The spend ceiling cannot be reported as an `Err` from `Llm::chat`.
+
+`Llm::chat`'s contract says an `Err` means *"the host should retry this job
+later"*. A breach reported that way is retried by the queue — five times, with
+backoff — and every retry that reaches a model call spends again. PLAN.md names
+that path and forbids it.
+
+So the breach travels out of band: `ledger::SpendGuard` holds an `AtomicBool`
+the adapter sets and the **job handler** reads, and the handler ends the run
+with `Engine::cancel` instead of returning `Err`. The load-bearing detail is
+that `Engine::new` takes its `Llm` **by value**, so the handler must clone the
+guard *before* the adapter is moved in; there is no way to reach back for it
+afterwards.
+
+There are two checks, not one. `POST /agents/{id}/run` pre-flights at the HTTP
+layer and answers `429`, so no run row is created — doing it in the job instead
+would strand a `queued` run with an empty journal, which D57 explains cannot be
+ended by the engine at all. The adapter then re-checks **before** each call;
+after would be too late to prevent the spend it exists to prevent.
+
+**The ceiling is exact at its boundary and loose under concurrency, on purpose.**
+A call is priced only after the provider answers, so `NADE_WORKERS` runs can
+each pass the check before any of them records. The bound is
+`ceiling + NADE_WORKERS x (one model turn)` — about $0.25 per extra worker at
+Haiku prices against a $1.00 ceiling, with the default of two workers.
+Reserving the maximum cost before the call and reconciling after would bind it
+exactly, and was rejected: a crash between the two halves leaves a permanently
+over-charged row, and this table is also the honest record of what the user
+spent. A ledger that lies is worse than a ceiling that overshoots by cents.
+
+## D54 — An unpriced model is charged the most expensive rate, never zero.
+
+`cost::rates_for` falls back to the top of the table for a model it does not
+recognise. The two alternatives are both worse. Priced at zero, the ceiling
+stops binding and the account can spend without limit — the failure mode is
+unbounded and invisible. Treated as an error, a model rename by the provider
+takes the whole agent runtime down. Over-charging stops runs early, which is
+recoverable, visible, and cheap.
+
+## D55 — A tool returns a projection, never a wire type.
+
+`search::PAGE_SIZE` is 50 and `EngineConfig::max_tool_result_bytes` is 16 KiB.
+Fifty `ThreadSummary`s, or one `ThreadDetail` carrying real message bodies,
+exceed that on **ordinary** mail — so handing back the HTTP shape would deliver
+the model a truncation envelope instead of results, every time, and the
+"oversized result" path would be the normal path rather than an edge case.
+
+`search_mail` returns ten hits of `{thread_id, subject, from, date, snippet}`;
+`read_thread` returns at most eight messages with bodies trimmed to 1 500 bytes
+and fenced. Both state `truncated` explicitly — PLAN.md's "no silent caps"
+applies to what a model is shown as much as to what a human is.
+
+They still call `search::search` and `api::mail::thread_detail`, so the
+validation, hydration, ordering and cache-completion cannot diverge between the
+screen and the agent. `read_thread` needed `thread_detail` extracted out of the
+handler first; that is one implementation with two callers, not a copy.
+
+## D56 — `ilike` needs its wildcards escaped, and concatenation does not do it.
+
+`GET /notes?q=` is a deliberate substring scan (`API.md` §3). Building the
+pattern in SQL — `title ilike '%' || $2 || '%'` — does **not** neutralise `%`
+and `_` inside `$2`: a search for `%` became `ilike '%%%'` and matched every
+note in the mailbox. `notes::escape_like` escapes `\`, `%` and `_`, in that
+order, with an explicit `escape '\'` clause.
+
+## D57 — A run with no journal is settled by a row update, never by the engine.
+
+`Engine::cancel` refuses an empty journal outright — *"cannot cancel a run that
+was never started"* — and `agent_runs.status` defaults to `queued`, so a run has
+no journal for the whole window between being created and being claimed. That
+is the ordinary state, and therefore the state `DELETE /agents/{id}` most often
+meets.
+
+Writing the row straight to `failed` with `journal: []` is not an escape either:
+it breaks `API.md` §6.1 ("the wire status follows from the last entry") and
+`validate.py`'s "a run always has at least a `run_started` entry". So
+`cancel_runs_of` asks the journal first and picks its path: a *started* run is
+ended through the engine, so its log records its own ending rather than being
+yanked away by the FK cascade; a queued one is settled by an update.
+
+## D58 — `CorruptJournal` is not cancellable, so it is not routed to cancel.
+
+The first draft of the run handler's error table was wrong on three of its four
+rows, and the SDK says so directly in `Engine::cancel`'s own doc comment: *"A
+run refused with `Error::CorruptJournal` or `Error::UnsupportedJournalFormat`
+cannot be cancelled either, because the engine cannot know which sequence to
+append at — that is a storage problem, and the host owns it."* `cancel` re-runs
+the very replay that raised them.
+
+The routing now reads:
+
+| error | handler |
+|---|---|
+| `Llm`, `Journal`, `SeqConflict` | return `Err` — transport, so job backoff and eventually a dead letter |
+| `ToolChanged` | `Engine::cancel` — raised at *dispatch*, after replay succeeded, so cancel works |
+| `CorruptJournal`, `UnsupportedJournalFormat` | try cancel (one `CorruptJournal` **is** raised at dispatch and is cancellable), and on the same failure settle the row and audit it |
+| `AmbiguousEffect` | **no row.** It is never an `Err`: `grep` finds zero construction sites, and the engine returns it as `Ok(RunOutcome::Failed)`. |
+
+## D59 — The model client refuses to aim at the real API from a test.
+
+`backend/justfile` sets `dotenv-load := true` and `backend/.env` holds a live
+`ANTHROPIC_API_KEY`. From the moment `Config` read it, any test that built an
+adapter without overriding `NADE_LLM_API_BASE` would send real requests and bill
+real money — on whichever machine happens to have a key, and nowhere else, which
+is the worst possible way to find out.
+
+`anthropic::guard_against_live_calls_in_tests` panics under `cfg(test)` when the
+base URL is the real one, with `NADE_LIVE=1` as the deliberate escape for a live
+smoke. Structural, like `gmail::tests::no_bare_reqwest_clients`, rather than a
+convention someone has to remember.
+
+## D60 — The compile path is the one that spends without a ceiling. It has one now.
+
+Three routes reach a model: `POST /agents`, `PATCH /agents/{id}` and the
+`run_agent` job. Only the job was covered. `SpendGuard` lives inside
+`Adapter::chat`, and `compile` deliberately goes around the adapter — it needs a
+forced `tool_choice`, which the SDK's provider-neutral `ChatRequest` cannot
+express — so it inherited nothing, while still *writing* `llm_calls` rows that
+counted against the ceiling for everybody else.
+
+An authenticated device could loop `POST /agents` at ~$0.012 a call, forever,
+answered `200` every time (a compile failure is not an HTTP failure, so there
+was never an error to back off from). Hundreds of dollars an hour against a
+$1/day cap.
+
+The check is now inside `compile::compile`, above `client.send`, because that is
+the one place both handlers pass through and a third caller would otherwise
+inherit nothing again. It returns `CompileError::CeilingReached`, which the
+handlers map to `429` rather than storing: a ceiling breach is a fact about
+today, not about the sentence, and recording it as a `compile_error` would
+permanently mark a sentence that will compile perfectly well tomorrow.
+
+## D61 — A billed call that we failed to parse is still a billed call.
+
+`compile` recorded its ledger row *after* `extract_call`, so every early return
+between the provider's `200` and a decoded answer spent money the ledger never
+saw. A body that will not decode, or a model that answers without calling the
+forced tool, both take that path — and the second is reachable by a crafted
+`nl_definition`.
+
+Both are now recorded before parsing, from `WireResponse::usage()`, which exists
+for exactly this: price the response, then decode it. `Adapter` already closed
+the same hole on the run path; this brings the compiler alongside it. The two
+`let _ = ledger::record(...)` calls became a helper that logs at `error!`, on the
+same reasoning — a silent gap in the ledger is how a ceiling stops binding.
+
+## D62 — The fence carries a per-run nonce, and determinism was never the obstacle.
+
+The first version used fixed delimiters and argued a nonce would break the SDK's
+idempotency contract. That was wrong twice.
+
+Wrong about the threat: `backend/testdata/injection/README.md` rates a fixed
+label **High** — "a fence whose delimiter is a constant is guessable the moment
+this repo is readable. The fence needs a per-run nonce." And a constant
+delimiter cannot be neutralised by string replacement: the old code rewrote an
+attacker's closer to `UNTRUSTED-EMAIL-CONTENT >>>`, one space from the real one
+and the same token sequence to a model, while the test counted exact matches and
+stayed green. Lower case passed through untouched.
+
+Wrong about determinism: the SDK requires a tool's output to be identical across
+**attempts at one step**, and `run_id` is fixed for the life of a run —
+`CallContext` documents `replay` as "the only field that varies between
+attempts". A nonce derived from `run_id` is perfectly deterministic.
+
+`fence::nonce_for` takes 16 hex from the run id; `neutralise` strips the nonce
+outright and de-fangs marker-shaped text case-insensitively. The tests now
+assert the property rather than a count: **nothing the content contributed may
+read as a boundary**, checked over all 85 corpus cases.
+
+## D63 — A tool result is budgeted by measurement, not by estimate.
+
+`read_thread` capped each body at 1 500 bytes and showed eight of them, which
+fits 16 KiB — for a body with nothing JSON-escapable in it. Every `\n` and `"`
+costs two bytes once serialised and `strip_control_characters` deliberately
+keeps newlines, so ordinary hard-wrapped mail with quoted replies measured
+18 304 bytes. Over the cap the SDK replaces the **whole** result with a
+truncation envelope, so the model would have received a fragment of JSON instead
+of the thread — on normal mail, which is exactly the failure D55 says the
+projection exists to prevent.
+
+The projection now drops messages from the oldest end until
+`serde_json::to_vec(...)` fits. `subject`, `from`, `from_name` and `to` are
+capped too: `mail::parse::MAX_SUBJECT` allows 4 000 **characters**, ~16 KB in
+astral codepoints, enough to blow the cap single-handed and destroy every other
+field beside it. The guarding test now uses quoted, hard-wrapped bodies, five
+recipients and a 4 000-codepoint subject — and fails by 2 KB without the fix.
+
+## D64 — Never mix a byte index from one string with a length from another.
+
+`compile::verbatim_span` did `nl_definition.to_lowercase().find(span)` and then
+sliced `nl_definition` with the result plus `span.len()`. `str::to_lowercase` is
+full Unicode case mapping and is **not** byte-length preserving: `İ` (2 bytes)
+lowercases to 3, `ẞ` (3) to 2. Measured against the shipped code:
+
+* `İx` + span `X` → byte index 4 into a 3-byte string: **panic**
+* `İÉ save this` + span `é save` → start 3 is not a char boundary: **panic**
+* `ẞIG news…` + span `ßig news` → silently returns `ẞIG new`, one character
+  short, which the builder then underlines wrongly with no error anywhere
+
+The panic reaches `POST /agents` from a 4 000-character user string, becomes a
+500 through `CatchPanicLayer`, and **loses the sentence** — the one outcome
+`API.md` §5 says must never happen. `find_case_insensitive` now walks characters
+and returns offsets into the haystack. The same class of bug is why
+`fence::replace_ignoring_case` is hand-written rather than `to_lowercase` plus
+`str::replace`.
+
+## D65 — `Retry-After` is part of what `rate_limited` means.
+
+`API.md` §0 defines the code as "Too many attempts; `Retry-After` header set".
+`ApiError` had no way to carry one, so the spend-ceiling 429 told the app to
+wait with no idea that it meant a day — while `APIClient.swift` already exposes
+`APIFailure.retryAfter` and had nothing to read. `ApiError` gained
+`retry_after_secs`, `IntoResponse` emits the header, and the ceiling refusal
+carries the seconds to the next UTC midnight, which is when the ledger's day
+actually rolls over.
+
+## D66 — A schedule is validated against §5.2, not written through as `jsonb`.
+
+`PATCH /agents/{id}` bound `Option<Value>` straight into the column. Three
+defects in one:
+
+* the app breaks — `WireSchedule` declares seven non-optional fields, and a
+  decode failure on one agent fails the **whole** `GET /agents` body, so every
+  agent disappears rather than the broken one;
+* `runs_done` became client-writable, though this struct's own doc comment said
+  it was "ignored if sent". §5.2 calls it server-maintained and read-only, and
+  `ends.after` is counted against it;
+* the trigger/schedule invariant broke — `validate.py` and the contract tests
+  both enforce that a schedule trigger and a schedule imply each other, and
+  `compile.rs` refuses to compile a schedule trigger for exactly that reason,
+  which `PATCH` then walked around.
+
+`validate_schedule` implements §5.2 in full (freq, interval, byweekday only for
+week, bymonthday 1..28 or -1 only for month, `HH:MM`, an IANA tz `chrono-tz` can
+parse, the three `ends` shapes) and carries `runs_done` over from the stored row.
+P4's compiler never emits a schedule trigger, so in practice every schedule is
+refused today — through the rule that will still be right when P7 derives
+`next_run_at` from one.
+
+## D67 — `trigger_summary` is a string, so it needed a test that compares strings.
+
+The server rendered `"Not set up"` and `"Every week at 08:00"`; the fixtures —
+which are what the iOS lane renders and what the signed-off screenshots show —
+say `"Not set"` and `"Every weekday at 08:00"`. Both lanes were green the whole
+time, because every agent assertion in `contract_tests.rs` used `shape_of`, which
+compares key sets and JSON types and never looks at a value.
+
+Fixed, and pinned: `trigger_summary_matches_every_agent_fixture` drives the real
+renderer with each full fixture's own `spec` and `schedule` and compares the
+result to that fixture's `trigger_summary`, then checks the list rows agree with
+the full objects. `shape_of` is the right tool for a shape; a rendered string
+needs `assert_eq`.
+
+## D68 — Two more findings whose fixes are worth knowing, and one that was not a bug.
+
+**A permanent provider error is not a transport error.** `Llm::chat` can only
+answer `Err`, and the host reads every `Err` as "retry later" — so a bad API key
+or a retired model id burned five job attempts and an hour of backoff to reach
+the same answer, leaving the run non-terminal throughout. The adapter now raises
+an out-of-band flag for `400/401/403/404/413`, the same shape as the spend
+breach, and the handler cancels instead of retrying.
+
+**A ceiling breach could strand a run.** The branch read
+`self.cancel(...).or_else(|_| Ok(()))` under a comment that said "settle the row
+instead" — and settled nothing. The job was marked done, `agent_runs.status`
+stayed `running` forever, and the user had already been told the run stopped. It
+now falls through to `settle_row_as_failed`.
+
+**The UTC day boundary was reported as a live bug and is not.**
+`date_trunc('day', now() at time zone 'utc')` really is a naked `timestamp`
+whose comparison against a `timestamptz` happens in the session timezone, and
+this cluster's `postgresql.conf` really does say `America/New_York` — so the
+reading was sound. But `sqlx` negotiates `TimeZone=UTC` on every connection, so
+the two spellings coincide and no spend was ever miscounted. The explicit second
+`at time zone 'utc'` went in anyway — correctness that does not depend on a
+driver default — and the test now asserts the thing that actually protects us:
+that the pool's timezone is UTC. A test written for the reported bug would have
+passed against the unfixed code, which is how the difference was found.
+
+## D69 — A cleanup pass over P4, and the two defects it turned up.
+
+Four independent reviews of the P4 diff — reuse, simplification, efficiency,
+depth — with no brief to look for bugs. Most of what came back was what was
+asked for. Two things were not.
+
+**A display name is as attacker-controlled as a body, and it was not being
+de-fanged.** The scrub-then-cap chain was typed out at nine call sites in two
+tools, and three of them — `from`, `from_name` and every entry in `to` — had
+`fence::strip_control_characters` and `cap` but no `fence::neutralise`. Those
+fields land in the model's JSON *outside* any fence. A per-run nonce makes the
+delimiter unforgeable, so this was defence in depth rather than an open door,
+but the corpus test only ever looked at the body and could not have found it.
+The chain is now one function, `fence::field`, and
+`every_sender_controlled_field_is_defanged_and_not_only_the_body` asserts the
+property over every scalar `read_thread` emits — so a field added later that
+forgets the call fails rather than passes quietly. Reverting one field proves
+the test: it fails with a forged closing delimiter, carrying the run's real
+nonce, sitting in a display name.
+
+**An unparseable response was priced at zero.** `Adapter::chat` recorded a
+`from_wire` failure as `Tokens::default()`, because `from_wire` consumes the
+response and the counters went with it. A body that will not decode was still
+billed, so the ceiling under-counted by exactly the calls that went wrong — the
+failure mode `WireResponse::usage` was written to prevent, and which the spec
+compiler was already using it for. `chat` now reads the counters before parsing.
+
+Everything else was ordinary cleanup, of which four are worth naming:
+
+* **The retry schedule was reused, not rewritten.** `gmail::quota::backoff`
+  already does exponential-with-jitter, already prefers a longer server
+  `Retry-After`, and already caps both. The adapter's own version derived its
+  "jitter" from `attempt * 37 % 250` — a pure function of the attempt number, so
+  two workers that hit the same 429 slept for *exactly* the same time, which is
+  the one thing jitter exists to prevent — and applied a 30 s cap *after* the
+  server's figure, turning "wait two minutes" into thirty seconds and hammering.
+* **`Engine::cancel` no longer needs a model provider.** It replays the journal
+  and appends `run_ended`, dispatching nothing and calling nothing, but it was
+  being handed the run path's engine — which fails outright without an API key.
+  A `DELETE` on a keyless server therefore fell through to writing the row
+  straight to `failed`, the exact shape D57 says breaks `API.md` §6.1. It now
+  builds from `llm::Unreachable` and an empty tool set, which the SDK documents
+  as legal, and a test takes the key away mid-life to prove it.
+* **The `nl_definition` bounds moved into `compile::compile`**, beside the spend
+  ceiling, for the reason the ceiling is there: it is the one place every
+  compile passes through. They had been two copies of an `if` in two handlers —
+  and, it turned out, two copies no test exercised. There are now three,
+  including the unicode one that catches `len()` being used for a cap the
+  contract states in characters.
+* **`Retry-After` is supplied by `IntoResponse` for every `rate_limited`.**
+  `API.md` §0 defines the code as "Too many attempts; `Retry-After` header set",
+  and the pairing brute-force guard (D5) had been emitting it bare while the
+  agent budget's carried a figure. An invariant that is part of a code's
+  *definition* belongs with the code, not at each call site.
+
+`just ci`'s `red-team` recipe also became `cargo test`. It was `cargo check`,
+which proved the detached harness still compiled while all 85 injection cases
+sat unexecuted — acceptable when the fence was hypothetical, not now that
+`agents::fence` is what stands between hostile mail and the model.
+
+**One efficiency finding was deliberately not taken.** `search_mail` asks Gmail
+for 50 message ids and shows the model 10, so a cold page costs five paced
+batches, ~4 s of sleep and 250 quota units for threads the model never sees.
+The fix is not a cleanup: 50 *messages* collapse into at most 50 *threads*, so
+asking for 10 would show the model an unpredictable number of hits and make
+`truncated` meaningless. Re-tuning what an agent perceives is a product decision
+with a live bench behind it, not something to slip into a refactor.

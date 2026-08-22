@@ -87,7 +87,21 @@ impl ErrorCode {
 pub struct ApiError {
     pub code: ErrorCode,
     pub message: String,
+    /// Seconds until the caller may try again.
+    ///
+    /// `API.md` §0 makes the header part of `rate_limited`'s definition — "Too
+    /// many attempts; `Retry-After` header set" — and the iOS client already
+    /// reads it (`APIClient.swift` exposes `APIFailure.retryAfter`). Emitting
+    /// the status without the header tells the app to wait with no idea how
+    /// long, which for a daily budget is about 24 hours out.
+    pub retry_after_secs: Option<u64>,
 }
+
+/// What a `429` says to wait when the caller names no figure of its own.
+///
+/// A minute: long enough that a client honouring it stops hammering, short
+/// enough that a transient limit is not turned into an outage.
+pub const DEFAULT_RETRY_AFTER_SECS: u64 = 60;
 
 impl ApiError {
     #[must_use]
@@ -95,7 +109,15 @@ impl ApiError {
         Self {
             code,
             message: message.into(),
+            retry_after_secs: None,
         }
+    }
+
+    /// Attach `Retry-After`, in seconds.
+    #[must_use]
+    pub fn retry_after(mut self, secs: u64) -> Self {
+        self.retry_after_secs = Some(secs);
+        self
     }
 
     /// The code's canonical message - what the fixtures show.
@@ -114,6 +136,9 @@ impl ApiError {
         Self::of(ErrorCode::NotFound)
     }
 
+    /// A 429 with no figure of its own. `IntoResponse` supplies
+    /// [`DEFAULT_RETRY_AFTER_SECS`], so the header is never absent; a caller
+    /// that knows better says so with [`Self::retry_after`].
     #[must_use]
     pub fn rate_limited() -> Self {
         Self::of(ErrorCode::RateLimited)
@@ -169,7 +194,7 @@ struct EnvelopeBody<'a> {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
+        let mut response = (
             self.code.status(),
             Json(Envelope {
                 error: EnvelopeBody {
@@ -178,7 +203,27 @@ impl IntoResponse for ApiError {
                 },
             }),
         )
-            .into_response()
+            .into_response();
+
+        // `API.md` §0 writes the header into `rate_limited`'s own definition,
+        // and the iOS client reads it. A 429 without it says "wait" and not
+        // "wait this long", which for a daily budget is a day out.
+        // The default is not cosmetic: `API.md` §0 defines `rate_limited` as
+        // "Too many attempts; `Retry-After` header set", so a 429 emitted
+        // without one does not match its own definition. Enforced here rather
+        // than at each call site, which is how the pairing guard's 429 (D5) came
+        // to ship bare while the agent budget's carried a figure.
+        let retry_after = self
+            .retry_after_secs
+            .or((self.code == ErrorCode::RateLimited).then_some(DEFAULT_RETRY_AFTER_SECS));
+        if let Some(secs) = retry_after {
+            if let Ok(value) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+                response
+                    .headers_mut()
+                    .insert(axum::http::header::RETRY_AFTER, value);
+            }
+        }
+        response
     }
 }
 
@@ -224,6 +269,50 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
+
+    /// `API.md` §0 defines `rate_limited` as "Too many attempts; `Retry-After`
+    /// header set", so a 429 without one does not match its own definition.
+    /// The pairing guard's 429 (D5) shipped bare while the agent budget's
+    /// carried a figure; the default closes that by construction.
+    #[test]
+    fn every_rate_limited_response_carries_retry_after() {
+        let bare = ApiError::rate_limited().into_response();
+        assert_eq!(bare.status(), ErrorCode::RateLimited.status());
+        assert_eq!(
+            bare.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some(DEFAULT_RETRY_AFTER_SECS.to_string().as_str()),
+        );
+
+        // A caller that knows better still wins.
+        let explicit = ApiError::rate_limited().retry_after(3_600).into_response();
+        assert_eq!(
+            explicit
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("3600"),
+        );
+
+        // And nothing else grows the header.
+        for error in [
+            ApiError::bad_request("no"),
+            ApiError::unauthorized(),
+            ApiError::not_found(),
+        ] {
+            let response = error.into_response();
+            assert!(
+                response
+                    .headers()
+                    .get(axum::http::header::RETRY_AFTER)
+                    .is_none(),
+                "only a 429 carries Retry-After"
+            );
+        }
+    }
+
     use crate::test_support::{fixture, response_json};
 
     /// Criterion P1 - every code we serve matches its `docs/contract/` fixture,

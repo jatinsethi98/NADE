@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agents;
 pub mod api;
 pub mod config;
 pub mod db;
@@ -14,7 +15,10 @@ pub mod embedded;
 pub mod error;
 pub mod gmail;
 pub mod jobs;
+pub(crate) mod json;
+pub mod llm;
 pub mod mail;
+pub mod runtime;
 pub mod search;
 pub mod state;
 pub mod sync;
@@ -28,8 +32,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Every job kind this server can run.
 ///
 /// Lives here rather than in `main.rs` so a test can assert the registry a real
-/// process would build. P3 adds `renew_watch`, P4 `run_agent`, P5
-/// `triage_message` and `expire_approvals`.
+/// process would build. P5 adds `triage_message` and `expire_approvals`.
 pub fn register_handlers(registry: &mut jobs::Registry, state: &state::AppState) {
     registry.register(sync::KIND, sync::SyncHandler::shared(state.clone()));
     registry.register(
@@ -39,5 +42,9 @@ pub fn register_handlers(registry: &mut jobs::Registry, state: &state::AppState)
     registry.register(
         sync::schedule::KIND,
         sync::schedule::MaintenanceHandler::shared(state.clone()),
+    );
+    registry.register(
+        agents::run::KIND,
+        agents::run::RunAgentHandler::shared(state.clone()),
     );
 }

@@ -11,8 +11,9 @@ Draft 3 folds in a third adversarial review (findings C1–C10, appendix) and tw
 | P1 Foundations | ✅ 2026-08-17 |
 | P2 Mail lands | ✅ 2026-08-19 |
 | P3 Mail stays current | ✅ 2026-08-20 — backend live; the iOS screens run on fixtures until P4/P5 serve them |
-| P4 First runs | next, and unblocked — the Anthropic key is in `backend/.env` |
-| P5–P8 | not started |
+| P4 First runs | ✅ 2026-08-21 — live against real mail and a real model |
+| P5 The loop closes | next |
+| P6–P8 | not started |
 
 Green at `8b05de1`: 785 Rust tests, 258 iOS unit, 46 iOS UI, each twice
 consecutively. 38 screenshots in `docs/screens/`, all distinct by hash.
@@ -421,7 +422,49 @@ gives it one.
   The footer especially: its point is that the sentence is server-supplied so
   it cannot drift, which a bundled copy would defeat.
 
-**P4 — First runs. ← next. [backend] (gate: P1 [sdk] green)**
+**P4 — First runs. ✅ DONE 2026-08-21. [backend]**
+
+Shipped: `runtime/journal.rs` (the Postgres `Journal`, `synchronous_commit` set
+for its own transaction, the engine's stamp bound explicitly against the
+column's `default now()`), `llm/{anthropic,cost,ledger}.rs` (the Messages
+adapter, integer nano-USD pricing, the per-account ledger), `agents/`
+(`fence.rs` with a per-run nonce, the four tools, the spec compiler, the
+`run_agent` job), the ten routes on `/agents`, `/runs`, `/notes`, `/drafts`, and
+migration `0005`. Real tool fingerprints replaced the generator's stand-ins.
+
+✓ **Proven live, not only in tests**: a real sentence compiled (7 s steady
+state; the first call is ~50 s of cold TLS), and a run against the live mailbox
+journalled `search_mail` → five **parallel** `read_thread` calls in one turn →
+`write_note`, `steps=7`, every body fenced, the note landing with a v5 uuid.
+`draft_reply` produced a real draft and `PATCH /drafts/{id}` edited it. Total
+spend $0.041, and the ledger matches to the digit.
+
+Three review passes ran on the finished lane — correctness, wire contract, and
+security/money — and found **four blockers and eleven majors**, all folded in.
+The ones worth remembering are `DECISIONS.md` D60–D68: the compile path spent
+with no ceiling at all; a billed call whose body would not parse wrote no ledger
+row; `verbatim_span` **panicked** on unicode case mapping and lost the user's
+sentence through a 500; the fence's fixed delimiter was rated High by the
+project's own injection corpus and its guard test counted matches instead of
+asserting the property; `read_thread` blew the 16 KiB cap on ordinary
+hard-wrapped mail; `PATCH` wrote an unvalidated `schedule` straight into
+`jsonb`, which would have failed the app's decode of the *whole* agent list; and
+`trigger_summary` disagreed with the fixtures in two places while both lanes
+stayed green, because every agent assertion compared shapes and never strings.
+
+One finding was reported as live and was not: the UTC day boundary. The SQL
+reasoning was right, but `sqlx` pins `TimeZone=UTC`, so nothing was ever
+miscounted — recorded in D68 because a test written for the reported bug passes
+against the unfixed code.
+
+**Still owed by P4's neighbours**, discovered during the review and owned by no
+phase: the iOS lane still answers `APIFailure.notServedYet` for all six
+`/agents` routes (`MailSource.swift`), and no phase's `[ios]` list says "Agents
+tab live". P5's gate or P7's list needs it.
+
+The original P4 definition follows.
+
+**P4 — First runs (as specified). [backend] (gate: P1 [sdk] green)**
 
 The SDK stays as it is — no HTTP, no DB, no runtime, per its own manifesto.
 Everything below is host code in `nade-server`; every line item is named here

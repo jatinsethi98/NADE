@@ -286,7 +286,26 @@ pub async fn thread(
     Path(thread_id): Path<String>,
 ) -> ApiResult<Json<ThreadDetail>> {
     let account = auth.account.ok_or_else(ApiError::not_found)?;
+    Ok(Json(thread_detail(&state, &account, &thread_id).await?))
+}
 
+/// One thread, hydrated from Gmail if the cache holds only part of it.
+///
+/// Extracted from the handler so the agents' `read_thread` tool calls the same
+/// code rather than growing a second thread view with its own subtly different
+/// completion, ordering and attachment joins - the same reason `search::search`
+/// is one function serving both `GET /search` and `search_mail`.
+///
+/// # Errors
+/// `404` when the thread is not this account's, and whatever
+/// [`crate::mail::cache::ensure_thread_complete`] reports when Gmail is
+/// unreachable.
+pub(crate) async fn thread_detail(
+    state: &AppState,
+    account: &crate::state::Account,
+    thread_id: &str,
+) -> ApiResult<ThreadDetail> {
+    let thread_id = thread_id.to_owned();
     let head = |thread_id: String| {
         let pool = state.pool.clone();
         async move {
@@ -311,7 +330,7 @@ pub async fn thread(
     // conversation can be one message out of ten - and nine silent absences in
     // a thread view is mail the reader does not know they are missing.
     let completeness =
-        crate::mail::cache::ensure_thread_complete(&state, account.id, &thread_id).await?;
+        crate::mail::cache::ensure_thread_complete(state, account.id, &thread_id).await?;
 
     // Re-read, because completing the thread can have added a message *newer*
     // than anything we held, and the subject is the newest message's.
@@ -362,16 +381,17 @@ pub async fn thread(
         })
         .collect();
 
-    Ok(Json(ThreadDetail {
+    Ok(ThreadDetail {
         id: thread_id.clone(),
         subject,
-        mailbox_name: mailbox_name_for(&state, account.id, &thread_id).await?,
-        account_email: account.email,
+        mailbox_name: mailbox_name_for(state, account.id, &thread_id).await?,
+        account_email: account.email.clone(),
         messages,
-        // P4/P5 fill these in; the field exists now so the shape never changes.
+        // P5 fills these in: a card needs a feed item, and a P4 run is always
+        // `manual`, so no P4 run has a thread to attach one to.
         agent_cards: Vec::new(),
         partial: completeness.is_partial(),
-    }))
+    })
 }
 
 /// `GET /v1/messages/{gmail_id}/attachments/{att_id}`.
@@ -460,14 +480,11 @@ async fn page_of(
     limit: i64,
 ) -> ApiResult<ThreadsResponse> {
     let limit = usize::try_from(limit).unwrap_or(50);
-    let has_more = rows.len() > limit;
-    rows.truncate(limit);
+    let next_cursor =
+        cursor::take_page(&mut rows, limit, |row| (row.last_ts, row.thread_id.clone()));
 
+    // After the trim, so a page of 50 never hydrates notes for the 51st row.
     let notes = agent_notes(state, account_id, &rows).await?;
-    let next_cursor = has_more
-        .then(|| rows.last())
-        .flatten()
-        .map(|row| cursor::encode(row.last_ts, &row.thread_id));
 
     Ok(ThreadsResponse {
         threads: rows

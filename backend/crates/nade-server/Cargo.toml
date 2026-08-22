@@ -21,6 +21,8 @@ async-trait.workspace = true
 axum = { version = "0.8", features = ["macros"] }
 base64.workspace = true
 chrono.workspace = true
+# P4 validates a client-supplied schedule tz; P7 derives next_run_at from it.
+chrono-tz.workspace = true
 dotenvy = "0.15"
 encoding_rs = "0.8"
 hex = "0.4"
@@ -31,6 +33,10 @@ http = "1"
 # see docs/PARSER.md: it emits 6.5x the text, 21% of it box-drawing glyphs.
 lol_html = "3"
 mail-parser = "0.11"
+# The generic agent engine. Host code only: this crate supplies the Postgres
+# `Journal`, the Anthropic `Llm` and the four `Tool`s; the SDK supplies the
+# engine and owns crash-safety. It is frozen - see its own manifesto.
+nade-agent-sdk = { path = "../nade-agent-sdk" }
 # PKCE + `state` + the token request shapes. `default-features = false` keeps
 # oauth2's own reqwest/TLS stack out of the tree; we bridge to our reqwest
 # client by hand (gmail::oauth::HttpBridge).
@@ -92,6 +98,10 @@ postgresql_embedded = { version = "0.21", default-features = false, features = [
 jsonwebtoken = { version = "11.0.0", default-features = false, features = ["use_pem", "rust_crypto"] }
 
 [dev-dependencies]
+# The same crate again, with its test doubles. `ScriptedLlm`, `MemoryJournal`
+# and `CountingTool` are exactly the fakes the host tests need, and rewriting
+# them here would mean testing against a second, subtly different engine.
+nade-agent-sdk = { path = "../nade-agent-sdk", features = ["testing"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 wiremock = "0.6"

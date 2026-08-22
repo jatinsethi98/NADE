@@ -76,17 +76,41 @@ def compact(value):
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
 
+# The four v1 tools' real fingerprints, as `nade_agent_sdk::tool_fingerprint`
+# computes them over `{name, description, version, schema}`.
+#
+# These are copied from the build, exactly like `EFFECT_GOLDEN` in validate.py
+# is copied from the SDK's own golden-vector test. Python cannot compute them:
+# the inputs are Rust string literals, and `check_generator_is_deterministic`
+# forbids this file from importing `subprocess` to go and ask.
+#
+# Refresh with:
+#   cargo test -p nade-server print_tool_fingerprints -- --ignored --nocapture
+#
+# They are held in place from the Rust side by
+# `agents::tools::tests::the_real_fingerprints_match_the_contracts_golden_table`,
+# so a tool whose description or schema changes fails there - in the language
+# that owns the hash - rather than drifting silently past this file.
+TOOL_FINGERPRINTS = {
+    "draft_reply": "sha256:2f0eb322bcb3d5ad33f7498d8239d85f730015213c73b03c003bf058b9b46e2f",
+    "read_thread": "sha256:572e586bdbf66002e29529db5deb0d792b29bb667e763ee2c8dc4a57f51370f8",
+    "search_mail": "sha256:7c5acf3f12e2386148f59b7930d467608bee79dc6b340e4e2f6b6471578cc4f1",
+    "write_note": "sha256:839c157ed05e2127a38a0ea05eeebb05cd524ee265bd2dfdd9aaa3655d64c203",
+}
+
+
 def tool_fingerprint(tool):
     """`sha256:<hex>` over a tool's interface, as the engine records it.
 
-    The real value hashes the tool's name, description, version and schema
-    (`nade_agent_sdk::tool_fingerprint`); the fixture derives a stable
-    stand-in from the name alone, so the shape and the per-tool stability are
-    both real without duplicating the Rust hasher here. Like `PAIR_TOKEN`, it
-    is an example value, not a value any build will reproduce.
+    The real value, not a stand-in: P4 built the four tools, so the hashes a
+    live build records are known and are the ones written here.
     """
-    return "sha256:" + hashlib.sha256(
-        ("nade.tool/%s@v1" % tool).encode("utf-8")).hexdigest()
+    try:
+        return TOOL_FINGERPRINTS[tool]
+    except KeyError:
+        raise SystemExit(
+            "no fingerprint for tool %r; add it to TOOL_FINGERPRINTS (see the "
+            "refresh command above)" % tool)
 
 
 def cursor(ts, id_):
@@ -1100,19 +1124,21 @@ _j1.think("I'll read the thread first.", 1840, 96, TS["r1_think"],
 _seq = _j1.open_step("call_1_1", "read_thread", READ_T1_ARGS, TS["r1_think"])
 # A long thread: the result was capped, and says so in the value rather than
 # being silently trimmed.
+# A result the engine had to cap. The envelope is the SDK's own
+# (`nade_agent_sdk::tool::cap_result`), not a marker of our invention: the
+# engine *replaces* an oversized result rather than trimming inside it, so a
+# fixture carrying "…[truncated N bytes]" described output no build produces -
+# the same defect class as the pre-P4 journal vocabulary, and caught the same
+# way, by transcribing what the SDK actually writes.
 _j1.close_step("call_1_1", "read_thread", {
-    "thread_id": T1,
-    "subject": "Staff Product Designer at Kettle",
-    "message_count": 3,
-    "latest": {
-        "gmail_id": M3,
-        "from_email": "priya@kettle.com",
-        "ts": TS["m3"],
-        "body_text": (
-            "Two things to lock in: a 30-minute intro with our head of design, and "
-            "a portfolio session the week…[truncated 1180 bytes]"
-        ),
-    },
+    "nade_truncated": True,
+    "reason": "tool result exceeded the configured size cap",
+    "original_bytes": 17580,
+    "limit_bytes": 16384,
+    "preview": (
+        "{\"thread_id\":\"" + T1 + "\",\"subject\":\"Staff Product Designer at "
+        "Kettle\",\"message_count\":3,\"latest\":{\"from_email\":\"priya@kettle.com"
+    ),
 }, _seq, TS["r1_read_done"], truncated=True)
 _j1.think("Two concrete next steps. Both need approval before I save them.",
           3210, 184, TS["r1_think2"],

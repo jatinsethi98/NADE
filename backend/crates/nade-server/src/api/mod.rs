@@ -10,11 +10,15 @@
 //! authenticated `POST /auth/gmail/link`, and `callback` demands the cookie
 //! `start` set. backend/DECISIONS.md D15.
 
+pub mod agents;
 pub mod auth;
 pub mod cursor;
+pub mod drafts;
 pub mod gmail_auth;
 pub mod health;
 pub mod mail;
+pub mod notes;
+pub mod runs;
 pub mod webhooks;
 
 /// Our real response types, serialised and compared against `docs/contract/`.
@@ -51,7 +55,21 @@ pub fn router(state: AppState) -> Router {
             "/messages/{gmail_id}/attachments/{att_id}",
             get(mail::attachment),
         )
-        // P4+ mounts /agents, /feed, /notes, /drafts, /runs, /settings here.
+        // P4. P5 mounts /feed here, P7 /settings.
+        .route("/agents", get(agents::list).post(agents::create))
+        .route(
+            "/agents/{id}",
+            get(agents::detail)
+                .patch(agents::patch)
+                .delete(agents::delete),
+        )
+        .route("/agents/{id}/run", post(agents::run_now))
+        .route("/runs", get(runs::list))
+        .route("/runs/{id}", get(runs::detail))
+        .route("/notes", get(notes::list))
+        .route("/notes/{id}", get(notes::detail))
+        .route("/drafts", get(drafts::list))
+        .route("/drafts/{id}", axum::routing::patch(drafts::patch))
         .fallback(not_found)
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -183,8 +201,9 @@ mod tests {
 
         // And a route no phase serves yet reaches the *router's* 404 rather
         // than the guard's 401, which is what proves the middleware passes
-        // through rather than short-circuiting.
-        let response = authed_get(&app, "/v1/agents", Some(&token)).await;
+        // through rather than short-circuiting. `/v1/agents` was this probe
+        // until P4 mounted it; `/v1/feed` lands at P5.
+        let response = authed_get(&app, "/v1/feed", Some(&token)).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(response_json(response).await["error"]["code"], "not_found");
     }

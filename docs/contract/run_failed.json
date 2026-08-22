@@ -61,7 +61,7 @@
         "effect_id": "f3866d6f-cba8-5662-8b19-2f2d2e2d3d6d",
         "attempt": 1,
         "opened_at": "2026-08-16T09:12:09Z",
-        "tool_fingerprint": "sha256:26844ddc62a6b01f632e3c825a5f756b3f63943980fe3ec531f5928eb976975a",
+        "tool_fingerprint": "sha256:572e586bdbf66002e29529db5deb0d792b29bb667e763ee2c8dc4a57f51370f8",
         "replay_policy": "retry"
       },
       "created_at": "2026-08-16T09:12:09Z"

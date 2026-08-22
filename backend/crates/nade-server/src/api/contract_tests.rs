@@ -528,3 +528,504 @@ fn strings(value: &Value) -> Vec<String> {
         .map(|entry| entry.as_str().unwrap().to_owned())
         .collect()
 }
+
+// ------------------------------------------------------- P4: the agents --
+
+use super::agents::{AgentDetail, AgentSummary, AgentsResponse};
+use super::drafts::{Draft, DraftsResponse};
+use super::notes::{NoteDetail, NoteSummary, NotesResponse};
+use super::runs::{JournalEntry, RunDetail, RunSummary, RunsResponse};
+
+fn an_agent_summary() -> AgentSummary {
+    AgentSummary {
+        id: uuid::Uuid::nil(),
+        name: "Job Search Tracker".to_owned(),
+        nl_definition: "When a recruiter emails, save a note.".to_owned(),
+        status: "published".to_owned(),
+        trigger_summary: "On new mail".to_owned(),
+        schedule: None,
+        last_run_at: Some("2026-08-16T09:13:41Z".to_owned()),
+        approval_required: true,
+    }
+}
+
+#[test]
+fn the_agent_list_row_matches_the_fixture_shape() {
+    shape_of(
+        &AgentsResponse {
+            agents: vec![an_agent_summary()],
+        },
+        "agents.json",
+    );
+}
+
+#[test]
+fn the_full_agent_matches_the_fixture_shape() {
+    // `#[serde(flatten)]` on the summary is the risk here: a flattened struct
+    // that stopped flattening would nest the list fields under a key and every
+    // client would break. Comparing against the fixture is what catches it.
+    shape_of(
+        &AgentDetail {
+            summary: an_agent_summary(),
+            allowed_tools: vec!["search_mail".to_owned()],
+            when_span: Some("a recruiter emails".to_owned()),
+            do_span: Some("save a note".to_owned()),
+            trailing: Some("Ask me first.".to_owned()),
+            compile_error: None,
+            spec: Some(fixture("agent.json")["spec"].clone()),
+        },
+        "agent.json",
+    );
+}
+
+#[test]
+fn an_empty_agent_list_matches_and_carries_no_cursor() {
+    assert_matches(&AgentsResponse { agents: Vec::new() }, "agents_empty.json");
+}
+
+#[test]
+fn the_full_agent_carries_every_list_field_as_well() {
+    // The flatten, from the other direction: `GET /agents/{id}` is a superset of
+    // a list row, so a client that only knows the list shape still decodes it.
+    let detail = serde_json::to_value(AgentDetail {
+        summary: an_agent_summary(),
+        allowed_tools: Vec::new(),
+        when_span: None,
+        do_span: None,
+        trailing: None,
+        compile_error: None,
+        spec: None,
+    })
+    .unwrap();
+    let summary = serde_json::to_value(an_agent_summary()).unwrap();
+    for key in summary.as_object().unwrap().keys() {
+        assert!(detail.get(key).is_some(), "the full agent is missing {key}");
+    }
+}
+
+// --------------------------------------------------------- P4: the runs --
+
+#[test]
+fn the_run_list_row_matches_the_fixture_shape() {
+    shape_of(
+        &RunsResponse {
+            runs: vec![RunSummary {
+                id: uuid::Uuid::nil(),
+                agent_id: uuid::Uuid::nil(),
+                agent_name: "Job Search Tracker".to_owned(),
+                trigger_kind: "mail".to_owned(),
+                status: "done".to_owned(),
+                summary: Some("Two next steps found".to_owned()),
+                created_at: "2026-08-16T09:13:41Z".to_owned(),
+                updated_at: "2026-08-16T09:13:58Z".to_owned(),
+            }],
+            next_cursor: None,
+        },
+        "runs.json",
+    );
+}
+
+#[test]
+fn the_run_detail_matches_the_fixture_shape() {
+    let fixture_run = fixture("run.json");
+    let journal: Vec<JournalEntry> = fixture_run["journal"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| JournalEntry {
+            seq: i32::try_from(entry["seq"].as_i64().unwrap()).unwrap(),
+            kind: entry["kind"].as_str().unwrap().to_owned(),
+            payload: entry["payload"].clone(),
+            created_at: entry["created_at"].as_str().unwrap().to_owned(),
+        })
+        .collect();
+
+    // The journal is served **verbatim** (`API.md` §6.1), so this is not just a
+    // shape check: re-serialising the fixture's own entries must reproduce them
+    // byte for byte, which is what "verbatim" means in practice.
+    let produced = serde_json::to_value(&journal).unwrap();
+    assert_eq!(
+        produced, fixture_run["journal"],
+        "the journal was not served verbatim"
+    );
+
+    shape_of(
+        &RunDetail {
+            id: uuid::Uuid::nil(),
+            agent_id: uuid::Uuid::nil(),
+            agent_name: "Job Search Tracker".to_owned(),
+            status: "pending_approval".to_owned(),
+            trigger_kind: "mail".to_owned(),
+            trigger_ref: Some("18f2c4d5e6f70819".to_owned()),
+            error: None,
+            journal,
+        },
+        "run.json",
+    );
+}
+
+#[test]
+fn every_run_fixture_serves_its_journal_verbatim() {
+    // All six run fixtures, not only the one above: each exercises a different
+    // terminal shape, and the verbatim rule holds for every one.
+    for name in [
+        "run.json",
+        "run_done.json",
+        "run_failed.json",
+        "run_pending_draft.json",
+        "run_skipped.json",
+        "run_expired.json",
+    ] {
+        let body = fixture(name);
+        let journal: Vec<JournalEntry> = body["journal"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| JournalEntry {
+                seq: i32::try_from(entry["seq"].as_i64().unwrap()).unwrap(),
+                kind: entry["kind"].as_str().unwrap().to_owned(),
+                payload: entry["payload"].clone(),
+                created_at: entry["created_at"].as_str().unwrap().to_owned(),
+            })
+            .collect();
+        assert_eq!(
+            serde_json::to_value(&journal).unwrap(),
+            body["journal"],
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_run_log_matches() {
+    assert_matches(
+        &RunsResponse {
+            runs: Vec::new(),
+            next_cursor: None,
+        },
+        "runs_empty.json",
+    );
+}
+
+// ---------------------------------------------- P4: the notes and drafts --
+
+#[test]
+fn the_note_list_row_matches_the_fixture_shape() {
+    shape_of(
+        &NotesResponse {
+            notes: vec![NoteSummary {
+                id: uuid::Uuid::nil(),
+                run_id: Some(uuid::Uuid::nil()),
+                thread_id: Some("18f2a1b3c4d5e6f7".to_owned()),
+                title: "Kettle - next steps".to_owned(),
+                agent_name: Some("Job Search Tracker".to_owned()),
+                unread: true,
+                updated_at: "2026-08-16T09:13:58Z".to_owned(),
+            }],
+            next_cursor: None,
+        },
+        "notes.json",
+    );
+}
+
+#[test]
+fn the_note_detail_matches_the_fixture_shape() {
+    shape_of(
+        &NoteDetail {
+            id: uuid::Uuid::nil(),
+            title: "Kettle - next steps".to_owned(),
+            body_md: "# Kettle".to_owned(),
+            run_id: Some(uuid::Uuid::nil()),
+            thread_id: Some("18f2a1b3c4d5e6f7".to_owned()),
+            agent_name: Some("Job Search Tracker".to_owned()),
+            unread: false,
+            updated_at: "2026-08-16T09:13:58Z".to_owned(),
+        },
+        "note.json",
+    );
+}
+
+#[test]
+fn the_note_detail_fixture_reports_the_state_after_the_read() {
+    // `API.md` §3: reading marks it read, so the detail is always `false`.
+    assert_eq!(fixture("note.json")["unread"], json!(false));
+}
+
+#[test]
+fn the_draft_matches_the_fixture_shape() {
+    shape_of(
+        &DraftsResponse {
+            drafts: vec![Draft {
+                id: uuid::Uuid::nil(),
+                run_id: Some(uuid::Uuid::nil()),
+                thread_id: Some("18f2a1b3c4d5e6f7".to_owned()),
+                to: vec!["priya@kettle.com".to_owned()],
+                subject: "Re: Staff Product Designer".to_owned(),
+                body_text: "Hi Priya".to_owned(),
+                created_at: "2026-08-16T09:13:41Z".to_owned(),
+                updated_at: "2026-08-17T07:41:12Z".to_owned(),
+            }],
+            next_cursor: None,
+        },
+        "drafts.json",
+    );
+}
+
+#[test]
+fn the_patch_response_is_the_same_shape_as_a_list_row() {
+    // `API.md` §11: there is deliberately no `GET /drafts/{id}` because the list
+    // carries the whole draft and `PATCH` returns it - which is only true if the
+    // two shapes are identical.
+    shape_of(
+        &Draft {
+            id: uuid::Uuid::nil(),
+            run_id: Some(uuid::Uuid::nil()),
+            thread_id: Some("18f2a1b3c4d5e6f7".to_owned()),
+            to: vec!["priya@kettle.com".to_owned()],
+            subject: "Re: Staff Product Designer".to_owned(),
+            body_text: "Hi Priya".to_owned(),
+            created_at: "2026-08-16T09:13:41Z".to_owned(),
+            updated_at: "2026-08-17T07:41:12Z".to_owned(),
+        },
+        "draft.json",
+    );
+}
+
+#[test]
+fn the_empty_note_and_draft_pages_match() {
+    assert_matches(
+        &NotesResponse {
+            notes: Vec::new(),
+            next_cursor: None,
+        },
+        "notes_empty.json",
+    );
+    assert_matches(
+        &DraftsResponse {
+            drafts: Vec::new(),
+            next_cursor: None,
+        },
+        "drafts_empty.json",
+    );
+}
+
+// --------------------------------------------------- fixture completeness --
+
+/// Every fixture is referenced by some test, or is explicitly deferred.
+///
+/// The failure this prevents is a fixture that exists, is generated, is checked
+/// by `validate.py` for *internal* consistency — and is served by nothing,
+/// decoded by nothing, and matched against no real type. That file looks like
+/// coverage and is not.
+///
+/// "Referenced" is checked by scanning this crate's sources for the file name.
+/// Crude, and right for the job: a test that names a fixture is using it, and a
+/// fixture no source mentions is by definition unserved.
+#[test]
+fn every_fixture_is_referenced_by_a_test_or_deferred_on_purpose() {
+    /// Fixtures no P4 code can serve yet, each with the phase that will.
+    const DEFERRED: &[(&str, &str)] = &[
+        // P5 — the approval loop. `error.rs` has eight codes; `API.md` has
+        // thirteen, and these five are the approve/skip transaction's. They are
+        // listed here rather than added as dead `ErrorCode` variants, which
+        // would make this test pass by making the code worse.
+        ("error_conflict.json", "P5: the approve transaction's 409"),
+        ("error_token_consumed.json", "P5: a replayed approval"),
+        ("error_gone.json", "P5: an expired resource"),
+        ("error_approval_expired.json", "P5: the 7-day sweep"),
+        (
+            "error_forbidden.json",
+            "P5+: reserved; v1 is single-account",
+        ),
+        ("feed.json", "P5: the feed producer"),
+        ("feed_empty.json", "P5"),
+        ("feed_item.json", "P5"),
+        ("feed_item_editable.json", "P5"),
+        ("feed_item_info.json", "P5"),
+        ("approve.json", "P5: POST /feed/{id}/approve"),
+        ("skip.json", "P5: POST /feed/{id}/skip"),
+        ("seen.json", "P5: POST /feed/seen"),
+        // P6 — Ask. Request bodies and SSE streams, neither of which is a
+        // response type this crate serialises.
+        ("ask_request.json", "P6: a request body, not a response"),
+        ("ask_request_route_hint.json", "P6: a request body"),
+        ("ask_answer.sse", "P6: an SSE stream"),
+        ("ask_results.sse", "P6: an SSE stream"),
+        ("ask_agent_draft.sse", "P6: an SSE stream"),
+        ("ask_error.sse", "P6: an SSE stream"),
+        // P7 — settings.
+        ("settings.json", "P7: GET/PATCH /settings"),
+    ];
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sources = read_sources(&root.join("src"));
+
+    let mut unreferenced = Vec::new();
+    for entry in std::fs::read_dir(crate::test_support::contract_dir()).expect("docs/contract") {
+        let path = entry.expect("dir entry").path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !(name.ends_with(".json") || name.ends_with(".sse")) {
+            continue;
+        }
+        if DEFERRED.iter().any(|(deferred, _)| *deferred == name) {
+            continue;
+        }
+        // `error::tests::every_served_code_matches_its_contract_fixture` builds
+        // its filenames with `format!`, so a scan for literals cannot see them.
+        // Recognising the pattern is exact rather than a fudge: a fixture named
+        // for a code the server actually serves *is* checked, byte for byte,
+        // and one named for a code with no `ErrorCode` variant is not - which
+        // is precisely the five P5 owes.
+        if is_a_served_error_fixture(name) {
+            continue;
+        }
+        if !sources.contains(name) {
+            unreferenced.push(name.to_owned());
+        }
+    }
+    unreferenced.sort();
+
+    assert!(
+        unreferenced.is_empty(),
+        "these fixtures are served and checked by nothing:\n  {}\n\
+         Either add a test that uses them, or add them to DEFERRED with the \
+         phase that will.",
+        unreferenced.join("\n  ")
+    );
+}
+
+/// Whether `name` is `error_<code>.json` for a code this server serves.
+fn is_a_served_error_fixture(name: &str) -> bool {
+    use crate::error::ErrorCode;
+    const SERVED: &[ErrorCode] = &[
+        ErrorCode::BadRequest,
+        ErrorCode::Unauthorized,
+        ErrorCode::NotFound,
+        ErrorCode::PayloadTooLarge,
+        ErrorCode::RateLimited,
+        ErrorCode::NeedsReauth,
+        ErrorCode::UpstreamUnavailable,
+        ErrorCode::Internal,
+    ];
+    SERVED
+        .iter()
+        .any(|code| name == format!("error_{}.json", code.as_str()))
+}
+
+/// Every `.rs` file under `dir`, concatenated.
+fn read_sources(dir: &std::path::Path) -> String {
+    let mut out = String::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    out.push_str(&text);
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn the_deferred_list_names_only_fixtures_that_exist() {
+    // A stale entry would silently excuse nothing, and would hide the day the
+    // file it names is finally served.
+    let dir = crate::test_support::contract_dir();
+    let present: Vec<String> = std::fs::read_dir(&dir)
+        .expect("docs/contract")
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+        .collect();
+    for name in [
+        "error_conflict.json",
+        "feed.json",
+        "ask_answer.sse",
+        "settings.json",
+    ] {
+        assert!(
+            present.iter().any(|p| p == name),
+            "{name} is deferred but gone"
+        );
+    }
+}
+
+// ------------------------------------------- the agent fixtures' invariants --
+
+#[test]
+fn every_agent_fixture_holds_the_spec_and_span_invariants() {
+    // The four rules `validate.py` enforces on the corpus, restated against the
+    // fixtures the server has to be able to produce. `POST /agents` and
+    // `PATCH /agents/{id}` are written to keep exactly these.
+    for name in [
+        "agent.json",
+        "agent_draft.json",
+        "agent_scheduled.json",
+        "agent_compile_failed.json",
+    ] {
+        let agent = fixture(name);
+        let spec_null = agent["spec"].is_null();
+
+        // spec null XOR compile_error set.
+        assert_eq!(
+            spec_null,
+            !agent["compile_error"].is_null(),
+            "{name}: exactly one of spec and compile_error is how a compile failure is recorded"
+        );
+
+        if spec_null {
+            // A failed compile keeps the sentence and nothing derived from it.
+            for field in ["when_span", "do_span", "trailing"] {
+                assert!(agent[field].is_null(), "{name}: {field} outlived its spec");
+            }
+            assert_eq!(
+                agent["status"],
+                json!("draft"),
+                "{name}: it must still be a draft"
+            );
+        } else {
+            // The builder renders "When {when_span}, {do_span}." and cannot
+            // without both. `trailing` may legitimately be null.
+            for field in ["when_span", "do_span"] {
+                assert!(
+                    !agent[field].is_null(),
+                    "{name}: {field} is needed to render"
+                );
+            }
+            // spec.tools is a subset of allowed_tools.
+            let allowed: Vec<&str> = agent["allowed_tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t.as_str().unwrap())
+                .collect();
+            for tool in agent["spec"]["tools"].as_array().unwrap() {
+                let tool = tool.as_str().unwrap();
+                assert!(allowed.contains(&tool), "{name}: {tool} is not allowed");
+                assert!(
+                    crate::agents::tools::V1_TOOLS.contains(&tool),
+                    "{name}: {tool} is not a v1 tool"
+                );
+            }
+            // A schedule trigger and a schedule imply each other.
+            assert_eq!(
+                agent["spec"]["trigger"]["kind"] == json!("schedule"),
+                !agent["schedule"].is_null(),
+                "{name}: the trigger kind and the schedule disagree"
+            );
+        }
+        assert!(
+            !agent["nl_definition"].as_str().unwrap().is_empty(),
+            "{name}"
+        );
+    }
+}

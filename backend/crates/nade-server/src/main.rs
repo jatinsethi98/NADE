@@ -13,7 +13,7 @@ use nade_server::{
     api::auth::pairing::{PairingCode, PairingStore},
     config::Config,
     db, embedded,
-    jobs::{spawn_workers, Queue, Registry},
+    jobs::{spawn_workers, Registry},
     state::AppState,
     VERSION,
 };
@@ -82,7 +82,10 @@ async fn serve(config: Config) -> Result<()> {
         .context("minting the startup pairing code")?;
     print_pairing_banner(&code, &config);
 
-    let queue = Queue::new(database.pool.clone(), config.jobs.clone());
+    // The state's queue, not a second one: `POST /agents/{id}/run` enqueues
+    // from a request handler, so the queue had to move onto `AppState`, and
+    // two queues over one table would be two configurations that could drift.
+    let queue = state.queue.clone();
     let mut registry = Registry::new();
     nade_server::register_handlers(&mut registry, &state);
     let registry = Arc::new(registry);

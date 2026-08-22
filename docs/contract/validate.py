@@ -1144,6 +1144,54 @@ def status_from_journal(journal):
     return None
 
 
+# The four v1 tools' real `tool_fingerprint` values, restated here the same way
+# every other shape in this file is: independently, so a generator that started
+# varying them - or a fixture edited by hand - fails rather than agreeing with
+# itself. Copied from the build:
+#   cargo test -p nade-server print_tool_fingerprints -- --ignored --nocapture
+# and held in place from the Rust side by
+# `agents::tools::tests::the_real_fingerprints_match_the_contracts_golden_table`.
+TOOL_FINGERPRINT_GOLDEN = {
+    "draft_reply": "sha256:2f0eb322bcb3d5ad33f7498d8239d85f730015213c73b03c003bf058b9b46e2f",
+    "read_thread": "sha256:572e586bdbf66002e29529db5deb0d792b29bb667e763ee2c8dc4a57f51370f8",
+    "search_mail": "sha256:7c5acf3f12e2386148f59b7930d467608bee79dc6b340e4e2f6b6471578cc4f1",
+    "write_note": "sha256:839c157ed05e2127a38a0ea05eeebb05cd524ee265bd2dfdd9aaa3655d64c203",
+}
+
+
+def check_tool_fingerprints(world):
+    """Every journalled fingerprint is the real one for its tool.
+
+    `tool_fingerprint` hashes a tool's *interface* - name, description, version
+    and schema - and the engine checks it before every dispatch, including after
+    an approval, so "a step opened under one build is never executed under
+    another". A fixture carrying a value no build reproduces would describe a
+    journal that could never replay.
+    """
+    seen = {}
+    for _run_id, (name, detail) in sorted(world.run_details.items()):
+        for entry in detail["journal"]:
+            payload = entry.get("payload", {})
+            fingerprint = payload.get("tool_fingerprint")
+            if fingerprint is None:
+                continue
+            tool = payload.get("tool")
+            expected = TOOL_FINGERPRINT_GOLDEN.get(tool)
+            if expected is None:
+                fail(name, "journal seq %s names tool %r, which has no known "
+                           "fingerprint" % (entry.get("seq"), tool))
+            elif fingerprint != expected:
+                fail(name, "journal seq %s records %s's fingerprint as %s; the "
+                           "real one is %s"
+                     % (entry.get("seq"), tool, fingerprint, expected))
+            seen.setdefault(tool, set()).add(fingerprint)
+
+    for tool, values in sorted(seen.items()):
+        if len(values) > 1:
+            fail("journals", "%s has %d different fingerprints across the "
+                             "corpus; one build has one" % (tool, len(values)))
+
+
 def check_journals(world):
     for run_id, (name, detail) in sorted(world.run_details.items()):
         journal = detail["journal"]
@@ -1399,10 +1447,16 @@ def check_effect_ids(name, run_id, journal):
                 fail(name, "seq %d args_hash %s should be %s"
                      % (entry["seq"], payload.get("args_hash"), recomputed))
         elif kind == "step_done":
-            marker = "[truncated " in json.dumps(payload["result"], ensure_ascii=False)
+            # The SDK **replaces** an oversized result with its own envelope
+            # rather than trimming inside it, so the evidence of a cap is
+            # `nade_truncated`, not a marker string. The fixture used to carry
+            # "…[truncated N bytes]", which no build produces - a rule that
+            # could never have been satisfied by a real journal.
+            result = payload["result"]
+            marker = isinstance(result, dict) and result.get("nade_truncated") is True
             if payload["truncated"] and not marker:
                 fail(name, "seq %d is truncated but carries no "
-                           "'…[truncated N bytes]' marker" % entry["seq"])
+                           "SDK's `nade_truncated` envelope" % entry["seq"])
             if marker and not payload["truncated"]:
                 fail(name, "seq %d carries a truncation marker but truncated=false"
                      % entry["seq"])
@@ -2325,6 +2379,7 @@ def main():
     world = World(docs)
     check_references(world)
     check_journals(world)
+    check_tool_fingerprints(world)
     check_runs(world)
     check_agents(world)
     check_notes_and_drafts(world)

@@ -45,17 +45,47 @@ pub struct Keyset {
     pub id: String,
 }
 
-/// Encode a cursor. Second-precision UTC with a `Z`, exactly like every other
-/// timestamp on the wire.
+/// Encode a cursor: UTC with a `Z`, and **as precise as the value it carries**.
+///
+/// `AutoSi` and not `Secs`, which is not cosmetic. A cursor is one half of a
+/// keyset comparison — `(ts, id) < (cursor.ts, cursor.id)` — so it has to round
+/// trip the ordering key exactly. Rows stamped by `now()` carry microseconds,
+/// and a second-precision cursor silently *skipped* every row inside the
+/// cursor's own second: page two of `/runs` came back empty with 51 rows in the
+/// table. `AutoSi` emits no fractional part at all when there is none, so a
+/// whole-second timestamp still encodes byte-identically to before and the
+/// contract fixtures are unaffected.
 #[must_use]
 pub fn encode(ts: DateTime<Utc>, id: &str) -> String {
     let payload = Payload {
-        ts: ts.to_rfc3339_opts(SecondsFormat::Secs, true),
+        ts: ts.to_rfc3339_opts(SecondsFormat::AutoSi, true),
         id: id.to_owned(),
     };
     // `serde_json::to_vec` on two plain strings cannot fail.
     let json = serde_json::to_vec(&payload).unwrap_or_default();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+}
+
+impl Keyset {
+    /// The cursor's id as a UUID.
+    ///
+    /// Every P4 list is keyed on a UUID, but `Payload.id` is a plain string
+    /// because `/mailboxes/{id}/threads` puts a **Gmail thread id** in the same
+    /// field. So a perfectly well-formed cursor from another endpoint decodes
+    /// here without error, and `parse().unwrap_or(Uuid::nil())` — the obvious
+    /// spelling — turns it into the *smallest* UUID, which makes
+    /// `(ts, id) < (ts, nil)` skip every row inside the cursor's own second.
+    ///
+    /// That is a silent wrong answer, and `API.md` §0 forbids even the benign
+    /// version of it: "An unknown or corrupt cursor is `400 bad_request`, never
+    /// a silent reset to page one."
+    ///
+    /// # Errors
+    /// [`ApiError::bad_request`] when the id is not a UUID.
+    pub fn uuid(&self) -> ApiResult<uuid::Uuid> {
+        uuid::Uuid::parse_str(&self.id)
+            .map_err(|_| ApiError::bad_request("That page marker is not valid. Reload the list."))
+    }
 }
 
 /// Decode a cursor.
@@ -133,6 +163,34 @@ fn query_fingerprint(canonical_query: &str) -> String {
     hasher.update(canonical_query.as_bytes());
     let digest = hasher.finalize();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..12])
+}
+
+/// Turn a `limit + 1` fetch into one page and the cursor that follows it.
+///
+/// Every keyset list does the same three things — notice the extra row, drop
+/// it, mint a cursor from the last row that survived — and each of them used to
+/// spell it out again. `DECISIONS.md` D52 records a cursor-precision defect
+/// that had already shipped in this epilogue; the next such fix should land in
+/// one place, not four.
+///
+/// `key` names the ordering pair the query's `order by` uses. Getting it wrong
+/// is the whole failure mode, so it is the argument the caller has to supply.
+pub fn take_page<T>(
+    rows: &mut Vec<T>,
+    page: usize,
+    key: impl Fn(&T) -> (DateTime<Utc>, String),
+) -> Option<String> {
+    // EDGE (pagination boundary): exactly `page` rows means the last page, and
+    // `next_cursor` is null. `API.md` §0 - a cursor is minted only when a row
+    // was actually left behind.
+    if rows.len() <= page {
+        return None;
+    }
+    rows.truncate(page);
+    rows.last().map(|row| {
+        let (ts, id) = key(row);
+        encode(ts, &id)
+    })
 }
 
 /// `limit`, clamped to the contract: default 50, maximum 100.
@@ -332,11 +390,27 @@ mod tests {
         assert_eq!(clamp_limit(Some(-5), 50, 100), 1);
     }
 
-    /// Second precision, always `Z`: the iOS side decodes with a fixed
-    /// formatter, so a fractional second would fail to parse there.
+    /// Always `Z`, and **lossless**.
+    ///
+    /// This test used to assert the opposite - that a fractional second was
+    /// truncated - on the grounds that "the iOS side decodes with a fixed
+    /// formatter". That reasoning does not apply here: a cursor is opaque
+    /// (`API.md` §0, "clients must not parse it"), the app stores it as a string
+    /// and never base64-decodes one, and the `ts` inside it is not a wire
+    /// timestamp. What it *is* is one half of a keyset comparison, so truncating
+    /// it dropped every row inside the cursor's own second - `/runs` served an
+    /// empty page two with 51 rows in the table.
     #[test]
-    fn timestamps_are_second_precision_and_z_suffixed() {
+    fn a_cursor_round_trips_its_timestamp_exactly() {
         let ts = at("2026-08-16T09:12:04.987654Z");
+        assert_eq!(decode(&encode(ts, "x")).unwrap().ts, ts);
+    }
+
+    /// A whole second still encodes with no fractional part, so the contract
+    /// fixtures - whose cursors are all whole seconds - are unaffected.
+    #[test]
+    fn a_whole_second_carries_no_fraction_and_is_z_suffixed() {
+        let ts = at("2026-08-16T09:12:04Z");
         let cursor = encode(ts, "x");
         let json = String::from_utf8(
             base64::engine::general_purpose::URL_SAFE_NO_PAD

@@ -116,10 +116,15 @@ lint:
 
 # The injection red-team harness is a deliberately detached workspace (see its
 # Cargo.toml), so nothing else here ever builds it - and a detached crate rots
-# silently. At minimum it must still compile; the full run is
-# `cd testdata/injection/harness && cargo test`.
+# silently.
+#
+# `test`, not `check`. P4 made the fence load-bearing: `agents::fence` is what
+# stands between hostile mail text and the model, and this harness is the only
+# place the 85-case corpus actually runs. Compiling it proved the crate still
+# built while every one of those cases sat unexecuted. It links what it was
+# already compiling, and the run itself is under a second.
 red-team:
-    cargo check --manifest-path testdata/injection/harness/Cargo.toml --all-targets
+    cargo test --manifest-path testdata/injection/harness/Cargo.toml
 
 # Exactly what the acceptance gate runs. `test` is the workspace suite (D27);
 # `red-team` keeps the detached harness compiling.

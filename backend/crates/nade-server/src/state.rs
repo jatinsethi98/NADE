@@ -11,6 +11,8 @@ use crate::{
     },
     config::Config,
     gmail::GmailRuntime,
+    jobs::Queue,
+    llm::anthropic,
 };
 
 #[derive(Clone)]
@@ -33,6 +35,27 @@ pub struct AppState {
     /// Verifies Gmail's Pub/Sub push. Holds the cached JWK Set, so it must be
     /// shared rather than rebuilt per request.
     pub push: Arc<crate::api::webhooks::oidc::Verifier>,
+    /// The process's one job queue.
+    ///
+    /// P1-P3 kept it in `main.rs` because only the workers touched it. P4 is
+    /// the first phase where a *request* schedules work, and a handler only
+    /// ever sees `AppState`. `main.rs` now takes this queue rather than
+    /// building a second, so there is exactly one per process and its
+    /// configuration cannot diverge from itself.
+    ///
+    /// A handler that must enqueue **inside its own transaction** — as
+    /// `POST /agents/{id}/run` does, since a run row without its job is a
+    /// `queued` run nothing will ever move — calls
+    /// `Queue::enqueue_unique_in` with that transaction instead of reaching
+    /// for this field, because the executor is the thing that has to be
+    /// shared, not the queue.
+    pub queue: Queue,
+    /// The model provider, or `None` when no `ANTHROPIC_API_KEY` is set.
+    ///
+    /// Absent is survivable on purpose, exactly as a missing `web_client.json`
+    /// is: the server boots, mail works, and only the agent routes fail - with
+    /// a message that says why rather than a connection error.
+    pub llm: Option<Arc<anthropic::Client>>,
 }
 
 impl AppState {
@@ -61,8 +84,24 @@ impl AppState {
             gmail.http.clone(),
             config.push.clone(),
         ));
+        let queue = Queue::new(pool.clone(), config.jobs.clone());
+        // A missing key is a configuration state, not a failure: `Err` here
+        // would mean a server with no key refuses to serve mail either.
+        let llm = match anthropic::Client::new(&config.llm) {
+            Ok(client) => Some(Arc::new(client)),
+            Err(anthropic::Error::NotConfigured) => {
+                tracing::info!(
+                    "no ANTHROPIC_API_KEY is set; agent routes will report that they are \
+                     unavailable and everything else works normally"
+                );
+                None
+            }
+            Err(err) => return Err(anyhow::anyhow!(err).context("building the model client")),
+        };
         Ok(Self {
             pool,
+            queue,
+            llm,
             config: Arc::new(config),
             pairing,
             pair_limiter,

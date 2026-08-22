@@ -124,6 +124,8 @@ mod tests {
             "gmail_tokens",
             "jobs",
             "labels",
+            // P4 - the per-account spend ledger the $1/day ceiling reads.
+            "llm_calls",
             "messages",
             "notes",
             "run_journal",
@@ -288,6 +290,27 @@ mod tests {
                 .iter()
                 .any(|(_, def)| def.contains("UNIQUE") && def.contains("dedupe_key")),
             "agent_runs.dedupe_key must be unique"
+        );
+
+        // P4. `GET /runs` is newest-first per account; `agent_runs_agent_idx`
+        // only serves the `?agent_id=` form, so without this one the unfiltered
+        // Run log is a sequential scan plus a sort.
+        let runs = find("agent_runs_account_created_idx");
+        assert!(runs.contains("account_id"), "{runs}");
+        assert!(runs.contains("created_at DESC"), "{runs}");
+
+        // The spend ceiling reads "this account, today".
+        let spend = find("llm_calls_account_day_idx");
+        assert!(spend.contains("account_id"), "{spend}");
+        assert!(spend.contains("created_at DESC"), "{spend}");
+
+        // The triage cap reads "this agent, today", and only for one purpose -
+        // hence a partial index rather than a second full one.
+        let triage = find("llm_calls_agent_day_idx");
+        assert!(triage.contains("agent_id"), "{triage}");
+        assert!(
+            triage.contains("triage"),
+            "the triage index must stay partial: {triage}"
         );
     }
 
@@ -630,7 +653,9 @@ mod tests {
             .fetch_one(&db.pool)
             .await
             .unwrap();
-            assert_eq!(tables, 18, "{} has the wrong table count", db.name);
+            // Tracks the list in `migration_creates_every_planned_table`; that
+            // test names them, this one proves two fresh databases agree.
+            assert_eq!(tables, 19, "{} has the wrong table count", db.name);
         }
     }
 

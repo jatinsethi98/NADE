@@ -61,7 +61,7 @@
         "effect_id": "8beb4e5f-0109-5e04-9a17-dbe59799341d",
         "attempt": 1,
         "opened_at": "2026-08-17T09:05:15Z",
-        "tool_fingerprint": "sha256:26844ddc62a6b01f632e3c825a5f756b3f63943980fe3ec531f5928eb976975a",
+        "tool_fingerprint": "sha256:572e586bdbf66002e29529db5deb0d792b29bb667e763ee2c8dc4a57f51370f8",
         "replay_policy": "retry"
       },
       "created_at": "2026-08-17T09:05:15Z"
@@ -134,7 +134,7 @@
         "args_hash": "sha256:ccfb09a26577d0beb64f1c9b5b55cfcd8f2752072d55cac4e374860af87c417d",
         "effect_id": "dff12b81-d3df-5f94-8cdb-3d5edfb62c35",
         "requested_at": "2026-08-17T09:05:28Z",
-        "tool_fingerprint": "sha256:a7feeca23e2ad894efac2c10458bfd41bcb1e30de53c833f1a44fc2cf64a9f55",
+        "tool_fingerprint": "sha256:2f0eb322bcb3d5ad33f7498d8239d85f730015213c73b03c003bf058b9b46e2f",
         "replay_policy": "retry"
       },
       "created_at": "2026-08-17T09:05:28Z"

@@ -148,6 +148,7 @@ pub fn test_config(env: Env) -> Config {
             rate_window: Duration::from_secs(60),
         },
         gmail: crate::config::tests::sample_gmail(),
+        llm: crate::config::tests::sample_llm(),
         // A verifier with both claims set, pointed at a JWKS URL that refuses
         // instantly. A test that needs a real key set overrides it.
         push: crate::config::PushConfig {
@@ -257,6 +258,30 @@ impl TestApp {
         self.config.gmail.endpoints = crate::gmail::client::Endpoints::at(base);
         self.config.gmail.auth_url = Some(format!("{base}/auth"));
         self.config.gmail.token_url = Some(format!("{base}/token"));
+        self.rebuild();
+    }
+
+    /// Point the model adapter at a `MockServer`.
+    ///
+    /// The counterpart of [`Self::set_gmail_base`], and the reason
+    /// `NADE_LLM_API_BASE` exists at all: without it the adapter is untestable
+    /// offline, and `backend/justfile` loads `backend/.env` into every `just
+    /// test`, so a test that reached the real API would bill real money on
+    /// whichever machine happens to hold a key.
+    pub fn set_llm_base(&mut self, base: &str) {
+        self.config.llm.api_base = base.trim_end_matches('/').to_owned();
+        self.rebuild();
+    }
+
+    /// Set the per-account daily spend ceiling, in nano-USD.
+    pub fn set_llm_ceiling_nano(&mut self, nano: i64) {
+        self.config.llm.daily_ceiling_nano_usd = nano;
+        self.rebuild();
+    }
+
+    /// Take the key away, so the "no key configured" path can be exercised.
+    pub fn clear_llm_key(&mut self) {
+        self.config.llm.api_key = None;
         self.rebuild();
     }
 

@@ -734,3 +734,336 @@ checklist is the plan, not a record of what happened to get built.
 | 6 | **Pagination boundary** | `every_page_of_a_multi_page_walk_is_applied`, `the_cursor_is_the_last_record_id_and_never_the_top_level_history_id` |
 | 7 | **429 / timeout** | `a_transient_fetch_failure_does_not_advance_the_cursor`, `a_permanent_fetch_failure_is_audited_and_the_walk_continues` |
 | 8 | **Clock skew** | every timestamp the walk compares is computed by PostgreSQL (`now()`), never by a worker; the pacer is monotonic |
+
+---
+
+# P4 — "First runs"
+
+Written **before** the code, per PLAN.md §Execution doctrine, and after an
+adversarial review of the phase plan that produced four blockers. Same marks as
+above: `[x]` = named passing test, `[~]` = inspection + an `// EDGE:` comment,
+`[ ]` = not done.
+
+The one-line summary of what P4 is: the SDK engine has never been driven by
+anything but its own in-memory doubles. P4 gives it a durable journal, a real
+model, four real tools and an HTTP surface — all host code in `nade-server`.
+**The SDK is frozen and must not be edited.**
+
+## V. Wiring and configuration
+
+- [x] V1 `nade-server` depends on `nade-agent-sdk` (path), and on it again with
+  `features = ["testing"]` under `[dev-dependencies]`, so host tests reuse
+  `ScriptedLlm`/`MemoryJournal`/`CountingTool` rather than growing new doubles.
+- [x] V2 Ten new vars land in `config::ENV_VARS` **and** `backend/.env.example`
+  in the same commit: `ANTHROPIC_API_KEY`, `NADE_LLM_MODEL`,
+  `NADE_LLM_COMPILE_MODEL`, `NADE_LLM_API_BASE`, `NADE_LLM_TIMEOUT_SECS`,
+  `NADE_LLM_MAX_ATTEMPTS`, `NADE_LLM_DAILY_USD`, `NADE_TRIAGE_DAILY_MAX`,
+  `NADE_RUN_MAX_STEPS`, `NADE_RUN_TOKEN_BUDGET`.
+  `config::tests::env_example_documents_every_var` fails in both directions.
+- [~] V3 Every documented default is one the server would boot with —
+  `config::tests::every_documented_value_is_one_the_server_would_boot_with`
+  parses the example's *values*, not only its names.
+- [x] V4 A **missing** `ANTHROPIC_API_KEY` is survivable: the server boots, mail
+  routes work, and only agent routes fail — exactly as a missing
+  `web_client.json` is survivable today.
+- [x] V5 `AppState` carries `queue: jobs::Queue`; `main.rs` uses that one rather
+  than building a second.
+- [x] V6 `lib.rs::register_handlers` registers `run_agent`; `JobContext` is
+  **not** widened (handlers close over `AppState`, as `SyncHandler` does).
+- [x] V7 `test_support::TestApp::set_llm_base` exists and rebuilds state, exactly
+  mirroring `set_gmail_base`.
+
+## W. Migration `0005`
+
+- [x] W1 `agents` gains `compile_error`, `when_span`, `do_span`, `trailing` —
+  all nullable text. The contract requires all four on every full agent object
+  and **none is derivable at read time**: API.md §5.1's `spec` carries no span
+  fields and `trailing` is a fragment of the user's own sentence.
+- [x] W2 `llm_calls` exists with the columns the ceiling needs, keyed per
+  account, with `on delete set null` (never cascade) on `agent_id` and `run_id`
+  — deleting an agent must not erase what it spent.
+- [x] W3 `agent_runs_account_created_idx (account_id, created_at desc)` exists:
+  `GET /runs` is newest-first per account and `agent_runs_agent_idx` only serves
+  the `?agent_id=` form.
+- [x] W4 `db::tests::migration_creates_every_planned_table` and
+  `db::tests::required_indexes_exist` are updated in the same commit.
+- [~] W5 The daily-spend window is **UTC** (`date_trunc('day', now())`), stated
+  in a comment. A per-account timezone would make the ceiling untestable and no
+  column exists for one.
+
+## X. The Postgres journal (`runtime/journal.rs`)
+
+- [x] X1 `append` binds `entry.created_at` **explicitly**.
+  `run_journal.created_at` carries `default now()`, so omitting the column
+  silently substitutes the database clock and breaks the byte-faithfulness
+  API.md §6.1 promises. Test skews the session clock and asserts the stored
+  value is the entry's.
+- [x] X2 `append` issues `set local synchronous_commit = on` so `PgJournal`
+  defends its own contract regardless of the cluster default.
+- [x] X3 A duplicate `(run_id, seq)` maps to `Error::SeqConflict`, not a generic
+  journal error — the engine reads the two differently.
+- [x] X4 `load` returns entries ordered by `seq`, and `EntryKind::Other`
+  round-trips the text column unchanged.
+- [x] X5 `Seq` is `u32` and the column is `integer`; sqlx has no
+  `Encode<Postgres>` for `u32`, so both directions cast and a seq above
+  `i32::MAX` is refused rather than silently wrapped.
+- [x] X6 A journal written by `PgJournal` replays through `Engine::run` — the
+  round trip is proven against the real engine, not asserted about SQL.
+- [~] X7 **Durability is a property of the cluster, not of this code.**
+  `embedded.rs` deliberately runs dev with `fsync=off`; that loses data on power
+  loss, not on the client process being killed, so the kill tests remain valid.
+  `// EDGE:` on `append`, and the requirement goes on P8's deploy checklist.
+- [x] X8 `serde_json` canonical key ordering is intact — `{"b":1,"a":2}`
+  re-serialises as `{"a":2,"b":1}`. A dependency enabling
+  `serde_json/preserve_order` would be unified across the workspace (D27's
+  trap) and would silently break every `args_hash`.
+
+## Y. The Anthropic adapter (`llm/anthropic.rs`)
+
+- [x] Y1 Built with `gmail::http_client()`; `gmail::tests::no_bare_reqwest_clients`
+  greps all of `src/` and would fail otherwise.
+- [x] Y2 `Message::System` is hoisted to the top-level `system` field, and after
+  hoisting the first remaining message has role `user`.
+- [x] Y3 Consecutive `Message::Tool` values coalesce into **one** user message.
+  One-each either 400s on role alternation or silently trains the model out of
+  parallel calls.
+- [x] Y4 `tool_result.content` is a **string**; the SDK hands over an arbitrary
+  `serde_json::Value` and sending it raw is a 400 on the first tool result.
+- [x] Y5 A non-object `ToolCall.arguments` is coerced or rejected before it
+  reaches the wire — the SDK deliberately passes scalars through so a tool can
+  reject them, and the value is replayed into the assistant turn.
+- [x] Y6 `max_tokens` is always sent (Anthropic requires it; the SDK's field is
+  an `Option`).
+- [x] Y7 Empty text blocks are dropped — `None` *and* `Some("")`.
+- [x] Y8 `stop_reason` maps the four known tags onto the SDK enum and everything
+  else (`refusal`, `pause_turn`) onto `StopReason::Other`.
+- [x] Y9 Retryable (`429` honouring `retry-after`, `500`, `529`, connection
+  errors) back off with jitter to `NADE_LLM_MAX_ATTEMPTS`; `400`, `401`, `403`,
+  `404`, `413` fail immediately without a retry.
+- [x] Y10 A per-request timeout is set: `gmail::http_client()` bakes 60 s total,
+  so `NADE_LLM_TIMEOUT_SECS` above that would otherwise do nothing.
+- [x] Y11 **Hermeticity is structural.** `justfile` sets `dotenv-load := true`
+  and `backend/.env` holds a live key, so a test that forgets to override the
+  base URL would bill real money. One adapter factory, a grep test that no other
+  site constructs one, and a factory that refuses the default base under test.
+- [~] Y12 No `output_config.effort` and no adaptive `thinking` — both are
+  rejected on Haiku 4.5. No prompt caching at P4.
+
+## Z. The spend ledger (`llm/ledger.rs`)
+
+- [x] Z1 Every attempt writes one `llm_calls` row, success or terminal failure.
+- [x] Z2 Cost is computed from the model's own rates and from all four token
+  counters; the adapter is the only place that sees Anthropic's cache
+  breakdown, which is why it and not the engine writes this table.
+- [x] Z3 The ceiling is checked **before** each call, never after.
+- [x] Z4 The comparison is `>=`, so a ledger sitting exactly at the ceiling
+  blocks.
+- [x] Z5 A mid-run breach ends the run via `Engine::cancel`, **never** by
+  returning `Err` to the queue — that is the re-spend path PLAN.md forbids.
+- [x] Z6 The breach flag is an `Arc` cloned **before** the adapter moves into
+  `Engine::new` (which takes the `Llm` by value), or the handler cannot read it.
+- [x] Z7 A breach raises exactly one feed `info` item, guarded by the
+  `where not exists` shape `gmail/oauth.rs` already uses — a retry must not
+  raise a second card.
+- [~] Z8 The overshoot bound is stated and tested: `NADE_WORKERS` defaults to 2
+  and both pre-flight against a ledger neither has written to yet.
+
+## AA. Tools (`agents/tools/`)
+
+- [x] AA1 Four tools, all `Arc<dyn Tool>`, each with an explicit `version()` so a
+  behaviour change moves the fingerprint even when the interface does not.
+- [x] AA2 Each returns a **model-shaped projection**, never the HTTP wire type:
+  `search::PAGE_SIZE` is 50 and `max_tool_result_bytes` is 16 KiB, so the wire
+  types would deliver a truncation envelope instead of results on the normal
+  path.
+- [x] AA3 `search_mail` delegates to `search::search` — validation, hydration and
+  ordering already live there — and surfaces its rejection text to the model, so
+  an agent handed "unknown operator" can correct itself.
+- [x] AA4 `read_thread` calls a `thread_detail` extracted from `api::mail::thread`
+  (one implementation, two callers) and reports `Completeness::Partial` so the
+  model knows it is reading a thread with gaps.
+- [x] AA5 `write_note` and `draft_reply` upsert on
+  `effect_id(run_id, step_seq)` — `insert … on conflict (id) do update`, never a
+  fresh id, which is what makes re-execution after a crash harmless.
+- [x] AA6 Both mutating tools gate on the agent's `approval_required`, and
+  `requires_approval` is pure in name and arguments.
+- [x] AA7 ` ` is stripped from every tool result before it can reach the
+  journal — PostgreSQL `jsonb` rejects a NUL in a string outright, and hostile
+  mail text arrives through exactly this path.
+- [x] AA8 Untrusted mail text is fenced (`agents/fence.rs`), 10 KB per block.
+- [~] AA9 `draft_reply` flags a never-messaged recipient, and no tool ever puts a
+  secret in a prompt (PLAN.md §Injection defenses).
+- [x] AA10 A note body over 256 KB and an address without `@` are both rejected
+  by the tool, not by the database.
+
+## AB. Compile at save (`agents/compile.rs`)
+
+- [x] AB1 `nl_definition` over 4 000 chars is `400 bad_request`.
+- [x] AB2 The compiler calls the Anthropic client **directly**, not through
+  `Llm::chat`: it needs a forced `tool_choice` and `strict: true`, neither of
+  which the SDK's provider-neutral `ChatRequest` can express. `strict`
+  additionally requires `additionalProperties: false` and a complete `required`.
+- [x] AB3 The emitted spec is validated in Rust against API.md §5.1 before it is
+  stored — version, trigger kind, filter keys, `tools ⊆ v1 set`, output kind.
+- [x] AB4 `spec.trigger.kind == "schedule"` iff `agents.schedule` is set
+  (`validate.py` enforces the same on fixtures). P4's compiler emits
+  `mail | manual` only.
+- [x] AB5 **Any** failure — timeout, upstream 502, invalid JSON, schema
+  violation — still creates the agent as `draft` with `spec: null` and
+  `compile_error` set. `POST /agents` never returns 5xx for a compile failure
+  and the user's sentence is never lost.
+- [x] AB6 A new agent is always `draft`, whatever the client asks for.
+- [x] AB7 `approval_required` is seeded from the account's
+  `settings.approval_required_default` (the row is born with the account, D46).
+- [x] AB8 `when_span`/`do_span`/`trailing` are null **exactly when** `spec` is
+  null, and `spec` null XOR `compile_error` set.
+
+## AC. The run job (`agents/run.rs`)
+
+- [x] AC1 `POST /agents/{id}/run` inserts the run, enqueues with
+  `enqueue_unique("run_agent:{run_id}")`, and returns `{run_id}`. The SDK's
+  consumer contract asks for a lease so a PK collision is the backstop, not the
+  plan.
+- [x] AC2 It runs a `draft` agent (the builder's "Run once now") and does not
+  advance `runs_done`.
+- [x] AC3 `EngineConfig::approval_ttl` is **`None`** — the SDK defaults to 7 days
+  and double enforcement would expire a timely approval whose resume job lagged.
+  It is also what keeps `expires_at` out of the journal, which `validate.py`
+  forbids outright.
+- [x] AC4 `agent.run_model` overrides `NADE_LLM_MODEL` when set.
+- [x] AC5 `RunOutcome::PendingApproval` persists the **whole** `ApprovalRequest`
+  into `agent_runs.pending_action` — P5's approve tx needs `step_seq` to build
+  `Resolution::Approve`.
+- [x] AC6 `error` is set **iff** `status == "failed"`, and a cancel's detail is
+  the same sentence in the row and in `run_ended.reason`.
+- [x] AC7 Error routing, which the first draft of the plan got wrong on three of
+  four rows:
+  - `Error::Llm` / `Error::Journal` → return `Err` (job backoff, dead-letter);
+  - `ToolChanged` → `Engine::cancel` (raised at dispatch, after replay, so
+    cancel works);
+  - `CorruptJournal` / `UnsupportedJournalFormat` → **host-terminal path**, not
+    cancel: `Engine::cancel` re-runs the very replay that raised them
+    (`engine.rs` "Its one precondition"). Try cancel, fall through on the same
+    error, then mark the row failed and dead-letter.
+  - `AmbiguousEffect` is **never an `Err`** — it arrives as
+    `Ok(RunOutcome::Failed)` and needs no row of its own.
+- [x] AC8 A run whose journal is **empty** is settled by a direct row update,
+  never by `Engine::cancel`, which refuses one outright. This is the ordinary
+  state of a `queued` run and therefore the state `DELETE` most often meets.
+- [x] AC9 `DELETE /agents/{id}` cancels started non-terminal runs before the
+  delete (the FK cascade takes `run_journal` with the agent) and settles queued
+  ones by row update.
+- [x] AC10 The handler is idempotent: `Engine::run` on an already-finished run
+  returns it unchanged and appends nothing.
+
+## AD. HTTP surface
+
+- [x] AD1 Routes mount inside the bearer guard; request bodies use `ApiJson<T>`
+  so a decode failure is the `bad_request` envelope.
+- [x] AD2 Pagination follows API.md §0 exactly: `/runs`, `/notes`, `/drafts`
+  paginate at 50 with keyset cursors; `/agents` does not paginate at all and
+  carries no cursor field.
+- [x] AD3 An unknown or corrupt cursor is `400`, never a silent reset to page 1.
+- [x] AD4 `GET /runs/{id}` serves the journal **verbatim** — the host never
+  rewrites a payload on the way out.
+- [x] AD5 `GET /notes/{id}` flips `unread` false and the response reports the
+  state *after* the read; reading twice is not an error.
+- [x] AD6 `PATCH /drafts/{id}` with `{}` is `400`; every address must contain
+  `@`; the response is the full draft.
+- [x] AD7 There is deliberately **no** `GET /drafts/{id}` (API.md §11).
+- [x] AD8 `GET /agents` renders `trigger_summary` and joins `last_run_at` (the
+  newest run's `created_at`), and is ordered oldest-first.
+- [x] AD9 Every route is account-scoped: another account's row is `404`, not
+  `403` and never a leak.
+- [x] AD10 `allowed_tools` is enforced at **dispatch**, independently of what
+  `spec.tools` says.
+
+## AE. Fixtures and contract tests
+
+- [x] AE1 The four tools' real `tool_fingerprint` values replace the generator's
+  stand-ins, carried as a `TOOL_FINGERPRINT_GOLDEN` literal in `generate.py`
+  with a **Rust test asserting the live values still equal it** — drift fails in
+  the language that owns the hash. Mirrors `EFFECT_GOLDEN`.
+- [x] AE2 `generate.py` gains no new imports: `check_generator_is_deterministic`
+  AST-parses it and rejects anything outside its allowlist, so shelling out to
+  Rust is not an option.
+- [~] AE3 Fixtures are regenerated, never hand-edited
+  (`check_canonical_formatting` byte-compares).
+- [x] AE4 Contract tests serialise the real response types against the fixtures.
+- [x] AE5 A completeness test asserts every fixture is referenced by some
+  contract test, with an allowlist. The five approval-flow error fixtures have
+  no `ErrorCode` variant yet — they are **allowlisted with a comment naming
+  P5**, not papered over with dead error codes.
+- [~] AE6 `validate.py` still passes twice consecutively.
+
+## Mandated edge cases — P4
+
+| # | Edge case | Where it is handled |
+|---|---|---|
+| 1 | **Empty input** | empty/whitespace `nl_definition`; a model turn with no text and no calls; a run with an empty journal (AC8); zero rows from every list endpoint |
+| 2 | **Unicode** | a unicode subject through `read_thread`; a ` ` in a tool result (AA7) — `jsonb` rejects it outright; non-BMP characters in a note body |
+| 3 | **Crash mid-step** | kill between `step_started` and the effect → one row, not two; kill between the effect and `step_done` → the upsert collapses (AA5, X6) |
+| 4 | **Duplicate delivery / replay** | duplicate `run_agent` suppressed by `dedupe_key` (AC1); `Engine::run` twice replays rather than restarts (AC10); `SeqConflict` distinguished (X3) |
+| 5 | **Expiry** | `approval_ttl = None` (AC3) — expiry is the host's, and no NADE journal ever carries `expires_at` |
+| 6 | **Pagination boundary** | exactly 50 rows, 51 rows, a cursor pointing at the last row, a corrupt cursor (AD2, AD3) |
+| 7 | **429 / timeout** | Anthropic `429` with and without `retry-after`, `529`, `500`, connection failure, per-request timeout (Y9, Y10) |
+| 8 | **Clock skew** | `created_at` is the engine's stamp and never the database's (X1); an entry stamped beyond `max_journal_clock_drift` is refused by the engine |
+| 9 | **Cost** | ceiling exactly at the limit (Z4); breach mid-run (Z5); two workers racing one account (Z8) |
+| 10 | **Contract drift** | tool fingerprints regenerate from the live tools (AE1); every fixture is referenced (AE5) |
+
+## AF. The cleanup pass (`/simplify`, post-P4)
+
+Four independent reviews of the P4 diff — reuse, simplification, efficiency,
+depth — folded in. Most were refactors and carry no new criterion. These do,
+because each one is a property a later phase can now rely on, and two of them
+close a hole the original P4 criteria did not name.
+
+- [x] AF1 **Every sender-controlled scalar the model sees is de-fanged, not
+  only the body.** `fence::field` is the one composition (strip → neutralise →
+  cap, in that order) and
+  `agents::tools::tests::every_sender_controlled_field_is_defanged_and_not_only_the_body`
+  asserts the property over `subject`, `from`, `from_name` and every entry in
+  `to`. AA8 covered the fence around a body; `from`, `from_name` and `to` were
+  scrubbed and capped but never neutralised, and no test looked at them.
+  Reverting one field fails the test with a forged closing delimiter, carrying
+  the run's real nonce, sitting in a display name.
+- [x] AF2 **A response that will not parse is still priced.**
+  `Adapter::chat` reads `WireResponse::usage()` before `from_wire` consumes the
+  response, so the ceiling no longer under-counts by exactly the calls that went
+  wrong. Z-series criteria covered the ceiling's arithmetic; none covered what
+  an unparseable body cost.
+- [x] AF3 **`nl_definition`'s bounds are enforced where the ceiling is** —
+  inside `compile::compile`, the one function every compile passes through, so a
+  third caller inherits them. `the_input_cap_is_enforced_and_no_agent_is_created`,
+  `the_input_cap_counts_characters_and_not_bytes` (the contract's unit is
+  characters; `len()` would refuse a short Japanese sentence) and
+  `a_patch_is_bound_by_the_same_input_cap`. Both bounds were previously two
+  copies of an `if` that no test exercised.
+- [x] AF4 **A run can be ended without a model provider.** `cancel` builds from
+  `llm::Unreachable` and an empty tool set, which the SDK documents as legal;
+  `a_started_run_is_cancelled_through_the_engine_with_no_provider_configured`
+  removes the key mid-life and asserts the journal still ends in `run_ended`.
+  Before, a keyless server fell through to a row-only `failed` — the shape D57
+  says breaks `API.md` §6.1.
+- [x] AF5 **Every `429` carries `Retry-After`**, supplied by `IntoResponse`
+  rather than by each call site, because §0 makes the header part of what the
+  code *means*. `error::tests::every_rate_limited_response_carries_retry_after`
+  also asserts no other status grows one.
+- [x] AF6 **The host's terminal-status list cannot drift from the SDK's.** One
+  `TERMINAL_STATUSES`, bound as an array to both SQL predicates, pinned to
+  `RunStatus::is_terminal` by `terminal_statuses_match_the_sdk`. It had been
+  three lists, and `settle`'s `_ => "expired"` catch-all would have recorded any
+  status the SDK added as an expiry.
+- [x] AF7 **The injection corpus runs in CI.** `just ci`'s `red-team` recipe is
+  `cargo test`, not `cargo check`. All 85 cases now execute on every gate;
+  before, the harness was only proven to compile.
+- [x] AF8 **One keyset epilogue.** `cursor::take_page` is the only place a
+  `limit + 1` fetch becomes a page and a cursor — four copies before, and D52
+  records that a cursor-precision defect had already shipped in one of them.
+
+**Deliberately still open.** `search_mail` asks Gmail for 50 message ids to show
+the model 10 — five paced batches and ~4 s of sleep on a cold page. Fixing it
+changes what the agent perceives (50 *messages* collapse into at most 50
+*threads*, so a smaller ask yields an unpredictable number of hits and makes
+`truncated` meaningless), which is a product decision with a bench behind it and
+not a refactor. Recorded in D69.

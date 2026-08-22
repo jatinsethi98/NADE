@@ -47,6 +47,16 @@ pub const ENV_VARS: &[&str] = &[
     "NADE_SCHEDULER_TICK_SECS",
     "NADE_WATCH_RENEW_HOURS",
     "NADE_POLL_INTERVAL_MINS",
+    "ANTHROPIC_API_KEY",
+    "NADE_LLM_API_BASE",
+    "NADE_LLM_MODEL",
+    "NADE_LLM_COMPILE_MODEL",
+    "NADE_LLM_TIMEOUT_SECS",
+    "NADE_LLM_MAX_ATTEMPTS",
+    "NADE_LLM_DAILY_USD",
+    "NADE_TRIAGE_DAILY_MAX",
+    "NADE_RUN_MAX_STEPS",
+    "NADE_RUN_TOKEN_BUDGET",
     "NADE_BACKEND_ROOT",
     "NADE_PG_PORT",
     "NADE_PG_PASSWORD",
@@ -155,6 +165,68 @@ pub struct PushConfig {
     pub topic: Option<String>,
 }
 
+/// The model provider, the dev caps that bound a run, and the spend ceiling.
+///
+/// `api_key` is an `Option` for the same reason the Gmail client file is: a
+/// server with no key must still boot and still serve mail. Only the agent
+/// routes fail, and they fail with a message that says why.
+#[derive(Clone)]
+pub struct LlmConfig {
+    /// Anthropic's key. `None` means every agent route answers
+    /// `upstream_unavailable` rather than the process refusing to start.
+    pub api_key: Option<String>,
+    /// API root. The wiremock suite points this at a `MockServer`; nothing else
+    /// ever sets it. See `llm::anthropic::Client::new` for the guard that stops
+    /// a test reaching the real one.
+    pub api_base: String,
+    /// The model an agent run uses, unless the agent overrides it.
+    pub model: String,
+    /// The model `POST /agents` compiles a sentence with.
+    pub compile_model: String,
+    /// Per request, applied to the request builder. `gmail::http_client()`
+    /// bakes a 60 s client-wide timeout, so a value above that does nothing
+    /// unless it is also set per request - which is why this is used that way.
+    pub timeout: Duration,
+    /// Attempts for a *retryable* status. 1 means "try once, never retry".
+    pub max_attempts: u32,
+    /// The daily spend ceiling, per account, in **nano-USD**.
+    ///
+    /// Money is an integer everywhere in this crate. The ceiling test is
+    /// `spent >= ceiling` and it has to be exact at the boundary; a float
+    /// would make the most important assertion in the phase a flaky one.
+    pub daily_ceiling_nano_usd: i64,
+    /// PLAN.md's <=20 triaged messages per agent per day. P5 enforces it; the
+    /// ledger it reads lands here.
+    pub triage_daily_max: i64,
+    /// `EngineConfig::max_steps`.
+    pub run_max_steps: u32,
+    /// `EngineConfig::token_budget`.
+    pub run_token_budget: u64,
+}
+
+impl std::fmt::Debug for LlmConfig {
+    /// Hand-written, so the key cannot reach a log line.
+    ///
+    /// `AppState` already does this deliberately, for the same reason: one
+    /// `tracing::debug!` that formats a struct is all it takes, and a derived
+    /// `Debug` puts the secret in every one of them. `Config` embeds this, so
+    /// it inherits the redaction.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmConfig")
+            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
+            .field("api_base", &self.api_base)
+            .field("model", &self.model)
+            .field("compile_model", &self.compile_model)
+            .field("timeout", &self.timeout)
+            .field("max_attempts", &self.max_attempts)
+            .field("daily_ceiling_nano_usd", &self.daily_ceiling_nano_usd)
+            .field("triage_daily_max", &self.triage_daily_max)
+            .field("run_max_steps", &self.run_max_steps)
+            .field("run_token_budget", &self.run_token_budget)
+            .finish()
+    }
+}
+
 /// How often the background scheduler asks the database what is overdue.
 #[derive(Debug, Clone)]
 pub struct ScheduleConfig {
@@ -181,6 +253,7 @@ pub struct Config {
     pub jobs: crate::jobs::QueueConfig,
     pub push: PushConfig,
     pub schedule: ScheduleConfig,
+    pub llm: LlmConfig,
     pub workers: usize,
     pub embedded: EmbeddedConfig,
 }
@@ -247,6 +320,39 @@ impl Config {
                 watch_renew_after.as_secs() / 3600
             );
         }
+
+        // The model provider. Everything here has a working default except the
+        // key, and an absent key is deliberately survivable (V4).
+        let llm_max_attempts = parse::<u32>("NADE_LLM_MAX_ATTEMPTS", 3)?;
+        if llm_max_attempts == 0 {
+            bail!("NADE_LLM_MAX_ATTEMPTS must be at least 1 - 0 would never call the model");
+        }
+        let llm_timeout = Duration::from_secs(parse::<u64>("NADE_LLM_TIMEOUT_SECS", 60)?);
+        if llm_timeout.is_zero() {
+            bail!("NADE_LLM_TIMEOUT_SECS must be non-zero");
+        }
+        let daily_ceiling_nano_usd = nano_usd("NADE_LLM_DAILY_USD", 1_000_000_000)?;
+        let triage_daily_max = parse::<i64>("NADE_TRIAGE_DAILY_MAX", 20)?;
+        if triage_daily_max < 0 {
+            bail!("NADE_TRIAGE_DAILY_MAX must not be negative");
+        }
+        let run_max_steps = parse::<u32>("NADE_RUN_MAX_STEPS", 12)?;
+        if run_max_steps == 0 {
+            bail!("NADE_RUN_MAX_STEPS must be at least 1");
+        }
+        let run_token_budget = parse::<u64>("NADE_RUN_TOKEN_BUDGET", 50_000)?;
+        if run_token_budget == 0 {
+            bail!("NADE_RUN_TOKEN_BUDGET must be at least 1");
+        }
+        // An empty string in the environment is not a model name. Treat it as
+        // unset rather than sending "" to the provider and reading a 404 as an
+        // outage.
+        let llm_model =
+            string("NADE_LLM_MODEL").unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_owned());
+        let llm_compile_model =
+            string("NADE_LLM_COMPILE_MODEL").unwrap_or_else(|| llm_model.clone());
+        let llm_api_base =
+            string("NADE_LLM_API_BASE").unwrap_or_else(|| crate::llm::DEFAULT_API_BASE.to_owned());
 
         let rate_limit = parse::<u32>("NADE_PAIR_RATE_LIMIT", 10)?;
         if rate_limit == 0 {
@@ -324,6 +430,18 @@ impl Config {
                 tick: scheduler_tick,
                 watch_renew_after,
                 poll_after,
+            },
+            llm: LlmConfig {
+                api_key: string("ANTHROPIC_API_KEY"),
+                api_base: llm_api_base,
+                model: llm_model,
+                compile_model: llm_compile_model,
+                timeout: llm_timeout,
+                max_attempts: llm_max_attempts,
+                daily_ceiling_nano_usd,
+                triage_daily_max,
+                run_max_steps,
+                run_token_budget,
             },
             jobs: crate::jobs::QueueConfig {
                 lease,
@@ -416,6 +534,65 @@ where
 /// the workspace. If that path no longer exists (a binary copied to a server),
 /// we fall back to the working directory - and in that case `DATABASE_URL` is
 /// required anyway, so none of the embedded paths are used.
+/// Parse a decimal dollar amount into **nano-USD**, exactly.
+///
+/// Deliberately not `f64::from_str` followed by a multiply. The spend ceiling's
+/// whole job is to be right at its boundary — `NADE_LLM_DAILY_USD=1.0` has to
+/// mean 1_000_000_000 nano and not 999_999_999.99998 — so the digits are read
+/// as integers and never pass through a binary float at all.
+///
+/// # Errors
+/// Rejects a negative amount, a non-numeric one, more than nine fractional
+/// digits (which nano-USD cannot represent), and an amount that would overflow.
+fn nano_usd(key: &str, default: i64) -> anyhow::Result<i64> {
+    const NANO: i64 = 1_000_000_000;
+    let Some(raw) = string(key) else {
+        return Ok(default);
+    };
+    let raw = raw.trim();
+    // EDGE: empty input. A blank value is "unset", not "free".
+    if raw.is_empty() {
+        return Ok(default);
+    }
+    if raw.starts_with('-') {
+        bail!("{key} must not be negative (got {raw:?})");
+    }
+    let (whole, frac) = match raw.split_once('.') {
+        Some((w, f)) => (w, f),
+        None => (raw, ""),
+    };
+    // `split_once` leaves an empty side for "1." or ".5"; both are accepted,
+    // but a wholly empty number ("." alone) is not.
+    if whole.is_empty() && frac.is_empty() {
+        bail!("{key} is not a number (got {raw:?})");
+    }
+    if !whole.bytes().all(|b| b.is_ascii_digit()) || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        bail!("{key} is not a decimal number (got {raw:?})");
+    }
+    if frac.len() > 9 {
+        bail!(
+            "{key} has {} fractional digits; nano-USD holds at most 9 (got {raw:?})",
+            frac.len()
+        );
+    }
+    let whole: i64 = if whole.is_empty() {
+        0
+    } else {
+        whole
+            .parse()
+            .with_context(|| format!("{key}: {raw:?} is too large"))?
+    };
+    // Right-pad so "5" means 500_000_000 nano and not 5. `{:0<9}` is the
+    // padding; the digits and the <=9 length are already proven above, so the
+    // parse cannot fail and the empty case cannot arise - the loop this
+    // replaced ended in an `is_empty()` branch it had just made unreachable.
+    let frac: i64 = format!("{frac:0<9}").parse().unwrap_or(0);
+    whole
+        .checked_mul(NANO)
+        .and_then(|w| w.checked_add(frac))
+        .with_context(|| format!("{key}: {raw:?} overflows"))
+}
+
 fn backend_root() -> PathBuf {
     if let Some(explicit) = string("NADE_BACKEND_ROOT") {
         return PathBuf::from(explicit);
@@ -622,6 +799,124 @@ pub(crate) mod tests {
         );
     }
 
+    /// An LLM config that cannot reach the real provider.
+    ///
+    /// The base URL is a port that refuses instantly, the same trick the JWKS
+    /// URL above uses. A test that wants a fake provider calls
+    /// `TestApp::set_llm_base`; a test that forgets would get a connection
+    /// error rather than a bill, and `guard_against_live_calls_in_tests`
+    /// catches the case where the real URL is reached for anyway.
+    pub(crate) fn sample_llm() -> LlmConfig {
+        LlmConfig {
+            api_key: Some("test-key-not-a-real-one".to_owned()),
+            api_base: "http://127.0.0.1:1".to_owned(),
+            model: "claude-haiku-4-5".to_owned(),
+            compile_model: "claude-haiku-4-5".to_owned(),
+            timeout: Duration::from_secs(5),
+            // One attempt: a test that exercises the retry policy sets its own
+            // value, and every other test would otherwise pay the backoff.
+            max_attempts: 1,
+            daily_ceiling_nano_usd: 1_000_000_000,
+            triage_daily_max: 20,
+            run_max_steps: 12,
+            run_token_budget: 50_000,
+        }
+    }
+
+    /// `nano_usd` reads the environment, so these have to serialise against
+    /// each other. Same guard the rest of this module's env tests use.
+    fn with_var<T>(key: &str, value: Option<&str>, body: impl FnOnce() -> T) -> T {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let out = body();
+        match previous {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        out
+    }
+
+    const K: &str = "NADE_TEST_NANO_USD";
+
+    fn nano(value: &str) -> anyhow::Result<i64> {
+        with_var(K, Some(value), || nano_usd(K, -1))
+    }
+
+    #[test]
+    fn a_dollar_is_exactly_a_billion_nano() {
+        // The whole reason this parser exists: `1.0` must not become
+        // 999_999_999 by way of a binary float.
+        assert_eq!(nano("1.0").unwrap(), 1_000_000_000);
+        assert_eq!(nano("1").unwrap(), 1_000_000_000);
+        assert_eq!(nano("1.").unwrap(), 1_000_000_000);
+    }
+
+    #[test]
+    fn fractions_scale_by_position_not_by_digit_count() {
+        // "5" after the point is five *tenths*, not five nano.
+        assert_eq!(nano("0.5").unwrap(), 500_000_000);
+        assert_eq!(nano(".5").unwrap(), 500_000_000);
+        assert_eq!(nano("0.000000001").unwrap(), 1);
+        assert_eq!(nano("2.25").unwrap(), 2_250_000_000);
+    }
+
+    #[test]
+    fn zero_is_a_legal_ceiling_and_means_no_calls_at_all() {
+        assert_eq!(nano("0").unwrap(), 0);
+        assert_eq!(nano("0.0").unwrap(), 0);
+    }
+
+    #[test]
+    fn an_unset_or_blank_value_falls_back_to_the_default() {
+        assert_eq!(with_var(K, None, || nano_usd(K, 7)).unwrap(), 7);
+        // EDGE: empty input. A blank value is "unset", not "free".
+        assert_eq!(nano("").unwrap(), -1);
+        assert_eq!(nano("   ").unwrap(), -1);
+    }
+
+    #[test]
+    fn a_negative_ceiling_is_refused_rather_than_silently_blocking_everything() {
+        assert!(nano("-1").is_err());
+        assert!(nano("-0.5").is_err());
+    }
+
+    #[test]
+    fn nonsense_is_refused_at_boot_not_at_the_first_model_call() {
+        for bad in ["abc", "1.2.3", "1e9", "$1", "1,0", ".", "1.0abc"] {
+            assert!(nano(bad).is_err(), "{bad:?} should not parse");
+        }
+    }
+
+    #[test]
+    fn more_precision_than_nano_is_refused_rather_than_rounded() {
+        // Ten decimals cannot be represented. Silently truncating would make
+        // the configured ceiling and the enforced ceiling different numbers.
+        assert!(nano("0.0000000001").is_err());
+        assert_eq!(nano("0.999999999").unwrap(), 999_999_999);
+    }
+
+    #[test]
+    fn an_absurd_amount_is_refused_rather_than_wrapping_negative() {
+        // A wrap would produce a negative ceiling, which blocks every call -
+        // the failure would look like a bug in the ceiling, not in the config.
+        assert!(nano("99999999999999999999").is_err());
+        assert!(nano("9223372036.854775808").is_err());
+    }
+
+    #[test]
+    fn unicode_digits_are_not_digits() {
+        // EDGE: unicode. Arabic-Indic digits parse as numbers in some
+        // languages; here they must not.
+        assert!(nano("\u{0661}").is_err());
+    }
+
     pub(crate) fn sample() -> Config {
         Config {
             env: Env::Prod,
@@ -639,6 +934,7 @@ pub(crate) mod tests {
                 rate_window: Duration::from_secs(60),
             },
             gmail: sample_gmail(),
+            llm: sample_llm(),
             push: PushConfig {
                 sa_email: Some("nade-push@example.iam.gserviceaccount.com".to_owned()),
                 audience: Some("https://example.test/v1/webhooks/gmail".to_owned()),

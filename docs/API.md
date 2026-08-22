@@ -744,9 +744,12 @@ the terminal status itself; a journal ending on `approval_requested` is
 `pending_approval`; one ending on `run_waiting` is `waiting`. `queued` and
 `running` are host states a journal never records.
 
-`step_done.result` is the tool's return value, size-capped. When capping
-bites, `truncated` is true and the value carries an explicit
-`"…[truncated N bytes]"` marker — never a silent trim.
+`step_done.result` is the tool's return value, size-capped. When capping bites,
+`truncated` is true and the result is **replaced** by the SDK's own envelope —
+`{"nade_truncated": true, "reason": "…", "original_bytes": N, "limit_bytes": N,
+"preview": "…"}` — never a silent trim, and never a trim *inside* the value.
+This sentence used to describe a `"…[truncated N bytes]"` marker; no build
+produces one, so it was a rule no real journal could have satisfied.
 
 One thing this vocabulary loses against the old draft of this section: a
 per-entry **model name** (`model_response` records usage, not which model
