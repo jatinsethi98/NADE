@@ -14,6 +14,7 @@ pub mod agents;
 pub mod auth;
 pub mod cursor;
 pub mod drafts;
+pub mod feed;
 pub mod gmail_auth;
 pub mod health;
 pub mod mail;
@@ -55,7 +56,16 @@ pub fn router(state: AppState) -> Router {
             "/messages/{gmail_id}/attachments/{att_id}",
             get(mail::attachment),
         )
-        // P4. P5 mounts /feed here, P7 /settings.
+        // P5. P7 mounts /settings.
+        .route("/feed", get(feed::list))
+        .route("/feed/seen", post(feed::seen))
+        // `/feed/seen` is declared **before** `/feed/{id}`: axum's matcher
+        // prefers a literal segment over a capture, so the order is not what
+        // makes this correct — but reading them in this order is what makes it
+        // obvious that "seen" is not a feed item id.
+        .route("/feed/{id}", get(feed::detail))
+        .route("/feed/{id}/approve", post(feed::approve))
+        .route("/feed/{id}/skip", post(feed::skip))
         .route("/agents", get(agents::list).post(agents::create))
         .route(
             "/agents/{id}",
@@ -202,8 +212,8 @@ mod tests {
         // And a route no phase serves yet reaches the *router's* 404 rather
         // than the guard's 401, which is what proves the middleware passes
         // through rather than short-circuiting. `/v1/agents` was this probe
-        // until P4 mounted it; `/v1/feed` lands at P5.
-        let response = authed_get(&app, "/v1/feed", Some(&token)).await;
+        // until P4 mounted it and `/v1/feed` until P5; `/v1/settings` is P7's.
+        let response = authed_get(&app, "/v1/settings", Some(&token)).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(response_json(response).await["error"]["code"], "not_found");
     }

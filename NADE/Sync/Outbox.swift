@@ -30,6 +30,10 @@ nonisolated enum OutboxOutcome: Equatable, Sendable {
     /// token, and the schema allows several paired devices. Drop the row and
     /// **refetch** rather than assuming our own outcome.
     case alreadyRecorded
+    /// `409 conflict` — the state moved on and the decision was **not**
+    /// recorded. Same handling as [`alreadyRecorded`] (drop the row, re-read
+    /// the card), and a distinct case because it means the opposite thing.
+    case superseded
     /// Past its deadline. Terminal, and the item is expired.
     case expired
     /// Ambiguous: `401` is the same code for a wrong approval token **and** a
@@ -67,6 +71,12 @@ final class OutboxDriver {
     /// could park the queue for hours. `ContinuousClock` keeps counting across
     /// both, and across suspension.
     private var notBefore: ContinuousClock.Instant?
+
+    /// Reports a problem worth showing on the feed, or `nil` to clear one.
+    ///
+    /// Injected for the same reason `onNeedsReauth` is: the outbox does not
+    /// need to know what a `MailSync` is.
+    var onProblem: ((String?) -> Void)?
 
     /// `onNeedsReauth` is how a dead Gmail credential reaches `MailSync`'s
     /// state machine. Injected rather than referenced, so the outbox does not
@@ -129,10 +139,17 @@ final class OutboxDriver {
             // Moving the card anyway would let Skip overwrite a queued Save.
             guard try await store.enqueue(action) else { return }
         } catch {
+            // **Surfaced, not just recorded.** `lastEnqueueError` had no
+            // reader: a failed durable write returned before the optimistic
+            // move, so the button stayed, nothing was queued, and nothing said
+            // why — and every further tap did the same. The connection banner
+            // is where the rest of this screen's problems already appear.
             lastEnqueueError = error
+            onProblem?(StateCopy.approvalNotQueued)
             return
         }
         lastEnqueueError = nil
+        onProblem?(nil)
 
         // Optimistic local move, so the card settles under the finger. The
         // drain corrects it if the server disagrees.
@@ -166,10 +183,21 @@ final class OutboxDriver {
     /// header cannot become a hang.
     static let maxRetryAfter: TimeInterval = 3600
 
+    /// Attempts before an action is given up on, matching the server queue's
+    /// own `max_attempts` (`jobs.rs`). Without a ceiling one permanently
+    /// failing card holds up every later one.
+    static let maxAttempts = 5
+
     /// The fallback explanation for a card that expired while queued. Replaced
     /// by the server's own `resolved_note` as soon as the refetch lands.
+    ///
+    /// **"saved", not "sent".** The original read "before it could be sent",
+    /// under a card whose own button says "Save draft" — a sentence asserting
+    /// the mail would otherwise have gone out, which is what DESIGN §4 and
+    /// PLAN C1/C2 forbid outright. Four guards were pointed at it and all four
+    /// matched `\bsend(s|ing)?\b`, which does not match **`sent`**.
     static let expiredNote = String(
-        localized: "This expired before it could be sent.",
+        localized: "This expired before it was saved.",
         comment: "Shown on a feed card whose approval window closed while it was queued"
     )
 
@@ -200,7 +228,7 @@ final class OutboxDriver {
         for action in queued {
             let outcome = await send(action)
             switch outcome {
-            case .done, .alreadyRecorded:
+            case .done, .alreadyRecorded, .superseded:
                 try? await store.removePendingAction(id: action.id)
                 // `alreadyRecorded` cannot tell us *which* action won, so the
                 // item is refetched rather than assumed.
@@ -238,6 +266,19 @@ final class OutboxDriver {
                 await refresh(feedItemID: action.feedItemId)
             case .retry(let message, let retryAfter):
                 try? await store.recordPendingFailure(id: action.id, error: message)
+                // **A queue with no dead letter is a queue that stops.**
+                // `attempts` was written by `recordPendingFailure` and read by
+                // nothing, so one card whose 500 mapped to `.retry` blocked
+                // every action behind it on every foreground, for ever. The
+                // server's own queue dead-letters at five (`jobs.rs`); this
+                // matches it, and refetches so the card stops claiming the
+                // action was taken.
+                if action.attempts + 1 >= Self.maxAttempts {
+                    try? await store.removePendingAction(id: action.id)
+                    tracingRejected(action, "gave up after \(Self.maxAttempts) attempts")
+                    await refresh(feedItemID: action.feedItemId)
+                    continue
+                }
                 if let retryAfter {
                     notBefore = ContinuousClock.now
                         .advanced(by: .seconds(Self.clampRetryAfter(retryAfter)))
@@ -276,8 +317,18 @@ final class OutboxDriver {
             return .retry(failure.userFacingMessage)
         }
         switch code {
-        case .tokenConsumed, .conflict:
+        case .tokenConsumed:
             return .alreadyRecorded
+        case .conflict:
+            // **Not the same answer**, and `error.rs` says so in its own words:
+            // "one means 'reload', the other means 'you already won'".
+            // `token_consumed` is a decision that landed; `conflict` is one
+            // that did **not** — the run moved on to a different step, or is no
+            // longer parked at all. Dropping the queued row is still right (a
+            // blind retry would answer a question nobody asked), but the card
+            // has to be re-read so the user sees what is actually pending
+            // rather than being told their tap was recorded.
+            return .superseded
         case .approvalExpired, .gone:
             return .expired
         case .unauthorized:

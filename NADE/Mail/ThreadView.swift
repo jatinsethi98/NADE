@@ -112,6 +112,9 @@ struct ThreadView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .task(id: threadID) { await model.load(id: threadID, in: mailboxID) }
+        // The model has process lifetime, so the observations it holds for this
+        // screen's cards have to be given back when the screen goes.
+        .onDisappear { model.stopObservingCards() }
         .quickLookPreview(Binding(get: { model.previewURL },
                                   set: { model.previewURL = $0 }))
         .onDisappear { model.stopAttachments() }
@@ -171,8 +174,14 @@ struct ThreadView: View {
                     }
 
                     ForEach(thread.agentCards, id: \.runId) { card in
-                        ThreadAgentCard(card: card)
-                            .padding(.top, Metrics.cardTop)
+                        let item = card.feedItemId.flatMap { model.cards[$0] }
+                        ThreadAgentCard(
+                            card: card,
+                            item: item,
+                            onApprove: { if let item { Task { await model.approve(card: item) } } },
+                            onSkip: { if let item { Task { await model.skip(card: item) } } }
+                        )
+                        .padding(.top, Metrics.cardTop)
                     }
 
                     Hairline()
@@ -405,6 +414,15 @@ struct ThreadMessageBlock: View {
 struct ThreadAgentCard: View {
 
     let card: WireAgentCard
+    /// The feed item this card's run raised, once it has been fetched.
+    ///
+    /// `nil` covers three cases the screen treats alike: the run raised nothing
+    /// (`feed_item_id` is null), the fetch has not landed, or it failed. All
+    /// three mean "no buttons", which is the safe answer — a button whose label
+    /// we do not have would have to invent a verb, and §4 forbids that.
+    let item: WireFeedItem?
+    let onApprove: () -> Void
+    let onSkip: () -> Void
 
     /// DESIGN.md §1f's table. The mockup shows only "waiting on you"; the API
     /// returns all eight, so the rest are `+ Added` for completeness.
@@ -427,6 +445,9 @@ struct ThreadAgentCard: View {
         static let statusSize: CGFloat = 11
         static let summarySize: CGFloat = 14
         static let summaryLineHeight: CGFloat = 1.7
+        /// DESIGN.md §1f: "buttons top 12, gap 8".
+        static let buttonsTop: CGFloat = 12
+        static let buttonsGap: CGFloat = 8
     }
 
     var body: some View {
@@ -449,15 +470,35 @@ struct ThreadAgentCard: View {
                 .nadeLineHeight(Metrics.summaryLineHeight, size: Metrics.summarySize)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            // **No buttons.** DESIGN.md §1f: they render only when the run is
-            // `pending_approval` *and* `feed_item_id != null`, and their labels
-            // come from `GET /feed/{id}`'s `data.action_label` — "Save note",
-            // "Save draft". That endpoint arrives at P5. Rendering a literal
-            // "Approve" in the meantime is exactly what §4 and PLAN C1/C2
-            // forbid, because it would promise an outbound action v1 does not
-            // take.
+            // **The recipient row and the buttons, from the card and never
+            // from the run** — and drawn by `ApprovalControls`, the same view
+            // 2a's feed row uses.
+            //
+            // DESIGN.md §1f: they render only when the run is
+            // `pending_approval` *and* `feed_item_id != null` (which is what
+            // makes `item` non-nil), and the client "fetches `GET /feed/{id}`
+            // for the token, `actions` and `action_label`, then renders exactly
+            // as the feed row does — so the primary button reads 'Save note' /
+            // 'Save draft', never 'Approve' or 'Send'."
+            //
+            // The third condition is narrower than the design's two, and
+            // deliberately: the server empties `actions` the moment a token is
+            // spent, so a card whose approval landed from the *feed* loses its
+            // buttons here without this screen having to know that happened.
+            //
+            // "Exactly as the feed row does" now includes the thing this card
+            // was missing — the recipient list and the `never_messaged` flag
+            // that `injection/README.md` finding 10 says an approval card is
+            // only contained by.
+            if let item, card.status == .pendingApproval {
+                ApprovalControls(item: item,
+                                 idPrefix: "thread",
+                                 buttonsTop: Metrics.buttonsTop,
+                                 onApprove: onApprove,
+                                 onSkip: onSkip)
+            }
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("thread.agentcard.\(card.runId)")
     }
 }

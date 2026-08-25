@@ -170,11 +170,17 @@ pub struct IncrementalReport {
     pub records: usize,
     /// The gmail ids `messagesAdded` produced and we ingested.
     ///
-    /// **This is P5's seam.** P5 enqueues one `triage_message` per entry, and
-    /// the list is returned - and asserted by a test - rather than left for P5
-    /// to rediscover. A no-op handler registered here instead would make
+    /// **This was P5's seam, and it is closed**: the page transaction enqueues
+    /// one `triage_message` per entry here, so the trigger commits with the
+    /// mail that fires it. The list is still returned, and still asserted, for
+    /// the reason it was returned in the first place - a no-op would make
     /// "the trigger fired and did nothing" indistinguishable from "the trigger
-    /// fired", with no test in this phase able to fail if P5 forgot it.
+    /// fired".
+    ///
+    /// Note which list this is: what actually **parsed and was upserted**, not
+    /// what the page asked Gmail for. `to_fetch` includes the ids that came
+    /// back unparseable or permanently refused, and neither leaves a
+    /// `messages` row for triage to load.
     pub added: Vec<String>,
     pub relabelled: usize,
     pub deleted: usize,
@@ -325,6 +331,28 @@ async fn walk(
                 page_threads.insert(row.thread_id.clone());
                 report.added.push(row.gmail_id.clone());
             }
+
+            // **The mail trigger, committed with the mail that fires it.**
+            //
+            // `fetched.rows`, not `plan.to_fetch`: the plan is what this page
+            // *asked Gmail for*, and it includes the ids that came back
+            // unparseable (`fetched.parse_failures`) or permanently refused
+            // (`fetched.permanent_failures`). Neither leaves a `messages` row,
+            // so triaging them would enqueue a job per dead message that can
+            // only ever load nothing. That set is exactly what the loop above
+            // pushed onto `report.added`, whose own doc comment calls it "the
+            // gmail ids `messagesAdded` produced **and we ingested**".
+            //
+            // One statement for the page, not one per row: this transaction is
+            // holding its locks while it runs, and Gmail's default history page
+            // is a hundred records.
+            let triaged: Vec<String> = fetched
+                .rows
+                .iter()
+                .map(|row| row.gmail_id.clone())
+                .collect();
+            crate::agents::triage::enqueue_many_in(&mut *tx, account_id, &triaged).await?;
+
             for (gmail_id, error) in &fetched.parse_failures {
                 report.parse_failures += 1;
                 store::audit_in(
@@ -379,10 +407,6 @@ async fn walk(
                 store::refresh_thread(&mut tx, account_id, thread_id).await?;
             }
             threads.extend(page_threads);
-
-            // P5 SEAM: enqueue `triage_message` for each of `plan.to_fetch`
-            // here, inside this transaction, so the trigger commits with the
-            // mail that fired it.
 
             match plan.cursor {
                 Some(cursor) => {

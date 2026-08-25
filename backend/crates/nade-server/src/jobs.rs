@@ -394,10 +394,26 @@ pub struct JobContext {
 #[async_trait]
 pub trait Handler: Send + Sync + 'static {
     async fn handle(&self, job: Job, ctx: JobContext) -> anyhow::Result<()>;
+
+    /// Last rites: the job has failed `max_attempts` times and will never run.
+    ///
+    /// **The queue cannot clean up after a handler, because it does not know
+    /// what the handler owns.** Before this existed, a `resume_run` that
+    /// dead-lettered left the run `queued` for ever — the card said
+    /// "Saved to Notes.", the note was never written, the dedupe keys meant
+    /// nothing would ever pick it up again, and there is no stuck-run reaper.
+    /// The user's approval vanished, with one `audit_log` row as the only
+    /// trace. That is the failure P5 exists to prevent, arriving through the
+    /// back door.
+    ///
+    /// Called after the row is marked dead, outside its transaction: it is
+    /// recovery, not part of the queue's own atomicity. A handler that does
+    /// nothing here is saying its work is safe to lose.
+    async fn on_dead_letter(&self, _job: Job, _ctx: JobContext) {}
 }
 
-/// `kind` -> handler. Later phases register `triage_message`, `run_agent`, and
-/// friends here; a worker only ever claims kinds it can run.
+/// `kind` -> handler. `lib.rs::register_handlers` builds the real one - seven
+/// kinds as of P5 - and a worker only ever claims kinds it can run.
 #[derive(Default)]
 pub struct Registry {
     handlers: HashMap<String, Arc<dyn Handler>>,
@@ -542,6 +558,9 @@ impl Worker {
         let ctx = JobContext {
             queue: self.queue.clone(),
         };
+        // Kept, because `handle` takes it by value and `on_dead_letter` needs
+        // the payload to know what to clean up.
+        let owned = job.clone();
         let mut task = tokio::spawn(async move { handler.handle(job, ctx).await });
         let aborter = task.abort_handle();
 
@@ -592,15 +611,22 @@ impl Worker {
                 Ok(false) => tracing::warn!(id = job_id, "job finished but the lease was gone"),
                 Err(error) => tracing::error!(id = job_id, %error, "could not mark the job done"),
             },
-            Some(Ok(Err(error))) => self.report_failure(job_id, &format!("{error:#}")).await,
+            Some(Ok(Err(error))) => {
+                self.report_failure_of(job_id, &format!("{error:#}"), Some(&owned))
+                    .await;
+            }
             Some(Err(join_error)) if join_error.is_panic() => {
                 // EDGE (crash mid-step): a panicking handler is contained by
                 // the spawn; the worker loop is untouched and the job just
                 // fails into the normal backoff schedule.
                 let detail = panic_message(join_error.into_panic());
                 tracing::error!(id = job_id, %detail, "job handler panicked");
-                self.report_failure(job_id, &format!("handler panicked: {detail}"))
-                    .await;
+                self.report_failure_of(
+                    job_id,
+                    &format!("handler panicked: {detail}"),
+                    Some(&owned),
+                )
+                .await;
             }
             // Cancelled: the heartbeat task aborted us because the lease was
             // stolen. The row belongs to another worker - do not touch it.
@@ -615,13 +641,31 @@ impl Worker {
         }
     }
 
-    async fn report_failure(&self, job_id: i64, error: &str) {
+    /// Record a failure, and hand a dead letter back to whoever owned it.
+    ///
+    /// `job` is `Option` only because one call site — a kind with no
+    /// registered handler — has nothing to hand back to.
+    async fn report_failure_of(&self, job_id: i64, error: &str, job: Option<&Job>) {
         match self.queue.fail(job_id, &self.id, error).await {
-            Ok(Some(failure)) if failure.dead => tracing::error!(
-                id = job_id,
-                attempts = failure.attempts,
-                "job dead-lettered"
-            ),
+            Ok(Some(failure)) if failure.dead => {
+                tracing::error!(
+                    id = job_id,
+                    attempts = failure.attempts,
+                    "job dead-lettered"
+                );
+                if let Some(job) = job {
+                    if let Some(handler) = self.registry.get(&job.kind) {
+                        handler
+                            .on_dead_letter(
+                                job.clone(),
+                                JobContext {
+                                    queue: self.queue.clone(),
+                                },
+                            )
+                            .await;
+                    }
+                }
+            }
             Ok(Some(failure)) => tracing::warn!(
                 id = job_id,
                 attempts = failure.attempts,

@@ -229,6 +229,101 @@ final class ThreadModel {
         observedID == id ? row : nil
     }
 
+    // MARK: - 1f's agent card
+
+    /// The feed items behind this thread's agent cards, keyed by id.
+    ///
+    /// `DESIGN.md` §1f gives the card buttons only when its run is
+    /// `pending_approval` and it has a `feed_item_id`, and their labels come
+    /// from the card rather than from the run — so the screen needs the item
+    /// itself, not just the summary `GET /threads/{id}` already carries.
+    private(set) var cards: [String: WireFeedItem] = [:]
+    private let cardObservations = StoreObservation()
+
+    /// Which ids are armed. **Which thread** is `observedID`: this used to
+    /// carry its own copy, which was only ever nil or equal to it.
+    private var observedCardIDs: [String] = []
+
+    /// Fetch and watch every card this thread's runs raised.
+    ///
+    /// Fetching *and* observing, because the two answer different questions:
+    /// the fetch gets a card the store has never seen, and the observation is
+    /// what moves the buttons the instant the outbox settles one — from here or
+    /// from the feed, which write the same row.
+    ///
+    /// **Guarded on the thread, and idempotent.** `ThreadModel` has process
+    /// lifetime and is shared by every push (`MailTabRoot`), so an older
+    /// thread's `load` finishing *after* a newer one had wiped the current
+    /// thread's cards and left it with no buttons at all — the whole feature,
+    /// gone silently. And because the run set changes under a screen that stays
+    /// open (a mail trigger parks while you are reading), this re-arms whenever
+    /// the id set does rather than once per push.
+    func observeCards(_ ids: [String], for threadID: String) {
+        guard observedID == threadID, observedCardIDs != ids else { return }
+
+        cardObservations.stop()
+        observedCardIDs = ids
+        // A card the store no longer holds must not leave its spent token and
+        // its buttons on screen, so the set is replaced rather than merged.
+        cards = [:]
+
+        // **One** observation over the whole id set, not one per card: settling
+        // a single card used to re-fetch and re-assign every other card on the
+        // screen.
+        cardObservations.keep(sync.store.observeFeedItems(
+            ids: ids,
+            onError: { _ in },
+            onChange: { [weak self] found in
+                guard let self, self.observedID == threadID else { return }
+                self.cards = found
+            }
+        ))
+        fetchCards(ids)
+    }
+
+    /// The one-shot fetch behind the observation.
+    ///
+    /// Tracked so a pop cancels it: an unstructured `Task` outlives the screen,
+    /// and a late arrival would write into a model the user has already
+    /// navigated away from.
+    ///
+    /// **Concurrent**, because the cards are independent rows behind
+    /// independent `GET /feed/{id}` calls. In series, a thread's buttons did not
+    /// render until the last one landed — one round trip per card, up to
+    /// `MAX_AGENT_CARDS` of them.
+    private func fetchCards(_ ids: [String]) {
+        cardFetch?.cancel()
+        cardFetch = Task { [weak self] in
+            await withTaskGroup(of: Void.self) { group in
+                for id in ids {
+                    group.addTask { [weak self] in
+                        if Task.isCancelled { return }
+                        await self?.sync.loadFeedItem(id: id)
+                    }
+                }
+            }
+        }
+    }
+
+    private var cardFetch: Task<Void, Never>?
+
+    /// Called when the screen goes away.
+    func stopObservingCards() {
+        cardFetch?.cancel()
+        cardFetch = nil
+        cardObservations.stop()
+        observedCardIDs = []
+        cards = [:]
+    }
+
+    func approve(card item: WireFeedItem) async {
+        await sync.outbox.approve(item: item)
+    }
+
+    func skip(card item: WireFeedItem) async {
+        await sync.outbox.skip(item: item)
+    }
+
     /// The thread's own slot, falling back to an account-level failure —
     /// never another screen's paging error. EDGE (P13): this is a *second* slot
     /// beside `isPartial`, because `API.md` §2 says `partial` is produced by an
@@ -323,12 +418,17 @@ final class ThreadModel {
         thread = nil
         row = nil
         observation.stop()
+        stopObservingCards()
         observation.keep(sync.store.observeThread(
             id: id,
             onError: { [weak self] _ in self?.observation.failed(StateCopy.conversationUnreadable) },
             onChange: { [weak self] in
                 self?.observation.succeeded()
                 self?.thread = $0
+                // The run set changes under a screen that stays open — a mail
+                // trigger parks while the user is reading — so the cards follow
+                // the detail rather than one `load`.
+                self?.observeCards($0?.agentCards.compactMap(\.feedItemId) ?? [], for: id)
             }
         ))
         observation.keep(sync.store.observeThreadRow(
@@ -340,6 +440,15 @@ final class ThreadModel {
 
     func load(id: String, in mailboxID: String) async {
         observe(id: id)
+        // Drain in the background. A queued approve that lands before the cards
+        // are fetched means they come back already correct — but the thread
+        // must not wait on two round trips per queued action to render.
+        Task { [weak self] in await self?.sync.drainOutbox() }
         await sync.loadThread(id: id, in: mailboxID)
+        // EDGE: a slower thread's `load` finishing after a faster one. Both the
+        // guard here and the one inside `observeCards` are needed — this one
+        // stops an older load naming the wrong ids at all.
+        guard !Task.isCancelled, observedID == id else { return }
+        observeCards(thread(for: id)?.agentCards.compactMap(\.feedItemId) ?? [], for: id)
     }
 }

@@ -624,6 +624,117 @@ fn guard_against_live_calls_in_tests(api_base: &str) {
     }
 }
 
+// ---------------------------------------------------- forced tool calls --
+
+/// How one priced, forced tool call ended.
+///
+/// Every variant past `Called` has **already written its ledger row**, which is
+/// the whole point of the type: the caller's job is to map an outcome to its own
+/// error, not to remember what still has to be paid for.
+#[derive(Debug)]
+pub enum ForcedCall {
+    /// The model called the tool. Its `input`, unvalidated.
+    Called(Value),
+    /// The daily ceiling stopped the request before it was made. Nothing was
+    /// spent, so nothing is recorded.
+    CeilingReached,
+    /// The ledger could not be read, so the ceiling could not be honoured. The
+    /// call is refused rather than made unpriced.
+    LedgerUnavailable,
+    /// The request failed. Recorded at zero tokens with the error.
+    Failed(Error),
+    /// A 200 that could not be read, or that did not call the forced tool.
+    /// Priced and recorded first.
+    Unreadable(String),
+}
+
+/// Check the ceiling, make one forced tool call, price it, and read the answer.
+///
+/// # Why this is a function and not a comment
+///
+/// Two callers want an *object* out of the model rather than prose — the spec
+/// compiler and the mail trigger's semantic judgement — so neither can go
+/// through [`Adapter`], whose [`ChatRequest`] cannot express a forced
+/// `tool_choice` over a `strict` schema. Both therefore re-implemented the two
+/// things the adapter does around a call, and **both defects the ledger has
+/// ever had were a missing step of this exact chain**:
+///
+/// * **D60** — the ceiling belongs at the one place a path spends. A caller
+///   that forgets it can be looped without limit by an authenticated user.
+/// * **D61** — the row is written from [`WireResponse::usage`] **before** the
+///   body is parsed. The provider answered 200, so the tokens were billed; an
+///   early return on an unreadable body spends money the ledger never sees, and
+///   the ceiling then under-counts by exactly the calls that went wrong.
+///
+/// A third copy was written at P5. This is the one, and it is right here beside
+/// `Adapter::chat`, which does the same five steps for the other shape.
+///
+/// The caller keeps what genuinely differs: the request it builds, the tool it
+/// forces, and how it maps [`ForcedCall`] onto its own errors.
+pub async fn forced_tool_call(
+    client: &Client,
+    pool: &PgPool,
+    guard: &SpendGuard,
+    purpose: Purpose,
+    agent_id: Option<Uuid>,
+    request: &WireRequest,
+    tool_name: &str,
+) -> ForcedCall {
+    let account_id = guard.account_id();
+    let write = |model: String, tokens: Tokens, error: Option<String>| async move {
+        let mut record = match error {
+            None => Record::ok(account_id, purpose, &model, tokens),
+            Some(message) => Record::failed(account_id, purpose, &model, tokens, &message),
+        };
+        record.agent_id = agent_id;
+        ledger::record_or_log(pool, &record).await;
+    };
+
+    // D60, first and unconditionally.
+    match guard.check().await {
+        Ok(Ok(())) => {}
+        Ok(Err(_breached)) => return ForcedCall::CeilingReached,
+        Err(error) => {
+            tracing::error!(%error, ?purpose, "could not read the spend ledger before a call");
+            return ForcedCall::LedgerUnavailable;
+        }
+    }
+
+    let asked_for = request.model.clone();
+    let response = match client.send(request).await {
+        Ok(response) => response,
+        Err(error) => {
+            write(asked_for, Tokens::default(), Some(error.to_string())).await;
+            return ForcedCall::Failed(error);
+        }
+    };
+
+    // D61. `model_name` is what the provider says it actually ran, which is not
+    // always what was asked for, and an empty one falls back rather than
+    // pricing against "".
+    let tokens = response.usage();
+    let reported = response.model_name().to_owned();
+    let billed = if reported.is_empty() {
+        asked_for
+    } else {
+        reported
+    };
+    write(billed, tokens, None).await;
+
+    let (chat, _tokens, _model) = match from_wire(response) {
+        Ok(parsed) => parsed,
+        Err(error) => return ForcedCall::Unreadable(error.to_string()),
+    };
+    match chat
+        .tool_calls
+        .into_iter()
+        .find(|call| call.name == tool_name)
+    {
+        Some(call) => ForcedCall::Called(call.arguments),
+        None => ForcedCall::Unreadable(format!("the model answered without calling `{tool_name}`")),
+    }
+}
+
 // --------------------------------------------------------------- adapter --
 
 /// The [`Llm`] an agent run is built with: a [`Client`], plus everything the

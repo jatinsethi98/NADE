@@ -132,10 +132,18 @@ nonisolated enum WireFeedData: Codable, Hashable, Sendable {
         /// "Save draft". The draft lives in NADE and never in Gmail.
         let actionLabel: String
         let draftID: String
-        let threadID: String
+        /// Nullable since P5. The card is raised from the engine's
+        /// `approval_requested`, **before** the tool runs, so it can only
+        /// publish what the model's call already carried — and `draft_reply`'s
+        /// own `thread_id` is optional. `API.md` §3 already typed a draft row's
+        /// the same way; §7.1 was the outlier.
+        let threadID: String?
         let to: [String]
         let subject: String
-        /// True → the UI flags the recipient in red.
+        /// True → the card flags the recipient. `backend/testdata/injection`
+        /// finding 10: an approval card that renders only the body launders a
+        /// redirected draft, so the recipient and this flag are what contain
+        /// `identity-02` and `tool-01`.
         let neverMessaged: Bool
 
         enum CodingKeys: String, CodingKey {
@@ -146,20 +154,39 @@ nonisolated enum WireFeedData: Codable, Hashable, Sendable {
             case subject
             case neverMessaged = "never_messaged"
         }
+
+        /// Explicit, for the reason `WriteNote`'s is: the synthesised encoder
+        /// omits a nil instead of writing `null`.
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(actionLabel, forKey: .actionLabel)
+            try container.encode(draftID, forKey: .draftID)
+            try container.encode(threadID, forKey: .threadID)
+            try container.encode(to, forKey: .to)
+            try container.encode(subject, forKey: .subject)
+            try container.encode(neverMessaged, forKey: .neverMessaged)
+        }
     }
 
     nonisolated struct Info: Codable, Hashable, Sendable {
         let noteID: String?
+        /// Added at P5. An agent with `approval_required = false` and
+        /// `draft_reply` in its tools writes its draft with no card to approve,
+        /// and the `info` card that followed had no field to name what it had
+        /// made.
+        let draftID: String?
         let threadID: String?
 
         enum CodingKeys: String, CodingKey {
             case noteID = "note_id"
+            case draftID = "draft_id"
             case threadID = "thread_id"
         }
 
         func encode(to encoder: Encoder) throws {
             var container = encoder.container(keyedBy: CodingKeys.self)
             try container.encode(noteID, forKey: .noteID)
+            try container.encode(draftID, forKey: .draftID)
             try container.encode(threadID, forKey: .threadID)
         }
     }
@@ -199,6 +226,23 @@ nonisolated enum WireFeedData: Codable, Hashable, Sendable {
         case .writeNote(let payload): payload.actionLabel
         case .draftReply(let payload): payload.actionLabel
         case .none, .unrecognised: nil
+        }
+    }
+
+    /// The recipients a draft card is addressed to, for the line the card
+    /// renders above its buttons. Empty for every other kind.
+    var recipients: [String] {
+        switch self {
+        case .draftReply(let payload): payload.to
+        case .writeNote, .none, .unrecognised: []
+        }
+    }
+
+    /// True when this mailbox has never written to any of `recipients`.
+    var neverMessaged: Bool {
+        switch self {
+        case .draftReply(let payload): payload.neverMessaged
+        case .writeNote, .none, .unrecognised: false
         }
     }
 

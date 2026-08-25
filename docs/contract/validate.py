@@ -593,7 +593,12 @@ FEED_DATA = UNION("action", {
         "action": ENUM(["draft_reply"]),
         "action_label": "str",
         "draft_id": "uuid",
-        "thread_id": "gmailid",
+        # Nullable, because the tool's own `thread_id` is optional
+        # ("Optional: the thread this draft replies to") and the card is raised
+        # from `approval_requested` -- before any dispatch could have supplied
+        # one. API.md section 3 already types a draft row's thread_id the same
+        # way; this was the outlier.
+        "thread_id": NUL("gmailid"),
         "to": ARR("email"),
         "subject": "str",
         "never_messaged": "bool",
@@ -601,6 +606,10 @@ FEED_DATA = UNION("action", {
     "none": OBJ({
         "action": ENUM(["none"]),
         "note_id": NUL("uuid"),
+        # An agent with `approval_required = false` and `draft_reply` in its
+        # tools writes its draft with no card to approve, and the `info` card
+        # that follows had no field to name what it made.
+        "draft_id": NUL("uuid"),
         "thread_id": NUL("gmailid"),
     }),
 })
@@ -1965,15 +1974,29 @@ def check_feed_item(world, item):
         # A feed item cannot predate the run that raised it.
         if parse_ts(item["created_at"]) < parse_ts(run["created_at"]):
             fail(where, "was created before its run")
-        expected_status = {
-            "new": ["pending_approval"],
-            "resolved": ["queued", "running", "done"],
-            "skipped": ["skipped"],
-            "expired": ["expired"],
-        }
-        if kind == "approval" and run["status"] not in expected_status[status]:
-            fail(where, "is %r but its run is %r; the two move together"
-                 % (status, run["status"]))
+        # The card and its run must not contradict each other **about this
+        # decision**. Three of the four are exact; `resolved` is not, and
+        # cannot be:
+        #
+        #   * `new` means the run is parked on this very card;
+        #   * `skipped` and `expired` are decisions that end the run, so the
+        #     run carries them too;
+        #   * `resolved` means "go ahead" was recorded. Where the run got to
+        #     afterwards is its own business - it may still be `queued`, it may
+        #     be `done`, it may have **paused again** on a second gated call
+        #     (`max_steps` is 12 and an agent may hold both `write_note` and
+        #     `draft_reply`), and it may have failed on a later step. The one
+        #     thing it may not be is `skipped` or `expired`, which would mean
+        #     two different answers to one question.
+        if kind == "approval":
+            exact = {"new": "pending_approval", "skipped": "skipped",
+                     "expired": "expired"}
+            if status in exact and run["status"] != exact[status]:
+                fail(where, "is %r but its run is %r; the two move together"
+                     % (status, run["status"]))
+            if status == "resolved" and run["status"] in ("skipped", "expired"):
+                fail(where, "is resolved but its run is %r; one decision cannot "
+                            "be both" % run["status"])
         # The journal never names the feed item -- the item is a host row
         # raised from the engine's ApprovalRequest outcome (API.md section
         # 6.1), so the tie runs the other way: the run's gate must exist, the
@@ -2015,6 +2038,18 @@ def check_no_outbound_copy(world):
                     fail("feed item %s" % item["id"],
                          "%s %r uses the outbound verb %r; v1 takes no outbound "
                          "action" % (field, label, token))
+        # `body` is the model's own prose, and `2a` renders it at 14 pt as the
+        # card's content. A compromised model writing "Sent your reply to ..."
+        # on the home screen is the failure `backend/testdata/injection` exists
+        # to make impossible, and the server screens it at write time
+        # (`agents::feed::promises_an_outbound_action`); this is the fixture
+        # side of the same rule. "reply" is exempt for the same reason it is
+        # exempt below: drafting one is what the product does.
+        for token in word.findall((item["body"] or "").lower()):
+            if token in OUTBOUND_VERBS and token != "reply":
+                fail("feed item %s" % item["id"],
+                     "body %r uses the outbound verb %r; v1 takes no outbound "
+                     "action" % (item["body"], token))
         for token in word.findall((item["resolved_note"] or "").lower()):
             if token in OUTBOUND_VERBS and token != "reply":
                 fail("feed item %s" % item["id"],

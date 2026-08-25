@@ -312,6 +312,118 @@ mod tests {
             triage.contains("triage"),
             "the triage index must stay partial: {triage}"
         );
+
+        // P5. `GET /feed` walks the whole feed newest-first on a keyset; the
+        // 0001 index leads with `status`, which that query does not filter on,
+        // so it cannot serve the ordered scan.
+        let feed = find("feed_items_account_created_idx");
+        for fragment in ["account_id", "created_at DESC", "id DESC"] {
+            assert!(feed.contains(fragment), "{feed}");
+        }
+
+        // The token **is** the capability: two cards must never share one.
+        let token = find("feed_items_token_idx");
+        assert!(token.contains("UNIQUE"), "{token}");
+        assert!(token.contains("approval_token IS NOT NULL"), "{token}");
+
+        // One card per gated step, so re-raising on a job retry is a no-op and
+        // not a second live token.
+        let step = find("feed_items_run_step_idx");
+        assert!(step.contains("UNIQUE"), "{step}");
+        assert!(
+            step.contains("run_id") && step.contains("step_seq"),
+            "{step}"
+        );
+
+        // The sweep's whole predicate, so a quiet server walks an empty index.
+        let expiry = find("feed_items_expiry_idx");
+        assert!(expiry.contains("approval_expires_at"), "{expiry}");
+        assert!(
+            expiry.contains("'approval'") && expiry.contains("'new'"),
+            "{expiry}"
+        );
+
+        // The mail list's `agent_note` join and the thread's agent cards.
+        assert!(find("feed_items_thread_idx").contains("thread_id"));
+
+        // "The newest card of this run", which the thread screen asks once per
+        // run on screen. `feed_items_run_step_idx` cannot answer it: that index
+        // is partial on `step_seq is not null` and an `info` card has none, so
+        // a `run_id`-only query cannot prove the predicate.
+        let run_created = find("feed_items_run_created_idx");
+        assert!(
+            run_created.contains("run_id") && run_created.contains("created_at DESC"),
+            "{run_created}"
+        );
+        assert!(!run_created.contains("step_seq"), "{run_created}");
+
+        // The other two branches of that screen's union. 0001 leads both tables
+        // with `updated_at`, which is the wrong column for "about this thread".
+        for name in ["notes_account_thread_idx", "drafts_account_thread_idx"] {
+            let index = find(name);
+            assert!(
+                index.contains("account_id") && index.contains("thread_id"),
+                "{index}"
+            );
+        }
+
+        // The per-agent daily cap on mail-triggered runs.
+        let mail_day = find("agent_runs_agent_mail_day_idx");
+        assert!(mail_day.contains("agent_id"), "{mail_day}");
+        assert!(mail_day.contains("'mail'"), "{mail_day}");
+        // The agent-cards join, which looks a run up by the message that fired
+        // it (`API.md` §6: `trigger_ref` is a *message* id).
+        assert!(find("agent_runs_trigger_ref_idx").contains("trigger_ref"));
+    }
+
+    /// The two columns 0001 put on `agent_runs` for an approval capability, and
+    /// that nothing ever read.
+    ///
+    /// Dropped at P5 rather than left dead: a run can pause more than once, so
+    /// one token per run is the wrong shape — the capability belongs to the
+    /// card (`feed_items`), which is also what `API.md` §7 needs to keep an
+    /// expired card's deadline after it is settled. Leaving them would be
+    /// leaving a second place to look for the same fact, and the wrong one.
+    #[tokio::test]
+    async fn the_approval_capability_lives_on_the_card_and_not_on_the_run() {
+        let db = test_db().await;
+        let columns: Vec<String> = sqlx::query_scalar(
+            "select column_name::text from information_schema.columns \
+              where table_name = 'agent_runs' order by column_name",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        assert!(
+            !columns.contains(&"approval_token".to_owned()),
+            "{columns:?}"
+        );
+        assert!(
+            !columns.contains(&"approval_expires_at".to_owned()),
+            "{columns:?}"
+        );
+
+        let columns: Vec<String> = sqlx::query_scalar(
+            "select column_name::text from information_schema.columns \
+              where table_name = 'feed_items' order by column_name",
+        )
+        .fetch_all(&db.pool)
+        .await
+        .unwrap();
+        for wanted in [
+            "agent_note",
+            "approval_expires_at",
+            "approval_token",
+            "dismissible",
+            "reason",
+            "step_seq",
+            "thread_id",
+        ] {
+            assert!(
+                columns.contains(&wanted.to_owned()),
+                "{wanted}: {columns:?}"
+            );
+        }
     }
 
     /// Criterion B4 - the plan's `check` constraints are real.

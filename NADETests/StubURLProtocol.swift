@@ -46,6 +46,7 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         queue = []
         recorded = []
+        sent = []
     }
 
     static var requests: [URLRequest] {
@@ -53,9 +54,41 @@ final class StubURLProtocol: URLProtocol, @unchecked Sendable {
         return recorded
     }
 
+    /// The bodies, in the order they were sent.
+    ///
+    /// **Not `request.httpBody`.** `URLSession` moves a body into
+    /// `httpBodyStream` before a `URLProtocol` ever sees the request, so the
+    /// property is nil for every POST — which would make "the approval token
+    /// travels in the body" a test that passes against a client that sent no
+    /// body at all.
+    static var bodies: [Data] {
+        lock.lock(); defer { lock.unlock() }
+        return sent
+    }
+
+    nonisolated(unsafe) private static var sent: [Data] = []
+
+    private static func record(_ request: URLRequest) {
+        guard let stream = request.httpBodyStream else {
+            if let body = request.httpBody { sent.append(body) }
+            return
+        }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let read = stream.read(&buffer, maxLength: buffer.count)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        sent.append(data)
+    }
+
     private static func next(for request: URLRequest) -> Reply {
         lock.lock(); defer { lock.unlock() }
         recorded.append(request)
+        record(request)
         // The last reply repeats, so a poll loop does not need one entry per
         // attempt to describe "and it stayed empty".
         return queue.count > 1 ? queue.removeFirst() : (queue.first ?? Reply())

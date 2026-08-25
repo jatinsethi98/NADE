@@ -4,19 +4,22 @@ One plan, one executor: a single orchestrating AI agent on this Mac, fanning out
 
 Draft 3 folds in a third adversarial review (findings C1–C10, appendix) and two directives: **test-speed scoping** (sync 30 days, dev caps everywhere, no bloat) and the **execution doctrine** below.
 
-## Where we are — 2026-08-21
+## Where we are — 2026-08-25
 
 | Phase | State |
 |---|---|
 | P1 Foundations | ✅ 2026-08-17 |
 | P2 Mail lands | ✅ 2026-08-19 |
-| P3 Mail stays current | ✅ 2026-08-20 — backend live; the iOS screens run on fixtures until P4/P5 serve them |
+| P3 Mail stays current | ✅ 2026-08-20 — backend live; the iOS screens ran on fixtures until P5 |
 | P4 First runs | ✅ 2026-08-21 — live against real mail and a real model |
-| P5 The loop closes | next |
+| P5 The loop closes | ✅ 2026-08-25 — the feed, the approval transaction and the mail trigger, live on both lanes |
 | P6–P8 | not started |
 
-Green at `8b05de1`: 785 Rust tests, 258 iOS unit, 46 iOS UI, each twice
-consecutively. 38 screenshots in `docs/screens/`, all distinct by hash.
+Green at P5: **1200 workspace tests** plus the detached red-team harness's 45
+(21 + 24 with `real_parser`), **345 iOS unit** and **53 iOS UI**, each twice
+consecutively; `just ci` — build, clippy `-D warnings`, fmt-check, the workspace
+suite (D27), and the 85-case corpus in both feature sets — green twice, and
+`validate.py` green. 38 screenshots, all distinct by hash.
 
 **2026-08-21 architecture checkpoint.** Three corrections landed before P4
 opened. The multi-account **resolution layer** is in: accounts are
@@ -46,10 +49,10 @@ of the same checkpoint is D98–D105.
 
 ## Caveats — read before you test
 
-- **The Ask tab shows fixtures, not your mail.** 2a, 1a, 1b, 1c and 1d are
-  built and correct, but `/agents` lands at P4 and `/feed` at P5. Against the
-  live server they say "This server doesn't offer that yet." — loudly and on
-  purpose, rather than showing an empty list.
+- **The Ask tab is live.** 2a's feed, its approve/skip round trip, and all six
+  `/agents` routes speak to the real server as of P5. `POST /ask` is the one
+  route still answering "This server doesn't offer that yet." — it is P6's, and
+  it fails loudly rather than showing an empty list.
 - **Push stops whenever the tunnel restarts.** A quick tunnel's hostname is
   ephemeral and `NADE_PUSH_AUDIENCE` is read once at boot, so after any restart
   run `just tunnel` and restart the server. Until you do, mail still arrives —
@@ -515,7 +518,98 @@ so none is discovered mid-lane.
   **workspace root**, green twice (D27 — a per-crate feature gate is the exact
   trap it documents).
 
-**P5 — The loop closes. [backend] then GATE then [ios] live.**
+**P5 — The loop closes. ✅ DONE 2026-08-25. [backend] then GATE then [ios] live.**
+
+Shipped, backend: migration `0006`, `agents/{spec,feed,triage,resume,expire}.rs`,
+`api/feed.rs`'s five routes, the four `ErrorCode`s the approval loop answers
+with, `agent_cards` and `agent_note` on the mail endpoints, and the trigger
+enqueued **inside** the history page's own transaction. Shipped, iOS: the
+eleven routes that had been answering `notServedYet` — five feed and six
+`/agents`, the latter being the debt this document recorded as owned by no
+phase — 1f's agent-card buttons, and the recipient line a draft card needs.
+
+**Two unbiased subagent reviews**, one before any code existed and one on the
+finished diff. The first returned 22 findings (4 blockers); the second returned
+18 above minor (4 blockers) in code that had already passed `just ci` twice.
+`DECISIONS.md` D70–D82 is the record. The eight worth remembering:
+
+- `Engine::run` on a parked run **appends nothing** — it answers by replay —
+  so two callers do not collide on the journal's primary key and nothing
+  protected `agent_runs`. A stale run job could put an approved, executed run
+  back to `pending_approval` for ever. Every `settle` write is now guarded, and
+  a parked run belongs to `resume_run` alone (D71).
+- **Two contract violations had already shipped**: the spend-ceiling card and
+  the needs-reauth card both wrote `data.reason`, an extra key the `data` shape
+  forbids, and re-consent set `resolved_note` on an `info` card. Invisible
+  because `/feed` was unmounted; live the day it was (D72).
+- The ≤20/agent/day cap counted **model calls**, and the default compiled agent
+  makes none — so it could start unbounded runs, each with a 50 000-token
+  budget (D73).
+- The card's `created_at` and `approval_expires_at` are tied to the journal's
+  gate entry, and neither `now()` nor `requested_at` is that value (D74).
+- **A shipped sentence promised an outbound action** — "This expired before it
+  could be sent." — and four guards were pointed at it, all matching
+  `\bsend(s|ing)?\b`, which does not match `sent` (D78).
+- **Every approved run raised a second card**, because `settle` raised the
+  ungated `info` card on any `Done` and the headline flow ends in `Done`. The
+  test that should have caught it checked `new_count` *before* the resume job
+  (D78).
+- **The 2 KB triage cap was dead code**: applied after fencing, against a
+  ceiling the fenced string could never reach. Every semantic call paid five
+  times the documented input (D78).
+- **The status guard was TOCTOU**, and no test could reach either guard —
+  deleting both left everything green. They are mutation-proven now, along with
+  the idempotency clause, the host allowlist, the D61 ledger write and the
+  fenced subject (D78, D79).
+
+Three defects surfaced from tests catching the code as it was written: an error
+return rolled back the settle that an expired card and a deleted agent's card
+both have to commit; the red-team suite deleted the agents whose runs it then
+asserted over; and a mutation test showed the first race test never reached the
+race it was named for.
+
+**Then a cleanup pass** — four more reviews of the finished diff, for reuse,
+simplification, efficiency and depth, none of them looking for bugs. D83 is the
+record; 43 findings, 27 applied. Two were not cleanup:
+
+- **1f's approval card had no recipient row.** The feed row carries one, with
+  the `injection/README.md` finding-10 citation explaining that an approval
+  card is contained *only* if it names the address and flags `never_messaged`.
+  The thread card offered the same Approve button with neither. One
+  `ApprovalControls` view draws both surfaces now.
+- **`OutboxDriver.onProblem` was never assigned**, so D82's "surfaced, not just
+  recorded" fix shipped inert and its localized string had no reachable caller.
+
+And the structural ones worth knowing before P6: five `match tool` sites became
+one `GatePresentation` table with a test that walks `V1_TOOLS`; three copies of
+the priced forced-tool-call chain — the chain whose missing steps *are* D60 and
+D61 — became `anthropic::forced_tool_call`; `feed.rs` became the single author
+of `feed_items` it already claimed to be; and `Spec` became the only reader of
+`agents.spec`.
+
+**Still owed, and named rather than assumed.**
+
+- **The live gate has not been walked.** P5's `[ios]` line says "live against
+  local backend", and every `ApprovalLoopUITests` launch passes
+  `-NADESeed fixtures` — which `CLAUDE.md` is explicit "only proves the fixture
+  world still renders". The fixture source *is* stateful (approve spends the
+  token and moves the card, exactly as the server does), so the loop a person
+  walks is really walked; what no automated test crosses is
+  `HTTPMailSource → MailSync → MailStore`. `scripts/bench.sh` is that path and
+  needs a running server, a pairing and live consent.
+- **H8 with it**: a real email to the real mailbox, through the trigger to a
+  card and back. `docs/BENCH.md`, and it needs a human's inbox and a tunnel.
+- `POST /ask` is the last `notServedYet` on the iOS side, and is P6's.
+- The `waiting` status is reachable in principle and nothing fires
+  `Resolution::Timer` — P7 owns it, and no v1 tool can produce the state today.
+- **Outbox replay across a relaunch** is unit-tested, not XCUITested: a seeded
+  launch deletes its store file first (EDGE P11), so nothing survives to be
+  replayed. `OutboxDurabilityTests` and `OutboxTests` cover the durable write,
+  the one-action-per-card rule and 409-as-success.
+
+The original P5 definition follows.
+
+**P5 — The loop closes (as specified). [backend] then GATE then [ios] live.**
 - [backend] Mail triggers + capped triage, approval pause (server token, 7-day expiry cron), feed producer, **atomic approve tx**, GET /feed/{id}, **POST /feed/seen** (the built app already calls it), audit, 10 injection red-team fixtures in CI. ✓ H8 email → feed item with token; approve → queued in ONE tx and the resume job carries it to done (test asserts all **five** writes land or none, **and that the tx leaves `run_journal` untouched** — `approval_resolved` arrives only via `Engine::resume`); replayed webhook → no second run; replay approve → 409; expiry flips; red-team fixtures all end pending_approval or no-op.
 - **GATE** then [ios] live against local backend: **feed** live, approve/skip
   round-trip, outbox replay. ✓ XCUITest e2e green. (Mailboxes and threads went

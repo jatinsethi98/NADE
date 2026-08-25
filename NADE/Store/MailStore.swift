@@ -493,13 +493,21 @@ nonisolated final class MailStore: Sendable {
     /// re-decodes the whole feed. The count comes from the response rather than
     /// from counting local rows, which would undercount as soon as the feed has
     /// more than one page.
-    func markFeedItemsSeen(ids: [String], newCount: Int) async throws {
+    /// Apply what `POST /feed/seen` answered.
+    ///
+    /// **The badge, and nothing else.** This used to write every id it sent to
+    /// `resolved` locally, which was a guess — and the server refuses some of
+    /// them. `API.md` §7: one class of `info` card is not dismissible, and the
+    /// needs-reauth card is it. Marking that one read locally took the accent
+    /// border off the only surface reporting a dead mailbox while the badge
+    /// still counted it, and `HomeFeedModel`'s `seenSent` then blocked ever
+    /// asking again.
+    ///
+    /// The server's `new_count` is authoritative and cheap; the statuses come
+    /// back with the next `GET /feed`, which is where they came from in the
+    /// first place.
+    func markFeedItemsSeen(newCount: Int) async throws {
         try await writer.write { db in
-            for id in ids {
-                guard var item = try FeedItemRecord.fetchOne(db, key: id) else { continue }
-                item.status = FeedStatus.resolved.rawValue
-                try item.update(db)
-            }
             if var record = try FeedSyncRecord.fetchOne(db, key: 1) {
                 record.newCount = newCount
                 try record.update(db)
@@ -651,6 +659,32 @@ nonisolated final class MailStore: Sendable {
             ?? FeedItemRecord.filter(Column("status") == FeedStatus.new.rawValue).fetchCount(db)
     }
 
+    /// One card, for 1f's agent card.
+    ///
+    /// The thread screen needs a *single* item's `actions`, `action_label` and
+    /// token, and observing the whole feed to find one row would redraw the
+    /// thread every time an unrelated card moved.
+    func feedItem(_ db: Database, id: String) throws -> WireFeedItem? {
+        try FeedItemRecord.fetchOne(db, key: id)?.wire
+    }
+
+    /// The same, for the set a thread's agent cards name — keyed by id.
+    ///
+    /// One query and one observation for the whole screen. Watching each id
+    /// separately meant `MAX_AGENT_CARDS` observations, each re-running its own
+    /// `fetchOne` on every write that touched the feed region, so settling one
+    /// card re-fetched all of them and fired the callback once per card.
+    ///
+    /// An id the store does not hold is simply absent from the result, which is
+    /// what lets a spent card lose its buttons.
+    func feedItems(_ db: Database, ids: [String]) throws -> [String: WireFeedItem] {
+        guard !ids.isEmpty else { return [:] }
+        return try FeedItemRecord
+            .filter(ids.contains(Column("id")))
+            .fetchAll(db)
+            .reduce(into: [:]) { found, record in found[record.id] = record.wire }
+    }
+
     func agents(_ db: Database) throws -> [WireAgentRow] {
         try AgentRecord.order(Column("position")).fetchAll(db).compactMap(\.wire)
     }
@@ -663,6 +697,24 @@ nonisolated final class MailStore: Sendable {
         onChange: @escaping @MainActor ([WireFeedItem]) -> Void
     ) -> MailStoreCancellable {
         observe({ try self.feed($0) }, onError: onError, onChange: onChange)
+    }
+
+    @MainActor
+    func observeFeedItem(
+        id: String,
+        onError: @escaping @MainActor (Error) -> Void,
+        onChange: @escaping @MainActor (WireFeedItem?) -> Void
+    ) -> MailStoreCancellable {
+        observe({ try self.feedItem($0, id: id) }, onError: onError, onChange: onChange)
+    }
+
+    @MainActor
+    func observeFeedItems(
+        ids: [String],
+        onError: @escaping @MainActor (Error) -> Void,
+        onChange: @escaping @MainActor ([String: WireFeedItem]) -> Void
+    ) -> MailStoreCancellable {
+        observe({ try self.feedItems($0, ids: ids) }, onError: onError, onChange: onChange)
     }
 
     @MainActor

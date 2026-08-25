@@ -25,12 +25,10 @@ use std::sync::Arc;
 
 use serde_json::{json, Map, Value};
 use sqlx::PgPool;
-use uuid::Uuid;
 
 use crate::llm::{
-    anthropic::{Client, WireMessage, WireRequest},
-    cost::Tokens,
-    ledger::{self, Record, SpendGuard},
+    anthropic::{Client, ForcedCall, WireMessage, WireRequest},
+    ledger::SpendGuard,
     Purpose,
 };
 
@@ -228,8 +226,6 @@ pub async fn compile(
     let Some(client) = client else {
         return Err(CompileError::NotConfigured);
     };
-    let account_id = guard.account_id();
-
     // The ceiling lives **here**, not in the two handlers, because this is the
     // one place both of them pass through and a third caller would otherwise
     // inherit nothing. `POST /agents` and `PATCH /agents/{id}` each reach a
@@ -237,19 +233,11 @@ pub async fn compile(
     // which the run path gets through the adapter, has to be applied by hand on
     // this one. Without it the daily ceiling bounds one of the three paths that
     // spend, and an authenticated caller can loop the other two without limit.
-    match guard.check().await {
-        Ok(Ok(())) => {}
-        Ok(Err(_breached)) => return Err(CompileError::CeilingReached),
-        Err(err) => {
-            tracing::error!(error = %err, "could not read the spend ledger before compiling");
-            return Err(CompileError::Unavailable);
-        }
-    }
-
-    let model = client.compile_model().to_owned();
-
+    //
+    // Applied by `forced_tool_call`, along with the D61 pricing, because this
+    // was one of three hand-rolled copies of that chain.
     let request = WireRequest {
-        model: model.clone(),
+        model: client.compile_model().to_owned(),
         max_tokens: 2_048,
         system: Some(SYSTEM.to_owned()),
         messages: vec![WireMessage {
@@ -263,70 +251,32 @@ pub async fn compile(
         temperature: None,
     };
 
-    let response = match client.send(&request).await {
-        Ok(response) => response,
-        Err(err) => {
-            record_call(
-                pool,
-                account_id,
-                &model,
-                Tokens::default(),
-                Some(&err.to_string()),
-            )
-            .await;
+    let call = match crate::llm::anthropic::forced_tool_call(
+        client,
+        pool,
+        guard,
+        Purpose::Compile,
+        None,
+        &request,
+        "emit_agent",
+    )
+    .await
+    {
+        ForcedCall::Called(arguments) => arguments,
+        ForcedCall::CeilingReached => return Err(CompileError::CeilingReached),
+        ForcedCall::LedgerUnavailable => return Err(CompileError::Unavailable),
+        ForcedCall::Failed(err) => {
             return Err(match err {
                 crate::llm::anthropic::Error::NotConfigured => CompileError::NotConfigured,
                 crate::llm::anthropic::Error::Permanent { message, .. } => {
                     CompileError::Malformed(message)
                 }
                 _ => CompileError::Unavailable,
-            });
+            })
         }
+        ForcedCall::Unreadable(message) => return Err(CompileError::Malformed(message)),
     };
-
-    // Priced and recorded **before** the answer is parsed. The provider
-    // answered 200, so the tokens were billed; an early return here - a body
-    // that will not decode, or a model that answered without calling the forced
-    // tool - would spend money the ledger never sees, and the ceiling
-    // under-counts by exactly the calls that went wrong. The adapter closes the
-    // same hole on the run path.
-    let tokens = response.usage();
-    let reported = response.model_name().to_owned();
-    let billed = if reported.is_empty() { model } else { reported };
-    record_call(pool, account_id, &billed, tokens, None).await;
-
-    let call = extract_call(response)?;
     build(nl_definition, &call)
-}
-
-/// Pull the forced tool call's input out of a raw response.
-fn extract_call(response: crate::llm::anthropic::WireResponse) -> Result<Value, CompileError> {
-    let (chat, _tokens, _model) = crate::llm::anthropic::from_wire(response)
-        .map_err(|e| CompileError::Malformed(e.to_string()))?;
-
-    let call = chat
-        .tool_calls
-        .into_iter()
-        .find(|call| call.name == "emit_agent")
-        .ok_or_else(|| {
-            CompileError::Malformed("the model answered without calling `emit_agent`".to_owned())
-        })?;
-    Ok(call.arguments)
-}
-
-/// Write one ledger row, loudly on failure.
-async fn record_call(
-    pool: &PgPool,
-    account_id: Uuid,
-    model: &str,
-    tokens: Tokens,
-    error: Option<&str>,
-) {
-    let record = match error {
-        None => Record::ok(account_id, Purpose::Compile, model, tokens),
-        Some(message) => Record::failed(account_id, Purpose::Compile, model, tokens, message),
-    };
-    ledger::record_or_log(pool, &record).await;
 }
 
 /// Validate the model's object and assemble the stored shape.

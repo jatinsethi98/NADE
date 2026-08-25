@@ -302,6 +302,18 @@ pub async fn tick_once(state: &AppState, queue: &Queue) -> Result<bool> {
         }
         enqueued_any |= enqueue(queue, account_id).await?.is_some();
     }
+
+    // The approval sweep, which is **not** per account and must not be.
+    //
+    // An approval does not stop being seven days old because a mailbox's Gmail
+    // token died, and the loop above skips `needs_reauth` accounts by design.
+    // One deduplicated job for the whole server, enqueued only when the
+    // database says something is actually overdue — the same "ask PostgreSQL
+    // what is due" rule this module is built on.
+    if crate::agents::expire::due(&state.pool).await? {
+        enqueued_any |= crate::agents::expire::enqueue(queue).await?.is_some();
+    }
+
     Ok(enqueued_any)
 }
 

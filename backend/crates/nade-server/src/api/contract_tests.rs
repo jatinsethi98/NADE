@@ -11,6 +11,7 @@
 
 use serde_json::{json, Value};
 
+use super::feed::{ApproveResponse, FeedItem, FeedResponse, FeedRow, SeenResponse, SkipResponse};
 use super::mail::{
     AgentCard, AttachmentView, Mailbox, MailboxesResponse, MeResponse, MessageView, ThreadDetail,
     ThreadSummary, ThreadsResponse,
@@ -34,7 +35,7 @@ fn assert_matches<T: serde::Serialize>(value: &T, fixture_name: &str) {
 /// Every key the fixture has, our type has - and vice versa. Compared as a
 /// structure so a value difference (a count, a timestamp) is not confused with
 /// a *shape* difference.
-fn assert_same_shape(produced: &Value, expected: &Value, path: &str) {
+pub(crate) fn assert_same_shape(produced: &Value, expected: &Value, path: &str) {
     match (produced, expected) {
         (Value::Object(ours), Value::Object(theirs)) => {
             let mut our_keys: Vec<&String> = ours.keys().collect();
@@ -809,6 +810,200 @@ fn the_empty_note_and_draft_pages_match() {
     );
 }
 
+// ---------------------------------------------------------- P5: the feed --
+
+/// Every feed fixture, decoded into the **real** response type and serialised
+/// back byte for byte.
+///
+/// `assert_matches`, not `shape_of`. A feed item is mostly derived — `actions`
+/// is computed from `kind`, `status` and `data.action`, and `approval_token` is
+/// nulled the moment a card is not a live approval — so a shape comparison
+/// would pass while the two rules that matter were wrong. Round-tripping the
+/// fixture through `FeedRow::into_wire` exercises exactly those.
+#[test]
+fn every_feed_fixture_round_trips_through_the_real_row() {
+    for name in [
+        "feed_item.json",
+        "feed_item_info.json",
+        "feed_item_editable.json",
+    ] {
+        let expected = fixture(name);
+        let produced = serde_json::to_value(feed_row_from(&expected).into_wire())
+            .expect("the feed row serialises");
+        assert_eq!(produced, expected, "{name}");
+    }
+
+    let expected = fixture("feed.json");
+    let items: Vec<Value> = expected["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|item| serde_json::to_value(feed_row_from(item).into_wire()).expect("serialises"))
+        .collect();
+    assert_eq!(Value::Array(items), expected["items"], "feed.json");
+}
+
+/// Build the stored row a fixture describes, so the derivations are re-derived
+/// rather than copied.
+fn feed_row_from(item: &Value) -> FeedRow {
+    FeedRow {
+        id: item["id"].as_str().unwrap().parse().unwrap(),
+        account_id: uuid::Uuid::nil(),
+        kind: item["kind"].as_str().unwrap().to_owned(),
+        title: item["title"].as_str().unwrap().to_owned(),
+        body: Some(item["body"].as_str().unwrap().to_owned()),
+        status: item["status"].as_str().unwrap().to_owned(),
+        run_id: item["run_id"].as_str().map(|id| id.parse().unwrap()),
+        approval_token: item["approval_token"].as_str().map(|t| t.parse().unwrap()),
+        approval_expires_at: item["approval_expires_at"]
+            .as_str()
+            .map(|ts| ts.parse().unwrap()),
+        resolved_note: item["resolved_note"].as_str().map(str::to_owned),
+        data: Some(item["data"].clone()),
+        step_seq: Some(6),
+        created_at: item["created_at"].as_str().unwrap().parse().unwrap(),
+    }
+}
+
+/// The rule `API.md` §7 states about the token, checked against a row that
+/// **holds** one — which is the only way to check it. Seeding every row with a
+/// token would have made the round-trip test above agree with itself; seeding
+/// none would leave this rule unexercised.
+#[test]
+fn a_settled_card_never_serialises_a_token_even_if_the_row_holds_one() {
+    for name in ["feed_item.json", "feed_item_info.json"] {
+        let mut row = feed_row_from(&fixture(name));
+        row.approval_token = Some(uuid::Uuid::nil());
+        row.status = "resolved".to_owned();
+        let wire = row.into_wire();
+        assert!(wire.approval_token.is_none(), "{name}");
+        assert!(
+            wire.actions.is_empty(),
+            "{name}: a settled card has no buttons"
+        );
+    }
+}
+
+#[test]
+fn the_feed_page_matches_the_fixture() {
+    let expected = fixture("feed.json");
+    let items: Vec<FeedItem> = expected["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| feed_row_from(item).into_wire())
+        .collect();
+    assert_matches(
+        &FeedResponse {
+            items,
+            next_cursor: None,
+            new_count: expected["new_count"].as_i64().unwrap(),
+        },
+        "feed.json",
+    );
+}
+
+#[test]
+fn the_empty_feed_matches_the_fixture() {
+    assert_matches(
+        &FeedResponse {
+            items: Vec::new(),
+            next_cursor: None,
+            new_count: 0,
+        },
+        "feed_empty.json",
+    );
+}
+
+#[test]
+fn the_decision_responses_match_their_fixtures() {
+    let approve = fixture("approve.json");
+    assert_matches(
+        &ApproveResponse {
+            run_id: approve["run_id"].as_str().unwrap().parse().unwrap(),
+            status: "queued".to_owned(),
+        },
+        "approve.json",
+    );
+    assert_matches(
+        &SkipResponse {
+            status: "skipped".to_owned(),
+        },
+        "skip.json",
+    );
+    assert_matches(
+        &SeenResponse {
+            new_count: fixture("seen.json")["new_count"].as_i64().unwrap(),
+        },
+        "seen.json",
+    );
+}
+
+/// D67, applied to P5's own rendered strings.
+///
+/// `resolved_note` and `agent_note` are prose the **server** composes, and the
+/// fixtures are what the app renders and what the signed-off screenshots show.
+/// A shape assertion would have let the two drift, which is exactly how
+/// `trigger_summary` came to disagree with its fixtures in two places while
+/// both lanes stayed green.
+#[test]
+fn the_servers_resolved_notes_are_the_fixtures_word_for_word() {
+    let expected: std::collections::HashMap<&str, &str> = [
+        ("resolved", "Saved to Drafts."),
+        ("skipped", "Skipped — nothing was saved."),
+        ("expired", "Expired after 7 days — nothing was saved."),
+    ]
+    .into_iter()
+    .collect();
+
+    for item in fixture("feed.json")["items"].as_array().unwrap() {
+        let status = item["status"].as_str().unwrap();
+        let Some(want) = expected.get(status) else {
+            continue;
+        };
+        // The one `resolved` card in the corpus is a `draft_reply`; a
+        // `write_note` one would read "Saved to Notes.", which is asserted by
+        // the approve tests over a real database.
+        assert_eq!(
+            item["resolved_note"].as_str(),
+            Some(*want),
+            "feed item {} ({status})",
+            item["id"]
+        );
+    }
+}
+
+#[test]
+fn the_servers_agent_note_is_the_fixtures_word_for_word() {
+    use crate::agents::feed::agent_note;
+    let feed = fixture("feed.json");
+    for name in ["threads.json", "search.json"] {
+        for row in fixture(name)["threads"].as_array().unwrap() {
+            let Some(note) = row["agent_note"].as_str() else {
+                continue;
+            };
+            // The card that still wants something on this thread names the
+            // tool, and the renderer takes it from there.
+            let (agent, _) = note.split_once(" · ").expect("agent · phrase");
+            let card = feed["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| {
+                    item["status"] == "new"
+                        && item["title"] == agent
+                        && item["data"]["thread_id"] == row["id"]
+                })
+                .unwrap_or_else(|| panic!("no live card behind {note:?} in {name}"));
+            assert_eq!(
+                agent_note(agent, card["data"]["action"].as_str().unwrap()),
+                note,
+                "{name}"
+            );
+        }
+    }
+}
+
 // --------------------------------------------------- fixture completeness --
 
 /// Every fixture is referenced by some test, or is explicitly deferred.
@@ -825,26 +1020,14 @@ fn the_empty_note_and_draft_pages_match() {
 fn every_fixture_is_referenced_by_a_test_or_deferred_on_purpose() {
     /// Fixtures no P4 code can serve yet, each with the phase that will.
     const DEFERRED: &[(&str, &str)] = &[
-        // P5 — the approval loop. `error.rs` has eight codes; `API.md` has
-        // thirteen, and these five are the approve/skip transaction's. They are
-        // listed here rather than added as dead `ErrorCode` variants, which
-        // would make this test pass by making the code worse.
-        ("error_conflict.json", "P5: the approve transaction's 409"),
-        ("error_token_consumed.json", "P5: a replayed approval"),
-        ("error_gone.json", "P5: an expired resource"),
-        ("error_approval_expired.json", "P5: the 7-day sweep"),
+        // P5 served the approval loop's four codes and every feed fixture.
+        // `forbidden` is the one code in `API.md` §0 with no `ErrorCode`
+        // variant, and deliberately: v1 is single-account and nothing answers
+        // 403, so a variant would exist only to make this test pass.
         (
             "error_forbidden.json",
             "P5+: reserved; v1 is single-account",
         ),
-        ("feed.json", "P5: the feed producer"),
-        ("feed_empty.json", "P5"),
-        ("feed_item.json", "P5"),
-        ("feed_item_editable.json", "P5"),
-        ("feed_item_info.json", "P5"),
-        ("approve.json", "P5: POST /feed/{id}/approve"),
-        ("skip.json", "P5: POST /feed/{id}/skip"),
-        ("seen.json", "P5: POST /feed/seen"),
         // P6 — Ask. Request bodies and SSE streams, neither of which is a
         // response type this crate serialises.
         ("ask_request.json", "P6: a request body, not a response"),

@@ -208,7 +208,12 @@ final class MailGeometryTests: XCTestCase {
         let card = WireAgentCard(runId: "r", agentName: "Job Search Tracker",
                                  status: .pendingApproval, summary: "Two next steps.",
                                  feedItemId: "f")
-        let view = ThreadAgentCard(card: card).frame(width: width)
+        // `item: nil` is the no-buttons card, which is what this measurement
+        // is of: the box §1f draws. The buttons have their own row and their
+        // own geometry, and mixing them in would make this assertion depend on
+        // a button's height rather than on the card's padding.
+        let view = ThreadAgentCard(card: card, item: nil, onApprove: {}, onSkip: {})
+            .frame(width: width)
 
         // `padding 14 / 15`, a 10 pt kicker on the inherited 1.55 with its 9 pt
         // gap, then a 14 pt summary at line-height 1.7. `NCard` draws its border

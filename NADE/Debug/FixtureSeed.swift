@@ -184,10 +184,35 @@ nonisolated final class FixtureMailSource: MailSource {
 
     // MARK: - P3
 
+    /// **The fixture feed pages.**
+    ///
+    /// It used to answer every request with the whole list and
+    /// `nextCursor: nil`, which meant `home.loadmore` — a real sentinel row on
+    /// a real screen — could not be reached by any test at all. Splitting the
+    /// six cards in two makes the second page a thing that exists, and the
+    /// cursor is opaque exactly as the contract says a cursor is.
     func feed(cursor: String?) async throws -> WireFeedPage {
         let items = try loadedFeed()
-        return WireFeedPage(items: items, nextCursor: nil, newCount: try currentNewCount())
+        let split = min(Self.fixturePage, items.count)
+        if cursor == nil {
+            return WireFeedPage(
+                items: Array(items.prefix(split)),
+                nextCursor: items.count > split ? Self.fixtureCursor : nil,
+                newCount: try currentNewCount()
+            )
+        }
+        guard cursor == Self.fixtureCursor else {
+            throw APIFailure.server(code: .badRequest, status: 400,
+                                    message: "That page is no longer available.", retryAfter: nil)
+        }
+        return WireFeedPage(items: Array(items.dropFirst(split)), nextCursor: nil,
+                            newCount: try currentNewCount())
     }
+
+    /// Four, so page one holds both live approvals — the `write_note` card and
+    /// the `draft_reply` one — and page two is not empty.
+    static let fixturePage = 4
+    static let fixtureCursor = "fixture-feed-page-2"
 
     func feedItem(id: String) async throws -> WireFeedItem {
         guard let item = try loadedFeed().first(where: { $0.id == id }) else {
@@ -206,15 +231,26 @@ nonisolated final class FixtureMailSource: MailSource {
     /// returned to the feed still approvable. A replay of a consumed token is
     /// exactly what `API.md` §7's 409 exists to prevent, so the fixture has to
     /// be able to reach that state.
+    /// The notes are the **server's**, word for word
+    /// (`api::feed`'s `NOTE_SAVED` / `DRAFT_SAVED` / `SKIPPED`). They were
+    /// "Saved." and "Skipped." — shorter, and wrong in the way that matters:
+    /// this world is what the UI tests tap and what the signed-off screenshots
+    /// show, so copy that differs from the server's is copy nobody has seen.
     func approve(feedItemID: String, approvalToken: String) async throws -> WireApproveResponse {
-        try resolve(feedItemID, token: approvalToken, status: .resolved,
-                    note: "Saved.")
+        let item = try? await feedItem(id: feedItemID)
+        let note = if case .draftReply = item?.data {
+            String(localized: "Saved to Drafts.", comment: "2a, a resolved draft card")
+        } else {
+            String(localized: "Saved to Notes.", comment: "2a, a resolved note card")
+        }
+        try resolve(feedItemID, token: approvalToken, status: .resolved, note: note)
         return try FixtureSeed.decode(WireApproveResponse.self, "approve")
     }
 
     func skip(feedItemID: String, approvalToken: String) async throws -> WireSkipResponse {
         try resolve(feedItemID, token: approvalToken, status: .skipped,
-                    note: "Skipped.")
+                    note: String(localized: "Skipped — nothing was saved.",
+                                 comment: "2a, a skipped card"))
         return try FixtureSeed.decode(WireSkipResponse.self, "skip")
     }
 

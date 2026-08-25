@@ -123,8 +123,18 @@ lint:
 # place the 85-case corpus actually runs. Compiling it proved the crate still
 # built while every one of those cases sat unexecuted. It links what it was
 # already compiling, and the run itself is under a second.
+# `--features real_parser` is P5's addition, and the README asked for it: the
+# feature links the *shipped* extractor, so the 15 findings the corpus records
+# against the real pipeline are measured rather than assumed. Without it the
+# harness proves only that its own reference implementation holds.
+#
+# The corpus also runs inside `nade-server` now (`agents::redteam_tests`),
+# against parse -> triage -> run -> card with a deliberately compromised model.
+# The two are not redundant: this one is the extractor's, that one is the
+# host's, and the host is what P5 built.
 red-team:
     cargo test --manifest-path testdata/injection/harness/Cargo.toml
+    cargo test --manifest-path testdata/injection/harness/Cargo.toml --features real_parser
 
 # Exactly what the acceptance gate runs. `test` is the workspace suite (D27);
 # `red-team` keeps the detached harness compiling.

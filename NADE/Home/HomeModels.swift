@@ -121,7 +121,12 @@ final class HomeFeedModel {
         scheduleSeenFlush()
     }
 
-    /// Ids already sent, so scrolling a row past twice does not re-post it.
+    /// Ids **in flight or acknowledged**, so scrolling a row past twice does
+    /// not re-post it.
+    ///
+    /// An id leaves this set when its send fails, which is what makes the next
+    /// scroll try again. It used to be insert-only, so one failed flush meant
+    /// the badge stayed wrong for the rest of the session.
     private var seenSent: Set<String> = []
     private var seenPending: Set<String> = []
     private var seenFlush: Task<Void, Never>?
@@ -142,10 +147,19 @@ final class HomeFeedModel {
     func flushSeen() async {
         seenFlush?.cancel()
         seenFlush = nil
-        let ids = seenPending
+        let ids = Array(seenPending)
         guard !ids.isEmpty else { return }
-        seenPending.removeAll()
-        await sync.markSeen(ids: Array(ids))
+        // Cleared **after** the send, not before: a receipt lost to a blip used
+        // to be permanent for the session, because `seenPending` was emptied
+        // first and `seenSent` never reset — so the ids could never be
+        // resent and `MailSync`'s "it corrects itself on the next refresh" was
+        // not true of them.
+        let delivered = await sync.markSeen(ids: ids)
+        seenPending.subtract(ids)
+        if !delivered {
+            // Let the next scroll try again.
+            seenSent.subtract(ids)
+        }
     }
 
     private func refreshCursor() async {

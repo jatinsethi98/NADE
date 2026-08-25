@@ -256,13 +256,14 @@ fn trigger_summary(spec: Option<&Value>, schedule: Option<&Value>) -> String {
         // renders and what the design screenshots show.
         return "Not set".to_owned();
     };
-    match spec
-        .get("trigger")
-        .and_then(|t| t.get("kind"))
-        .and_then(Value::as_str)
-    {
-        Some("mail") => "On new mail".to_owned(),
-        Some("schedule") => schedule_summary(schedule),
+    // `Spec::parse` rather than a third spelling of `spec["trigger"]["kind"]`.
+    // Its `None` — a spec that is not an object at all — lands on the same
+    // "Manual only" the raw probe fell through to, and `TriggerKind`'s
+    // `#[serde(other)]` handles a kind this build has never heard of.
+    use crate::agents::spec::TriggerKind;
+    match crate::agents::spec::Spec::parse(Some(spec)).map(|s| s.trigger_kind()) {
+        Some(TriggerKind::Mail) => "On new mail".to_owned(),
+        Some(TriggerKind::Schedule) => schedule_summary(schedule),
         _ => "Manual only".to_owned(),
     }
 }
@@ -599,13 +600,9 @@ pub async fn patch(
     let schedule = match body.schedule.as_ref() {
         None => None,
         Some(input) => {
-            let kind = existing
-                .spec
-                .as_ref()
-                .and_then(|spec| spec.get("trigger"))
-                .and_then(|trigger| trigger.get("kind"))
-                .and_then(Value::as_str);
-            if kind != Some("schedule") {
+            let scheduled = crate::agents::spec::Spec::parse(existing.spec.as_ref())
+                .is_some_and(|spec| spec.is_scheduled());
+            if !scheduled {
                 return Err(ApiError::bad_request(
                     "This agent is not on a schedule, so it cannot be given one.",
                 ));
@@ -692,9 +689,9 @@ pub async fn patch(
         existing.spec.as_ref()
     };
     let effective_tools = tools.as_ref().unwrap_or(&existing.allowed_tools);
-    if let Some(spec) = effective_spec {
-        let needed: Vec<&str> = crate::json::str_array(spec.get("tools"));
-        if let Some(missing) = needed
+    if let Some(spec) = crate::agents::spec::Spec::parse(effective_spec) {
+        if let Some(missing) = spec
+            .tools()
             .iter()
             .find(|tool| !effective_tools.iter().any(|allowed| allowed == *tool))
         {
@@ -744,6 +741,13 @@ pub async fn patch(
 /// removes `run_journal` with the agent, so a run left in flight would have its
 /// log yanked out from under it mid-step. Feed items already raised stay
 /// readable — they reference the run with `on delete set null`.
+///
+/// **Live cards are settled before the runs are cancelled**, for two reasons.
+/// A card left `new` after its run was cascaded away holds a live
+/// `approval_token` that can never be spent — the approve transaction needs the
+/// run — so `new_count` would never fall again. And the order is the house lock
+/// order: `feed_items` before `agent_runs`, the same way the approve and skip
+/// transactions take them, so a delete racing an approval cannot deadlock.
 pub async fn delete(
     State(state): State<AppState>,
     auth: Auth,
@@ -751,6 +755,10 @@ pub async fn delete(
 ) -> ApiResult<StatusCode> {
     let account = auth.account.ok_or_else(ApiError::not_found)?;
     load(&state, account.id, id).await?;
+
+    run::settle_cards_of(&state, id)
+        .await
+        .map_err(|err| ApiError::internal("settling an agent's approval cards", &err))?;
 
     run::cancel_runs_of(&state, id)
         .await

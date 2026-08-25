@@ -25,6 +25,44 @@ enum NADELaunch {
     enum Seed: String { case fixtures, empty, offline }
 }
 
+/// The C1/C2 copy screen, in one place per test target.
+///
+/// v1 takes no outbound action (PLAN C1/C2, `DESIGN.md` §4), so no string this
+/// app authors may claim one. That rule was enforced by the same regex typed
+/// out in three files in this target and two more in `NADETests`, and it is
+/// precisely how the rule failed once already: all five copies matched
+/// `\b(sends?|sending)\b` and none matched `sent`, so shipped copy reading
+/// "This expired before it could be sent." — under a button labelled
+/// "Save draft" — passed every one of them (D78).
+///
+/// Adding a verb is now one edit here and one in `NADETests/OutboundCopy.swift`,
+/// which carries the identical enum. Two homes rather than one because a UI
+/// test target is a separate binary that cannot see the unit target's sources;
+/// this comment is the pointer between them. The server keeps its own,
+/// broader screen (`agents::feed::promises_an_outbound_action`) for the
+/// *model's* prose, and `docs/contract/validate.py::OUTBOUND_VERBS` screens
+/// server-authored copy — three lists, three different jobs, each stated once.
+enum OutboundCopy {
+
+    /// **`delete` is not here, and `Sent` needs an exemption by identifier.**
+    /// `DESIGN.md` §4 forbids "no sending, no archiving, no Gmail mutation" —
+    /// deleting an *agent* is none of those and is a real v1 capability
+    /// (`DELETE /agents/{id}`), and `Sent` is one of the eight Gmail system
+    /// labels §2 exposes, a place rather than a promise.
+    nonisolated static let pattern =
+        #"\b(sends?|sending|sent|forwards?|forwarding|forwarded|reply-all|archiv(e|es|ed|ing))\b"#
+
+    /// For `NSPredicate`-based element queries, which need the whole label to
+    /// match. `MATCHES` is anchored; `.*…*` is what makes it a search, and the
+    /// `\b`s are what keep "Sender" and "resend" out.
+    static let predicate = NSPredicate(format: "label MATCHES[c] %@", ".*\(pattern).*")
+
+    /// Does this string promise something v1 does not do?
+    nonisolated static func promises(_ text: String) -> Bool {
+        text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+}
+
 extension XCUIApplication {
     /// A launched app, with everything a UI test needs pinned.
     ///

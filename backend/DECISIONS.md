@@ -1240,3 +1240,407 @@ The fix is not a cleanup: 50 *messages* collapse into at most 50 *threads*, so
 asking for 10 would show the model an unpredictable number of hits and make
 `truncated` meaningless. Re-tuning what an agent perceives is a product decision
 with a live bench behind it, not something to slip into a refactor.
+
+## D70 — The approval capability belongs to the card, not to the run.
+
+`0001_init.sql` put `approval_token` and `approval_expires_at` on `agent_runs`,
+where nothing ever read or wrote them. Using them at P5 would have been wrong
+three times.
+
+A run can pause **more than once**: `max_steps` is 12, and an agent holding
+both `write_note` and `draft_reply` can be gated, approved, resumed and gated
+again — so the second pause overwrites the first card's token and deadline.
+`API.md` §7 keeps `approval_expires_at` non-null on a resolved or expired card,
+"what lets an expired card say *when* it expired", and read through the run that
+value changes under a finished card. And the SDK says so outright, in
+`Resolution`'s own documentation: "a host that issues its own single-use token
+per approval (NADE's `approval_token`, **one per feed item**) should store
+`step_seq` beside it and pass it back here."
+
+Migration 0006 moves all three onto `feed_items` and **drops** the two dead
+columns. Dropping rather than leaving them is the point: a second place to look
+for the same fact is worse than no place, and this one would have been the
+wrong place.
+
+The consequence is finding 11's: `feed_items.run_id` is `on delete set null`, so
+deleting an agent used to leave a card holding a **live token** with no run to
+approve — `new_count` stuck above zero for ever. `DELETE /agents/{id}` now
+settles the agent's live cards *before* it cancels the runs, which also fixes
+the lock order: every path takes `feed_items` then `agent_runs`.
+
+## D71 — `Engine::run` on a parked run appends nothing, so the journal's primary key is not the backstop.
+
+The first cut of P5 reasoned that two callers driving one run would collide on
+`run_journal`'s `(run_id, seq)` and one would lose harmlessly. That is true of
+two callers that *dispatch*. It is not true here: `Engine::run` replays, sees a
+pending approval, and returns `PendingApproval` from `parked_outcome` **before**
+`drive` — no append, no collision, microseconds. Nothing protected
+`agent_runs`:
+
+1. a stale `run_agent` job replays a parked run and gets its outcome back;
+2. the user approves — the run moves to `queued`, the card resolves;
+3. the resume job carries the run to `done` and writes the note;
+4. the stale job settles, putting the run back to `pending_approval` with the
+   answered request in `pending_action`. For ever, with the effect written and
+   the card resolved.
+
+Two fixes, and both are needed. `run_agent` returns early on `pending_approval`
+and `waiting` — a parked run belongs to `resume_run` and to nothing else — so
+the stale outcome is not generated. And every `settle` write carries a status
+predicate, so one that is generated anyway cannot land. The predicate is
+`status = 'running'`, not `status in ('queued','running')`: approve leaves the
+run `queued`, so the looser one still lets step 4 through.
+
+## D72 — Two contract violations had already shipped, invisible because `/feed` was unmounted.
+
+`agents/run.rs`'s spend-ceiling card and `gmail/oauth.rs`'s needs-reauth card
+both wrote `data.reason`. `data` is served **verbatim** by `GET /feed`, and
+`FEED_DATA`'s `none` shape in `docs/contract/validate.py` is an exact key set —
+"a missing key and an extra key are both violations". The reconnect path also
+set `resolved_note` on a `kind: "info"` card, which `API.md` §7 forbids
+outright. Neither could fail anything: no test served those rows, and
+`validate.py` only ever sees the generated fixtures.
+
+The reason moved to a column (0006), both writers moved with it, and the
+reconnect stopped writing a note — the card resolving *is* the message, for
+someone who has just come back from Google's consent screen.
+
+What stops the next one is not the fix. `agents::feed::info_data` is now the
+single author of every `action: "none"` payload, and
+`every_card_the_system_raises_for_itself_is_contract_shaped` drives the **real
+writers** and checks what `GET /feed` returns — the assertion neither card had.
+
+## D73 — The daily cap counted the wrong thing, and the cheapest agent walked through the hole.
+
+`PLAN.md` §Dev caps says "≤20 triaged messages per agent per day". The only
+counter that existed, `ledger::triage_calls_today`, counts rows with
+`purpose = 'triage'` — **model calls**. And `compile.rs` tells the model to
+leave `semantic` null "if the filters suffice", so the *default* compiled agent
+(`label_ids: ["INBOX"]`, `semantic: null`) makes no model call at all. It was
+capped by nothing, while starting a full run per inbox message: `max_steps` 12,
+50 000 tokens each. The $1/day ceiling was the only backstop, and it is
+account-wide — one agent burning it silences every other.
+
+The cap is now counted against **runs** as well, before the run row is written,
+because a run is where the money is. Both breaches are a no-op plus an audit
+row and never a job error: retrying into the same wall is how a queue
+dead-letters itself.
+
+The run's `dedupe_key` is also checked *before* the semantic call rather than
+after. A replayed webhook re-enqueues `triage_message` — the jobs dedupe index
+is partial on *pending* rows, so a completed job no longer suppresses one — and
+`agent_runs.dedupe_key` would have refused the second run only after the model
+had already been paid for.
+
+## D74 — Three timestamps are tied together, and only the journal entry satisfies them.
+
+`docs/contract/validate.py` asserts that a card's `created_at` **equals** the
+`approval_requested` journal entry's, and that `approval_expires_at` equals
+that plus seven days. `feed_items.created_at` defaults to `now()`, which is
+settle-time and strictly later; `ApprovalRequest::requested_at` is the step's
+`opened_at`, and `Entry::new` reads the clock a *second* time when it builds the
+entry, so the two can differ by a second. Neither is the value the contract
+names.
+
+The producer reads the gate entry back out of `run_journal` — one
+`distinct on (kind)` that also fetches the model's last words for the card's
+body — and binds its `created_at` explicitly. Same trap `runtime/journal.rs`
+documents for the journal itself, one table over.
+
+## D75 — The card body is model prose, and it is the largest string on the home screen.
+
+`RunOutcome::PendingApproval` carries no model text, so the body is the newest
+`model_response`'s `text` — absent in the ordinary case, because a turn whose
+whole content is a tool call has no prose (`API.md` §6.1). The fallback is
+therefore the common path, and it is pinned by `assert_eq!` rather than left to
+drift (D67).
+
+More importantly, that prose came out of a model that had just read somebody
+else's email. It cannot make NADE send anything — the tools do not exist — but
+it can put "Sent your reply to ops@parcel-status-updates.com" on the home
+screen at 14 pt, which PLAN C1/C2 calls a bug whoever caused it. The body is
+screened for a **narrow** set of verbs — send, forward, archive, delete,
+unsubscribe — and a hit falls back to the rendered sentence. Narrower than
+`validate.py`'s `OUTBOUND_VERBS` on purpose: "schedule", "book" and "pay"
+describe what is *in* the message rather than something NADE did, and screening
+those would push most honest cards to the fallback. `validate.py` now sweeps
+`body` too, with the same `reply` exemption `resolved_note` already had.
+
+The other half of the same finding is the corpus's own number 10: a draft card
+is contained **only** if it shows the recipient list and the `never_messaged`
+flag, because "an approval card that renders only the body launders a
+redirected draft". The contract has carried both fields since P1 and nothing
+rendered them. Deviation 62.
+
+## D76 — `fence::stored`, not `fence::field`, for a string a person will read.
+
+`field` strips control characters, **neutralises** marker-shaped text, and caps.
+`stored` does the first and the third. The card's subject and recipients take
+`stored`: they are rendered to a human, and mangling `<<<NADE-UNTRUSTED-DATA`
+inside a subject line would corrupt what the user reads for no gain — there is
+no prompt on that path. What they share is the part that is not optional, since
+PostgreSQL rejects a NUL inside a `jsonb` string and a live sync already died of
+one (D29).
+
+The triage prompt takes `field`, and it is the first NADE code to build a prompt
+out of a **subject** — which is the corpus's open finding 6: "`body_text` never
+contains it, so a prompt builder that fences only the body leaves an
+attacker-controlled string outside the fence." `fence::nonce_from` gives triage
+a nonce before any run exists, hashed from the message id rather than truncated
+from it.
+
+## D77 — Two invariants the fixtures state that runtime cannot keep, and one the contract had backwards.
+
+`validate.py` tied an item's status to its run's exactly, in both directions.
+Three of the four hold; `resolved` does not, and cannot: a run that pauses a
+**second** time is `pending_approval` while the first card is legitimately
+`resolved`, and one that fails on a later step is `failed`. The rule is relaxed
+fixture-first to what is actually invariant — a `resolved` card's run may be
+anywhere except `skipped` or `expired`, which would be two answers to one
+question.
+
+Two shapes were widened for the same underlying reason, that a card is raised
+from `approval_requested` **before** the tool runs and can only publish what the
+model's call already carried. `draft_reply`'s `data.thread_id` becomes
+`string|null` — the tool's own `thread_id` is optional and §3 already typed a
+draft row's the same way, so §7.1 was the outlier, and a model that omitted it
+parked a run the server could not card at all. And the `none` shape gains
+`draft_id`, because an agent with `approval_required = false` and `draft_reply`
+in its tools writes a draft with no card to approve, and the `info` card that
+followed had no field to name what it had made.
+
+`agent_note` moved the other way: the server renders it from the pending action,
+and `threads.json`'s "two next steps to approve" described the note's *contents*
+— a string no server can reproduce from a tool call. The fixture moved to what
+is derivable, which is what the Reply Drafter row had always been.
+
+## D78 — The post-implementation review, and the four blockers it found in work that looked done.
+
+An unbiased subagent reviewed the finished P5 diff with no brief but "find what
+is wrong". Eighteen findings above MINOR, four of them blockers, and every one
+of the four was in code that had already passed `just ci` twice.
+
+**A shipped sentence promised an outbound action, and four guards were pointed
+at it.** `Outbox.expiredNote` read *"This expired before it could be sent."* —
+under a card whose own button says "Save draft". `OutboxDurabilityTests`,
+`MailUITests` (twice) and `AccessibilityUITests` all matched
+`\bsend(s|ing)?\b`, which does not match **`sent`**. A past tense is the most
+natural way to claim an outbound action and it was the one form nothing looked
+for. Fixed in the copy, in all four patterns, and in
+`AccessibilityUITests`'s own offender table, which had never listed it.
+
+Widening the pattern immediately found two *false* positives, and both are the
+line worth writing down: `Delete` is a real v1 control (`DELETE /agents/{id}`),
+and `Sent` is a Gmail mailbox. DESIGN §4 forbids "sending, archiving, Gmail
+mutation" — an agent is none of those and a mailbox is a place. So the **UI**
+sweep screens send/forward/archive and the **server's** card-body screen is
+broader, because there the string is a claim about what happened to somebody's
+mail rather than the name of a control.
+
+**Every approved run raised a second card.** `settle` called `raise_run_info`
+on any `Done`, and the headline flow ends in `Done`: card → approve → the resume
+job writes the note → a *second* card saying "The agent saved a note." beside
+the first saying "Saved to Notes.", with `new_count` climbing back the moment
+the user cleared it. `feed.json` has one card per run. The test that should have
+caught it asserted `new_count == 0` **before** the resume job ran — the one
+moment the bug is invisible.
+
+**The 2 KB triage cap was dead code.** It was applied *after* fencing, against a
+ceiling of `2 KB + MAX_BLOCK_BYTES` — and `fence::fence` already truncates at
+`MAX_BLOCK_BYTES` plus ~318 bytes of delimiters, so the predicate was
+`10 558 > 12 288` and never true. Every semantic call paid five times the
+documented input, on the one path that runs per inbound message, while three
+comments and `.env.example` all said 2 KB. Capped before fencing, and asserted
+on the real prompt rather than on the constant.
+
+**D71's fix was TOCTOU.** `status = 'running'` cannot tell which job owns a run:
+a stale `run_agent` past the early return holds a replayed `PendingApproval`
+while the resume job claims the run and sets it `running`, and the stale settle
+then matches the *resume's* write. The guard now also names the `attempt` the
+claim stamped, because the statement that claims a run is the statement that
+bumps it. Worth stating plainly: **no test in the phase could reach either
+`settle` guard** — deleting them left everything green — and both are now
+mutation-proven, along with the `on conflict` clause, the allowlist
+intersection, the D61 ledger write, and the fenced subject.
+
+## D79 — The half of a corpus test that measures nothing.
+
+Two of the red-team assertions were unfalsifiable, and both for the same
+reason: the fake model only ever emitted one tool.
+
+`assert_eq!(notes, 0)` could not fail, because nothing in the run ever called
+`write_note`. And the corpus's *central* claim — "the allowlist and the approval
+gate are host-side" — was not measured at all: with `tools::build`'s
+intersection deleted every case would be granted every tool, every run would
+park at the gate, zero rows would still be written, and every assertion would
+still have passed.
+
+What distinguishes the two worlds is **which** runs park. An owner who asked for
+a summary granted no mutating tool, so the model's call is refused at dispatch
+and that run can only end `failed`. `parked_without_a_grant == 0` is the
+assertion, and deleting the intersection turns it red.
+
+The same shape appeared in the fence test: it rebuilt the prompt by hand from
+`fence::field` instead of calling `triage::prompt`, so it tested the fence —
+which has its own tests — and interpolating the subject raw left it green. It
+calls the shipped builder now. And because the corpus contains no **subject**
+carrying a forged delimiter, the property sweep alone still could not see the
+regression; `a_forged_delimiter_in_the_subject_cannot_close_the_fence` supplies
+the missing case, with the attacker guessing the nonce correctly.
+
+## D80 — A queue cannot clean up after a handler, so the handler gets last rites.
+
+The approve transaction commits the user's answer — token spent, card
+`resolved`, run `queued` — and then depends on a job. Five failures later the
+queue gave up, and the run sat `queued` for ever: `run_agent` has a different
+dedupe key, nothing re-enqueues it, and there is no stuck-run reaper anywhere in
+the tree. The card still read "Saved to Notes." about a note that was never
+written, with one `audit_log` row as the only trace. That is the failure P5
+exists to prevent, arriving through the back door.
+
+`Handler::on_dead_letter` is the fix, and it belongs on the handler rather than
+in `Queue::fail` because the queue does not know what a handler owns. Both run
+handlers end the run through the engine — `run_ended` belongs in the journal
+(`API.md` §6.1) — and correct the card's sentence. A handler that implements
+nothing is saying its work is safe to lose, which for `gmail_incremental` is
+true: the next webhook re-walks the same history.
+
+## D81 — Two more places a status meant two different things.
+
+**`409 conflict` is not `409 token_consumed`.** `error.rs` says so in its own
+words — "one means 'reload', the other means 'you already won'" — and the iOS
+outbox mapped both to `.alreadyRecorded`, telling the user their tap had been
+recorded when it had not. They are now distinct outcomes; the handling is the
+same (drop the row, re-read the card) and the *name* is now true, which is what
+a later reader will act on.
+
+**A deleted agent's card answered `token_consumed` too.** `settle_cards_of`
+writes those cards to `skipped`, and `take` checked the status before the run —
+so the ordinary path got the "you already won" answer and the documented
+`410 gone` was reachable only in the narrow race the delete exists to prevent.
+The run check moved ahead of the status check, which is also what gives `gone` a
+real emitter rather than a fixture with no code behind it.
+
+## D82 — Four smaller things the same review found, each worth a line.
+
+**The card's recipient list was uncapped.** `MAX_RECIPIENTS` is enforced by
+`draft_reply` at *execution*, which is after the human decides, so a coerced
+model could put two hundred addresses on a card that renders two truncated
+lines — defeating the control `backend/testdata/injection`'s finding 10 depends
+on. Capped where the card is built.
+
+**`POST /feed/seen` dismissed locally what the server refuses to dismiss.** The
+server gates on `dismissible` so the needs-reauth card survives a scroll; the
+client marked every id it sent `resolved` anyway, and `seenSent` then blocked
+ever asking again. It takes the badge from the response and leaves the statuses
+to the next `GET /feed` — and an id whose send failed leaves `seenSent`, so the
+next scroll retries.
+
+**The feed never armed its own generation guard.** `saveFeed` has taken an
+`expectedGeneration` since P3 and the only caller passed `nil`; the thread path
+does it correctly, which is what made this look finished. An in-flight page two
+landing after a pull-to-refresh wrote `reached_end = true` and made pages three
+onward unreachable.
+
+**Two counters were written and never read.** `lastEnqueueError` — so a failed
+durable write left the button in place with nothing said, and every further tap
+did the same nothing. And `pending_action.attempts`, so one card whose 500
+mapped to `.retry` pinned the whole queue for ever, on every foreground, with no
+dead letter. The outbox now gives up at five, matching the server queue's own
+`max_attempts`.
+
+## D83 — The P5 cleanup pass, and the one defect it found.
+
+Four independent reviews of the finished diff — reuse, simplification,
+efficiency, altitude — none of them briefed to look for correctness bugs, all of
+them read-only, each required to name the existing helper, the simpler form, the
+cheaper alternative or the deeper home before an item counted as a finding.
+Forty-three findings, twenty-seven applied, three skipped. Four pairs converged
+independently on the same mechanism, which is what makes those four worth
+believing.
+
+**One of them was not cleanup.** `ThreadView`'s approval card drew the kicker,
+the summary and the buttons, and nothing else. `FeedRow` drew a recipient row
+above the same buttons, with a comment citing
+`backend/testdata/injection/README.md` finding 10 verbatim: "`identity-02` and
+`tool-01`/`tool-06` are contained **only** if the approval card shows the actual
+recipient list and flags `never_messaged`. An approval card that renders only
+the body launders a redirected draft." Approving a `draft_reply` from inside a
+thread showed neither the address nor **Never messaged** — the control existed
+on one of the two surfaces that offer the button. It is now `ApprovalControls`,
+one view, drawing the recipient row and the buttons for both, and P6's push
+detail and P7's draft sheet inherit it instead of copying whichever they find.
+
+That is the same shape as D69: a defect hiding inside duplication, invisible to
+a reviewer reading either copy on its own, obvious the moment they are lined up.
+
+**`OutboxDriver.onProblem` was declared, invoked twice, and never assigned.**
+D82 recorded that `lastEnqueueError` "had no reader, so a failed durable write
+left the button in place with nothing said". The fix added a closure, two call
+sites and a `StateCopy.approvalNotQueued` string — and nothing ever set the
+closure, so the banner never appeared and the localized string had one
+unreachable caller. `MailSync` wires it beside `onNeedsReauth` now. A bug fix
+that ships inert is worse than the bug, because the record says it is closed.
+
+**Five `match tool` sites became one table.** `data.action`, `action_label`,
+the mail row's `agent_note`, the card's fallback sentence, the settled card's
+italic line and whether `actions` carries `edit` were each their own match with
+its own `_` arm, in two modules — so a tool nobody had taught them about did not
+fail, it rendered as a note: "Saved to Notes." under a card that saved something
+else. `feed::GatePresentation` is keyed by tool name and
+`every_gated_tool_has_a_presentation` walks `V1_TOOLS`, so a sixth tool with a
+gate and no copy is a red test rather than wrong copy. It also screens the
+table's own strings through `promises_an_outbound_action`, which no `_` arm
+could.
+
+**Three copies of the priced forced-tool-call chain became one.** `compile` and
+`triage::judge` both want an object rather than prose, so neither can go through
+`Adapter` — and both hand-rolled the same five steps. **Both ledger defects this
+project has ever had were a missing step of that chain**: D60 (the ceiling
+belongs where the path spends) and D61 (price from `usage()` *before* parsing,
+because a 200 was billed whether or not the body decoded). P5 wrote the third
+copy. `anthropic::forced_tool_call` is now the one, next to `Adapter::chat`,
+which does the same five steps for the other shape; callers keep only what
+differs — the request, the tool name, and how they map `ForcedCall`.
+
+**`feed.rs` claimed to be the single author of `feed_items` and was not.**
+`run::raise_spend_ceiling_notice` and `gmail::oauth` each inlined their own
+`insert … where not exists (…)`, borrowing only `info_data`. That half-measure
+is exactly how D72's contract breach came to live in one writer and not the
+other. `feed::raise_notice`/`resolve_notice` own the statement now, with
+`OncePer::{Ever, UtcDay}` covering the two guards, and the module doc is true.
+
+**Six copies of the outbound-verb regex became two.** D78's violation passed all
+of them because all of them matched `send(s|ing)?` and none matched `sent`. P5
+fixed the four *strings* and left the four *copies*, plus two weaker variants
+(`contains("send")`, a six-word substring array) that could not have caught it
+either. `OutboundCopy` — one per test target, because a UI test target cannot
+see the unit target's sources, and the count is stated in both files.
+
+**The rest, briefly.** `Spec::parse` was introduced as the typed reader of
+`agents.spec` and left all four raw probes in place, including the one that
+builds every run's system prompt — where `Spec::instruction` defaults to `""`
+and the raw probe fell back to `nl_definition`, so a naive substitution would
+have handed a model an empty task. `Spec::instruction_or` states that fallback
+once. Four `audit_log` wrappers became `agents::audit` plus the caller's own
+`subject`. `approve` and `skip` were the same forty-five lines twice, including
+the commit-then-refuse dance two named tests exist to protect; they are one
+`decide(…, Decision)`. `agent_name` re-queried a column `load`'s join already
+had, inside the open settle transaction. `claim_expired` selected thirteen
+columns, took row locks it released one statement later, and kept one field.
+The mail trigger enqueued one job per ingested message inside the page
+transaction — a hundred extra statements per Gmail history page, now one
+`unnest`. `feed_items_run_step_idx` is partial on `step_seq is not null`, so the
+thread screen's "newest card of this run" could not use it and scanned; three
+indexes were added and `feed_items_token_idx`'s comment corrected to say it has
+no reader. `Filters::matches` lowercased the whole message body per agent per
+message to answer a filter the compiler never emits.
+
+**Skipped, and why.** A `ticker::DueProbe` trait for `sync::schedule`'s two
+due-sources: the layering complaint is fair — a Gmail sync module should not
+import `agents::expire` — but a new module, a trait and a registry for two
+entries is machinery ahead of its second real caller. Restructuring triage's
+advisory pre-checks: it would move when a `triage_capped` audit row is written,
+which is behaviour, not cleanup. Splitting `FixtureSeed`'s reference
+`MailSource` out of `Debug/`: cosmetic, and the file is 540 lines under one
+clear doc comment.

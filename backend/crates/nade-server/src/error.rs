@@ -14,8 +14,11 @@ use serde::{de::DeserializeOwned, Serialize};
 pub type ApiResult<T> = std::result::Result<T, ApiError>;
 
 /// Machine-readable error codes. P1 needs the first four; `rate_limited` is
-/// the pairing brute-force guard (backend/DECISIONS.md D5). Later phases add
-/// `token_consumed` and `approval_expired`, which already have fixtures.
+/// the pairing brute-force guard (backend/DECISIONS.md D5). P5 added the four
+/// the approval loop answers with — `conflict`, `token_consumed`, `gone` and
+/// `approval_expired`. `forbidden` is the only code in `API.md` §0 with no
+/// variant here, and deliberately: v1 is single-account and nothing serves a
+/// 403, so a variant would exist to make a coverage test pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCode {
     BadRequest,
@@ -29,6 +32,18 @@ pub enum ErrorCode {
     /// Gmail failed after retries. Never a 500: the fault is upstream, and the
     /// client's correct response (retry later) is different.
     UpstreamUnavailable,
+    /// State moved on under the caller (`API.md` §0). P5's approve and skip
+    /// raise it when a card's run is no longer parked on the step the card
+    /// names.
+    Conflict,
+    /// This approval was already recorded. **Clients treat it as success** —
+    /// it means an earlier attempt already won.
+    TokenConsumed,
+    /// The resource existed and is gone. P5 raises it for a card whose agent
+    /// was deleted while the card was still live.
+    Gone,
+    /// This approval passed its seven-day deadline.
+    ApprovalExpired,
     Internal,
 }
 
@@ -43,6 +58,10 @@ impl ErrorCode {
             Self::RateLimited => "rate_limited",
             Self::NeedsReauth => "needs_reauth",
             Self::UpstreamUnavailable => "upstream_unavailable",
+            Self::Conflict => "conflict",
+            Self::TokenConsumed => "token_consumed",
+            Self::Gone => "gone",
+            Self::ApprovalExpired => "approval_expired",
             Self::Internal => "internal",
         }
     }
@@ -57,6 +76,11 @@ impl ErrorCode {
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::NeedsReauth => StatusCode::CONFLICT,
             Self::UpstreamUnavailable => StatusCode::BAD_GATEWAY,
+            // `conflict` and `token_consumed` share a status and differ in
+            // code, which is the whole point: one means "reload", the other
+            // means "you already won".
+            Self::Conflict | Self::TokenConsumed => StatusCode::CONFLICT,
+            Self::Gone | Self::ApprovalExpired => StatusCode::GONE,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -77,6 +101,15 @@ impl ErrorCode {
             // Verbatim from docs/contract/error_upstream_unavailable.json.
             Self::UpstreamUnavailable => {
                 "Gmail didn't respond. Nothing was lost — try again in a moment."
+            }
+            // The four below are verbatim from their contract fixtures, and
+            // `every_served_code_matches_its_contract_fixture` compares the
+            // message as well as the code (D22).
+            Self::Conflict => "Something changed while you were working. Reload and try again.",
+            Self::TokenConsumed => "This approval was already recorded.",
+            Self::Gone => "That is no longer available.",
+            Self::ApprovalExpired => {
+                "This approval expired after 7 days. Run the agent again to get a fresh one."
             }
             Self::Internal => "Something went wrong on the server.",
         }
@@ -162,6 +195,26 @@ impl ApiError {
     #[must_use]
     pub fn payload_too_large() -> Self {
         Self::of(ErrorCode::PayloadTooLarge)
+    }
+
+    #[must_use]
+    pub fn conflict() -> Self {
+        Self::of(ErrorCode::Conflict)
+    }
+
+    #[must_use]
+    pub fn token_consumed() -> Self {
+        Self::of(ErrorCode::TokenConsumed)
+    }
+
+    #[must_use]
+    pub fn gone() -> Self {
+        Self::of(ErrorCode::Gone)
+    }
+
+    #[must_use]
+    pub fn approval_expired() -> Self {
+        Self::of(ErrorCode::ApprovalExpired)
     }
 
     /// Internal failures are logged in full and reported as a fixed string:
@@ -328,6 +381,12 @@ mod tests {
             ErrorCode::RateLimited,
             ErrorCode::NeedsReauth,
             ErrorCode::UpstreamUnavailable,
+            // P5's four. `error_forbidden.json` stays deferred: v1 is
+            // single-account and nothing serves `403`.
+            ErrorCode::Conflict,
+            ErrorCode::TokenConsumed,
+            ErrorCode::Gone,
+            ErrorCode::ApprovalExpired,
             ErrorCode::Internal,
         ] {
             let name = format!("error_{}.json", code.as_str());
@@ -365,6 +424,10 @@ mod tests {
             (ErrorCode::RateLimited, 429, "rate_limited"),
             (ErrorCode::NeedsReauth, 409, "needs_reauth"),
             (ErrorCode::UpstreamUnavailable, 502, "upstream_unavailable"),
+            (ErrorCode::Conflict, 409, "conflict"),
+            (ErrorCode::TokenConsumed, 409, "token_consumed"),
+            (ErrorCode::Gone, 410, "gone"),
+            (ErrorCode::ApprovalExpired, 410, "approval_expired"),
             (ErrorCode::Internal, 500, "internal"),
         ] {
             assert_eq!(code.status().as_u16(), expected, "{wire}");
@@ -382,6 +445,10 @@ mod tests {
             ErrorCode::RateLimited,
             ErrorCode::NeedsReauth,
             ErrorCode::UpstreamUnavailable,
+            ErrorCode::Conflict,
+            ErrorCode::TokenConsumed,
+            ErrorCode::Gone,
+            ErrorCode::ApprovalExpired,
             ErrorCode::Internal,
         ] {
             let body = response_json(ApiError::of(code).into_response()).await;

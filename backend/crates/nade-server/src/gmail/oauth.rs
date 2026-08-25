@@ -649,15 +649,11 @@ impl TokenStore {
         .execute(&mut *tx)
         .await?;
 
-        // Re-consent clears a previous `needs_reauth` info card.
-        sqlx::query(
-            "update feed_items set status = 'resolved', resolved_note = 'Reconnected.' \
-              where account_id = $1 and kind = 'info' and status = 'new' \
-                and data->>'reason' = 'needs_reauth'",
-        )
-        .bind(account_id)
-        .execute(&mut *tx)
-        .await?;
+        // Re-consent clears a previous `needs_reauth` info card. The card
+        // resolving *is* the message; the user has just come back from Google's
+        // consent screen and does not need to be told it worked. See
+        // `feed::resolve_notice` for why it carries no `resolved_note`.
+        crate::agents::feed::resolve_notice(&mut *tx, account_id, "needs_reauth").await?;
 
         tx.commit().await?;
         Ok(account_id)
@@ -897,26 +893,24 @@ impl TokenStore {
         .await?
         .rows_affected();
 
-        // EDGE (duplicate delivery): the feed row is written only when there is
-        // not already an unresolved one, so repeated failures do not spam.
-        sqlx::query(
-            "insert into feed_items (account_id, kind, title, body, data, status) \
-             select $1, 'info', 'Gmail', \
-                    'NADE lost access to your Gmail. Open Settings and sign in again to resume sync.', \
-                    $2::jsonb, 'new' \
-              where not exists ( \
-                  select 1 from feed_items \
-                   where account_id = $1 and kind = 'info' and status = 'new' \
-                     and data->>'reason' = 'needs_reauth')",
+        // `dismissible = false`: this is the only surface that says sync has
+        // stopped, and `POST /feed/seen` is "a best-effort read receipt fired
+        // as the user scrolls" (`API.md` §7) — scrolling past a dead mailbox
+        // must not clear the one thing telling you it is dead. The reconciler
+        // above matches `status = 'new'`, so a card dismissed by a scroll would
+        // never have come back either.
+        //
+        // EDGE (duplicate delivery) is `raise_notice`'s once-per-reason guard:
+        // repeated failures do not spam the feed.
+        crate::agents::feed::raise_notice(
+            &mut **tx,
+            account_id,
+            "needs_reauth",
+            "Gmail",
+            "NADE lost access to your Gmail. Open Settings and sign in again to resume sync.",
+            false,
+            crate::agents::feed::OncePer::Ever,
         )
-        .bind(account_id)
-        .bind(serde_json::json!({
-            "action": "none",
-            "reason": "needs_reauth",
-            "note_id": serde_json::Value::Null,
-            "thread_id": serde_json::Value::Null,
-        }))
-        .execute(&mut **tx)
         .await?;
 
         sqlx::query(
@@ -1539,7 +1533,7 @@ mod tests {
 
         let feed: i64 = sqlx::query_scalar(
             "select count(*) from feed_items \
-              where account_id = $1 and kind = 'info' and data->>'reason' = 'needs_reauth'",
+              where account_id = $1 and kind = 'info' and reason = 'needs_reauth'",
         )
         .bind(harness.account)
         .fetch_one(&harness.pool)
@@ -1566,7 +1560,7 @@ mod tests {
 
         let feed: i64 = sqlx::query_scalar(
             "select count(*) from feed_items \
-              where account_id = $1 and kind = 'info' and data->>'reason' = 'needs_reauth'",
+              where account_id = $1 and kind = 'info' and reason = 'needs_reauth'",
         )
         .bind(harness.account)
         .fetch_one(&harness.pool)
@@ -1597,7 +1591,7 @@ mod tests {
             .unwrap();
         assert_eq!(status, "ok");
         let unresolved: i64 = sqlx::query_scalar(
-            "select count(*) from feed_items where status = 'new' and data->>'reason' = 'needs_reauth'",
+            "select count(*) from feed_items where status = 'new' and reason = 'needs_reauth'",
         )
         .fetch_one(&harness.pool)
         .await
@@ -1835,12 +1829,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, "ok", "the fresh consent must not be undone");
-        let cards: i64 = sqlx::query_scalar(
-            "select count(*) from feed_items where data->>'reason' = 'needs_reauth'",
-        )
-        .fetch_one(&harness.pool)
-        .await
-        .unwrap();
+        let cards: i64 =
+            sqlx::query_scalar("select count(*) from feed_items where reason = 'needs_reauth'")
+                .fetch_one(&harness.pool)
+                .await
+                .unwrap();
         assert_eq!(cards, 0, "no card for a credential that is not dead");
         let audited: i64 = sqlx::query_scalar(
             "select count(*) from audit_log where action = 'gmail_needs_reauth'",

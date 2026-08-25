@@ -354,11 +354,21 @@ pub async fn get(app: &TestApp, path: &str, bearer: Option<&str>) -> Response<Bo
 }
 
 pub async fn post_json(app: &TestApp, path: &str, body: &Value) -> Response<Body> {
+    post_json_as(app, path, body, None).await
+}
+
+/// `post_json`, with a bearer. Every P5 route needs one.
+pub async fn post_json_as(
+    app: &TestApp,
+    path: &str,
+    body: &Value,
+    bearer: Option<&str>,
+) -> Response<Body> {
     send(
         &app.router,
         "POST",
         path,
-        None,
+        bearer,
         Some(("application/json", body.to_string())),
     )
     .await
@@ -391,6 +401,69 @@ pub fn fixture(name: &str) -> Value {
         .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
     serde_json::from_str(&text)
         .unwrap_or_else(|error| panic!("{} is not valid JSON: {error}", path.display()))
+}
+
+/// One scripted turn from the fake provider: prose, and nothing else.
+///
+/// The wire shape of an Anthropic answer, in one place. Three test modules had
+/// it typed out — `agents::run`, `api::feed` and `agents::resume`, the last
+/// hard-coding all three helpers inline — so a change to the fake provider's
+/// shape was three edits, in a crate where `from_wire`'s strictness is itself
+/// under test.
+#[must_use]
+pub fn text_turn(text: &str) -> wiremock::ResponseTemplate {
+    wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "model": "claude-haiku-4-5-20251001",
+        "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": text}],
+        "usage": {"input_tokens": 100, "output_tokens": 20}
+    }))
+}
+
+/// A turn that calls one tool, optionally after saying something.
+///
+/// `prose` is the more general of the two shapes that existed: `API.md` §6.1
+/// says "`text` may be absent (a turn with no prose)", and both are real — the
+/// card producer's fallback exists for the absent case, and `gate_context`
+/// reads the prose when it is there.
+#[must_use]
+pub fn tool_turn(name: &str, input: Value, prose: Option<&str>) -> wiremock::ResponseTemplate {
+    let mut content = Vec::new();
+    if let Some(prose) = prose {
+        content.push(serde_json::json!({"type": "text", "text": prose}));
+    }
+    content.push(serde_json::json!({
+        "type": "tool_use", "id": "toolu_1", "name": name, "input": input
+    }));
+    wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        "model": "claude-haiku-4-5-20251001",
+        "stop_reason": "tool_use",
+        "content": content,
+        "usage": {"input_tokens": 100, "output_tokens": 20}
+    }))
+}
+
+/// Answer with `first` once, then `rest` for everything after.
+pub async fn script(
+    server: &wiremock::MockServer,
+    first: wiremock::ResponseTemplate,
+    rest: wiremock::ResponseTemplate,
+) {
+    use wiremock::{
+        matchers::{method, path},
+        Mock,
+    };
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(first)
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(rest)
+        .mount(server)
+        .await;
 }
 
 /// Poll `condition` until it holds, or fail the test.

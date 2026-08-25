@@ -46,6 +46,14 @@ pub const SYSTEM_MAILBOXES: [(&str, &str); 8] = [
 /// Gmail's own internal views. Hidden from the mailbox list.
 const HIDDEN_PREFIX: &str = "[Gmail]";
 
+/// How many agent cards one thread renders.
+///
+/// `API.md` §2 names no limit, and the dev caps make one unnecessary in
+/// practice — a mailbox starts a handful of runs a day. It is here anyway
+/// because "in practice" is not a bound: a thread that has been triaged for a
+/// year is one query away from returning three hundred cards to a phone.
+const MAX_AGENT_CARDS: i64 = 20;
+
 // ------------------------------------------------------------- wire types --
 
 #[derive(Debug, Serialize)]
@@ -381,15 +389,21 @@ pub(crate) async fn thread_detail(
         })
         .collect();
 
+    // Two independent reads of two unrelated tables. Evaluated in field order
+    // inside the struct literal they were strictly sequential, so every thread
+    // open paid both round trips end to end.
+    let (mailbox_name, agent_cards) = tokio::try_join!(
+        mailbox_name_for(state, account.id, &thread_id),
+        agent_cards(state, account.id, &thread_id),
+    )?;
+
     Ok(ThreadDetail {
         id: thread_id.clone(),
         subject,
-        mailbox_name: mailbox_name_for(state, account.id, &thread_id).await?,
+        mailbox_name,
         account_email: account.email.clone(),
         messages,
-        // P5 fills these in: a card needs a feed item, and a P4 run is always
-        // `manual`, so no P4 run has a thread to attach one to.
-        agent_cards: Vec::new(),
+        agent_cards,
         partial: completeness.is_partial(),
     })
 }
@@ -500,9 +514,19 @@ async fn page_of(
 
 /// `agent_note` is "exactly the string the mail row renders under the snippet"
 /// (`API.md` §2), so it is *stored* by whichever run produced it rather than
-/// composed here from a title and a body. P2 has no runs, so this is null for
-/// every thread; P5 writes `data.agent_note` and this starts returning it
-/// without the endpoint changing shape.
+/// composed here from a title and a body.
+///
+/// **It reads columns, not `data`.** This used to be
+/// `data->>'agent_note'` — but `data` is served verbatim and
+/// `docs/contract/validate.py`'s `FEED_DATA` is an *exact key set*, so writing
+/// the note in there would have put the first live thread list in breach of its
+/// own contract test. Migration 0006 gave `feed_items` real `thread_id` and
+/// `agent_note` columns, which also gives this join an index that
+/// `data->>'thread_id' = any($2)` could never use.
+///
+/// `status = 'new'` is the rule, not an optimisation: §2 defines the note as
+/// belonging to "the most recent agent run touching this thread **that still
+/// wants something**".
 ///
 /// Shared with [`crate::search`], so a searched thread row and a listed one
 /// carry the same note from the same query.
@@ -517,13 +541,13 @@ pub(crate) async fn agent_notes(
     let thread_ids: Vec<String> = rows.iter().map(|row| row.thread_id.clone()).collect();
 
     let found: Vec<(String, String)> = sqlx::query_as(
-        "select distinct on (data->>'thread_id') data->>'thread_id', data->>'agent_note' \
+        "select distinct on (thread_id) thread_id, agent_note \
            from feed_items \
           where account_id = $1 \
             and status = 'new' \
-            and data->>'agent_note' is not null \
-            and data->>'thread_id' = any($2) \
-          order by data->>'thread_id', created_at desc",
+            and agent_note is not null \
+            and thread_id = any($2) \
+          order by thread_id, created_at desc",
     )
     .bind(account_id)
     .bind(&thread_ids)
@@ -531,6 +555,77 @@ pub(crate) async fn agent_notes(
     .await?;
 
     Ok(found.into_iter().collect())
+}
+
+/// The agent cards on one thread (`API.md` §2), newest run first.
+///
+/// **A run reaches a thread four ways**, and all four are real:
+///
+/// * a mail trigger fired on a message *in* the thread — `trigger_ref` is the
+///   message id, so this is a join through `messages`;
+/// * a card was raised naming the thread;
+/// * a note or a draft the run wrote names it.
+///
+/// Composing them at read time rather than denormalising a `thread_id` onto
+/// `agent_runs` is deliberate: the dev caps bound a mailbox to a handful of
+/// runs a day, and a column would need four writers to keep it true — which is
+/// the shape of every drift bug in `DECISIONS.md`.
+///
+/// `feed_item_id` is the run's newest card, or null. `run.json`'s failed run is
+/// the null case: it never asked for anything, so there is nothing to tap
+/// through to.
+async fn agent_cards(
+    state: &AppState,
+    account_id: Uuid,
+    thread_id: &str,
+) -> ApiResult<Vec<AgentCard>> {
+    /// `(run, agent name, status, summary-or-error, newest card)`.
+    type CardRow = (Uuid, String, String, Option<String>, Option<Uuid>);
+
+    let rows: Vec<CardRow> = sqlx::query_as(
+        "with linked as ( \
+             select r.id from agent_runs r \
+               join messages m on m.account_id = r.account_id and m.gmail_id = r.trigger_ref \
+              where r.account_id = $1 and r.trigger_kind = 'mail' and m.thread_id = $2 \
+             union \
+             select f.run_id from feed_items f \
+              where f.account_id = $1 and f.thread_id = $2 and f.run_id is not null \
+             union \
+             select n.run_id from notes n \
+              where n.account_id = $1 and n.thread_id = $2 and n.run_id is not null \
+             union \
+             select d.run_id from drafts d \
+              where d.account_id = $1 and d.thread_id = $2 and d.run_id is not null) \
+         select r.id, a.name, r.status, coalesce(r.summary, r.error), \
+                (select f.id from feed_items f where f.run_id = r.id \
+                  order by f.created_at desc limit 1) \
+           from agent_runs r join agents a on a.id = r.agent_id \
+          where r.id in (select id from linked) \
+          order by r.created_at desc \
+          limit $3",
+    )
+    .bind(account_id)
+    .bind(thread_id)
+    .bind(MAX_AGENT_CARDS)
+    .fetch_all(&state.pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(run_id, agent_name, status, summary, feed_item_id)| AgentCard {
+                run_id: run_id.to_string(),
+                agent_name,
+                status,
+                // Non-nullable on the wire, and `agent_runs.summary` is written on
+                // `Done` **and** on `PendingApproval` — which is the state the
+                // card's buttons exist for. `error` covers a failed run, so the
+                // card says why instead of rendering an empty box.
+                summary: summary.unwrap_or_default(),
+                feed_item_id: feed_item_id.map(|id| id.to_string()),
+            },
+        )
+        .collect())
 }
 
 /// The mailbox list: the whitelist in `API.md` §2's order, then user labels.

@@ -739,6 +739,16 @@ async fn a_parse_failure_is_recorded_and_the_sync_continues() {
     assert_eq!(report.ingested, 5, "every message still gets a row");
     assert_eq!(report.parse_failures, 1);
 
+    // **The 30-day backfill must trigger nothing.** Two thousand messages
+    // times every published agent would blow the daily ceiling on first
+    // connect, and "on new mail" does not mean "on all mail you already have".
+    // The mail trigger is the *incremental* walk's, and only its.
+    let triage: i64 = sqlx::query_scalar("select count(*) from jobs where kind = 'triage_message'")
+        .fetch_one(&db.pool)
+        .await
+        .unwrap();
+    assert_eq!(triage, 0, "the full sync is not a trigger");
+
     // The unparseable one is a metadata-only row: no body, but the thread,
     // labels and timestamp Gmail gave us are all there.
     let (body_text, body_html, thread_id, labels, ts): (
@@ -1618,6 +1628,18 @@ async fn a_message_added_by_history_is_ingested_and_rolled_up() {
     assert_eq!(report.added, vec![fixture.id.clone()]);
     assert_eq!(report.pages, 1);
     assert_eq!(report.threads, 1);
+
+    // **P5's seam, closed.** The trigger is enqueued inside the page
+    // transaction that wrote the mail, so a crash cannot land one without the
+    // other — and it is keyed on the ids actually *ingested*, not on the ids
+    // the page asked Gmail for.
+    let triage: Vec<String> = sqlx::query_scalar(
+        "select payload->>'gmail_id' from jobs where kind = 'triage_message' order by id",
+    )
+    .fetch_all(&db.pool)
+    .await
+    .unwrap();
+    assert_eq!(triage, vec![fixture.id.clone()]);
 
     let stored: i64 =
         sqlx::query_scalar("select count(*) from messages where account_id = $1 and gmail_id = $2")

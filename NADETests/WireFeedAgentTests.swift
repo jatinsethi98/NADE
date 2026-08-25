@@ -84,16 +84,15 @@ final class WireFeedAgentTests: XCTestCase {
     /// action, and the button renders this string verbatim.
     func testNoActionLabelPromisesAnOutboundAction() throws {
         let page = try ContractFixture.decode(WireFeedPage.self, from: "feed")
-        let banned = ["send", "forward", "reply-all", "archive", "delete", "publish"]
-
         for item in page.items {
             guard let label = item.data?.actionLabel else { continue }
-            for verb in banned {
-                XCTAssertFalse(
-                    label.lowercased().contains(verb),
-                    "\(label) promises an action v1 does not take"
-                )
-            }
+            // The same screen every other app-authored string gets. The
+            // six-word substring list this used to carry could not see "sent"
+            // and matched "Sender" — the two failure modes at once.
+            XCTAssertFalse(
+                OutboundCopy.promises(label),
+                "\(label) promises an action v1 does not take"
+            )
         }
     }
 

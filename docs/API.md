@@ -587,6 +587,17 @@ yanked out from under it mid-step. Feed items already raised remain readable.
 `allowed_tools` at dispatch regardless of what the spec says. v1's entire tool
 set is `search_mail`, `read_thread`, `write_note`, `draft_reply`.
 
+**Within a filter list**, which two implementers would otherwise guess
+differently: `from_domains` and `label_ids` are **any** — a sender has exactly
+one domain, so "all" would be unsatisfiable, and "restrict to these mailboxes"
+means any of them. `from_contains`, `subject_contains` and `body_contains` are
+**all**, which is what the compiler's own prompt tells the model ("substrings
+the subject *must contain*"). A `from_domains` entry also matches a sub-domain
+of itself, so `kettle.com` matches `careers.kettle.com` and not
+`notkettle.com`. An empty list is not a constraint. A message with no date fails
+`newer_than_days` rather than passing it: failing closed costs a run that would
+probably have been wrong, failing open fires an agent on mail of unknown age.
+
 ### 5.2 The schedule
 
 ```json
@@ -848,12 +859,21 @@ outcome with no explanation.
 
 // action = "draft_reply"
 {"action": "draft_reply", "action_label": "Save draft",
- "draft_id": "…", "thread_id": "…", "to": ["priya@kettle.com"],
+ "draft_id": "…", "thread_id": "…"|null, "to": ["priya@kettle.com"],
  "subject": "Re: …", "never_messaged": true}     // true → the UI flags the recipient
 
 // kind = "info"
-{"action": "none", "note_id": "…"|null, "thread_id": "…"|null}
+{"action": "none", "note_id": "…"|null, "draft_id": "…"|null, "thread_id": "…"|null}
 ```
+
+Two of those nullabilities were corrected at P5, and both for the same reason —
+the card is raised from the engine's `approval_requested`, **before** the tool
+runs, so it can only publish what the model's call already carried.
+`draft_reply`'s `thread_id` used to be non-null here while §3 typed the draft
+row's as `"…"|null` and the tool's own schema called it optional; a model that
+omitted it parked a run the server could not card at all. And the `info` shape
+had no `draft_id`, so an agent with `approval_required = false` and
+`draft_reply` in its tools produced a card that could not name what it had made.
 
 `action_label` is the verb the card shows. It says **"Save note"** or
 **"Save draft"** and never "Send": v1 takes no outbound action, and the UI is
@@ -888,10 +908,27 @@ when the resume job runs `Engine::resume`, which appends
 `approval_resolved {"decision": "approve"}` and carries the run on from there.
 
 - Replay with the same token → `409 token_consumed`. **The client treats this
-  as success** — it means an earlier attempt already won.
+  as success** — it means an earlier attempt already won. So does a card that is
+  already `resolved` or `skipped`, whichever way it was settled.
 - Past `approval_expires_at` → `410 approval_expired`, the run moves to
   `expired`, and the item's status follows.
 - Wrong token → `401 unauthorized`.
+- The card's run has moved on — it is no longer parked, or it is parked on a
+  *different* step — → `409 conflict`. The card names a `step_seq` and the
+  decision must address exactly that step; applying a stale answer to whatever
+  happens to be open now is the failure `Resolution`'s own `step_seq` exists to
+  prevent.
+- The card's agent was deleted while the card was live → `410 gone`. `DELETE
+  /agents/{id}` settles live cards before it cancels the runs, so this is only
+  reachable as a race between that delete and this tap.
+
+**A card's status and its run's must not contradict each other about this
+decision, and `resolved` is looser than the other three.** `new` means the run
+is parked on this very card; `skipped` and `expired` are decisions that end a
+run, so the run carries them too. `resolved` only means "go ahead" was
+recorded — the run may still be `queued`, may be `done`, may have **paused
+again** on a second gated call, or may have failed on a later step. The one
+thing it may not be is `skipped` or `expired`.
 
 Approvals expire **7 days** after creation. A cron sweeps expired ones hourly.
 
@@ -921,6 +958,12 @@ Marks `kind: "info"` items as `resolved`. Without it `new_count` would never
 fall, because info items have nothing to approve. Ids that are approvals, or
 already resolved, or unknown, are ignored rather than erroring — this is a
 best-effort read receipt fired as the user scrolls.
+
+One class of `info` item is **not** dismissible, and the server decides which:
+the card that says Gmail needs reconnecting. It is the only surface that
+reports a stopped sync, it is cleared by re-consent rather than by reading, and
+a receipt fired by scrolling past it would clear the one thing telling you the
+mailbox is dead.
 
 ---
 

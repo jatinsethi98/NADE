@@ -71,9 +71,28 @@ pub const TRUNCATION_MARKER: &str = "\n[...truncated, the message continues]";
 #[must_use]
 pub fn nonce_for(call: &ToolCall) -> String {
     match call.context.as_ref() {
-        Some(context) => context.run_id.as_uuid().simple().to_string()[..16].to_owned(),
+        Some(context) => nonce_from(&context.run_id.as_uuid().simple().to_string()),
         None => "0000000000000000".to_owned(),
     }
+}
+
+/// A fence nonce from any stable identifier.
+///
+/// Triage builds a prompt **before any run exists**, so it has no run id to
+/// derive from; the message's own Gmail id serves the same purpose. The
+/// property the nonce needs is that it is fixed for one prompt and not
+/// predictable from this repository — a message id satisfies both, and the
+/// sender does not choose it.
+///
+/// Hashed rather than truncated, so an identifier that is short, or that shares
+/// a prefix with its neighbours (Gmail ids do), still yields sixteen
+/// well-distributed hex characters.
+#[must_use]
+pub fn nonce_from(seed: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(seed.as_bytes());
+    let hex = format!("{digest:x}");
+    hex[..16].to_owned()
 }
 
 /// Opens a block of untrusted text.

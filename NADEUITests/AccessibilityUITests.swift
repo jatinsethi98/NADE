@@ -91,19 +91,28 @@ final class AccessibilityUITests: XCTestCase {
         // `MATCHES` is anchored, so the wildcards are part of the pattern. `\\b`
         // keeps "Sender" and "resend" from matching, exactly as the old
         // `.regularExpression` search did.
-        let saysSend = NSPredicate(format: "label MATCHES[c] %@",
-                                   ".*\\bsend(s|ing)?\\b.*")
+        let saysSend = OutboundCopy.predicate
 
         // **Prove the guard can fail.** Swapping a hand-rolled regex search for
         // an ICU `MATCHES` is exactly the kind of change that quietly turns an
         // assertion into a tautology, and a green test that cannot go red is
         // worse than no test. These run against the predicate itself, so they
         // cost nothing and fail loudly if the pattern stops meaning what it says.
-        for offender in ["Send", "send draft", "SENDING", "Sends it", "Tap Send now"] {
+        // `sent`, `forwarded`, `archived` and `deleted` are here because they
+        // were **not** caught: every guard in the app matched
+        // `\bsend(s|ing)?\b`, so "This expired before it could be sent." —
+        // shipped copy, under a card whose button says "Save draft" — passed
+        // all four. A past tense is the most natural way to claim an outbound
+        // action, and it was the one form nothing looked for.
+        for offender in ["Send", "send draft", "SENDING", "Sends it", "Tap Send now",
+                         "it was sent", "Forwarded it", "Archived the thread"] {
             XCTAssertTrue(saysSend.evaluate(with: ["label": offender]),
                           "\(offender.debugDescription) should have been caught")
         }
-        for innocent in ["Sender", "Resend", "Save draft", "Save note", "sendest"] {
+        // `Delete` is a real v1 control — `DELETE /agents/{id}` — and DESIGN §4
+        // forbids sending, archiving and Gmail mutation, none of which it is.
+        for innocent in ["Sender", "Resend", "Save draft", "Save note", "sendest",
+                         "Delete", "Delete this agent"] {
             XCTAssertFalse(saysSend.evaluate(with: ["label": innocent]),
                            "\(innocent.debugDescription) is not an outbound promise")
         }

@@ -7,6 +7,21 @@
 //! slightly different spellings, before it lived here.
 
 use serde_json::Value;
+use uuid::Uuid;
+
+/// A UUID under this key, if there is a well-formed one.
+///
+/// The same charter as [`str_array`], for the other shape this crate keeps
+/// reading out of a `jsonb` it did not write: a job payload. Five sites in
+/// three modules had the chain — `get`, `as_str`, `Uuid::parse_str`, `.ok()` —
+/// typed out, each attaching its own `ok_or_else`. The message stays at the
+/// call site, because it names the job kind and the key; the parse does not.
+pub(crate) fn uuid_at(value: &Value, key: &str) -> Option<Uuid> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|raw| Uuid::parse_str(raw).ok())
+}
 
 /// The strings in a JSON array, skipping anything that is not one.
 ///

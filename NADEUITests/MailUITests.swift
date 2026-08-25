@@ -139,8 +139,18 @@ final class MailUITests: XCTestCase {
         // Every element here is named from `docs/contract` data, not by us.
         let contentPrefixes = ["mailrow.", "mailboxes.label.", "mailboxes.account",
                                "thread.agentcard.", "maillist.chip.", "settings.account",
-                               "settings.server"]
-        let forbidden = #"\b(send(s|ing)?|forward(s|ing)?|reply-all|archive)\b"#
+                               "settings.server",
+                               // `Sent` is a Gmail **mailbox** — one of the eight
+                               // system labels `API.md` §2 exposes, and a place
+                               // rather than a promise. It is here rather than
+                               // carved out of the pattern so the exclusion is
+                               // an identifier, like every other one, and the
+                               // pattern keeps meaning what it says.
+                               "mailboxes.standard.sent"]
+
+        // The pattern, and why `delete` is absent from it, are in
+        // `OutboundCopy` — one home per target, because five copies of this
+        // rule are what let D78's violation past all five.
 
         for screen in ["1g", "1e", "1f", "1k"] {
             let app = XCUIApplication.nade(screen: screen)
@@ -156,7 +166,7 @@ final class MailUITests: XCTestCase {
                         && !contentPrefixes.contains { button.identifier.hasPrefix($0) }
                 }
                 .map(\.label)
-                .filter { $0.range(of: forbidden, options: [.regularExpression, .caseInsensitive]) != nil }
+                .filter(OutboundCopy.promises)
 
             XCTAssertTrue(offenders.isEmpty, "\(screen) has app-named controls \(offenders)")
         }
@@ -172,9 +182,7 @@ final class MailUITests: XCTestCase {
         XCTAssertTrue(app.buttons["mailrow.18f2a1b3c4d5e6f7"].waitForExistence(timeout: 10))
 
         let unfiltered = app.buttons.allElementsBoundByIndex.map(\.label)
-        let hits = unfiltered.filter {
-            $0.range(of: #"\bsend(s|ing)?\b"#, options: [.regularExpression, .caseInsensitive]) != nil
-        }
+        let hits = unfiltered.filter(OutboundCopy.promises)
         XCTAssertFalse(hits.isEmpty,
                        "nothing on screen contains 'send' at all — the sweep above is passing vacuously")
     }

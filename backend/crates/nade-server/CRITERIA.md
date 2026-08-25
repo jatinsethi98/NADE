@@ -1067,3 +1067,127 @@ changes what the agent perceives (50 *messages* collapse into at most 50
 *threads*, so a smaller ask yields an unpredictable number of hits and makes
 `truncated` meaningless), which is a product decision with a bench behind it and
 not a refactor. Recorded in D69.
+
+## AG. P5 — the loop closes
+
+The approval loop, the mail trigger, and the two contract violations P5 found
+already shipped.
+
+- [x] AG1 **The approval capability lives on the card.** Migration 0006 moves
+  `approval_token`, `approval_expires_at` and `step_seq` onto `feed_items` and
+  **drops** the two dead columns 0001 put on `agent_runs`. A run can pause more
+  than once (`max_steps` is 12), so one token per run is the wrong shape, and
+  `API.md` §7 keeps an expired card's deadline after it settles. D70.
+  `db::tests::the_approval_capability_lives_on_the_card_and_not_on_the_run`.
+- [x] AG2 **One card per gated step, and one live token.** `feed_items_run_step_idx`
+  plus `on conflict do nothing`, exercised by
+  `raising_a_card_twice_for_one_step_produces_one_card` — which drives `settle`
+  rather than re-delivering the job, because `run_agent` now declines a parked
+  run before the engine and a job-level test could no longer reach the producer.
+- [x] AG3 **The card is stamped by the engine's clock.** `created_at` is bound
+  from the `approval_requested` entry and `approval_expires_at` is that plus
+  seven days, which is what `docs/contract/validate.py` ties together.
+  `ApprovalRequest::requested_at` is the step's `opened_at` and `Entry::new`
+  reads the clock again, so neither it nor `now()` is the value. D74.
+- [x] AG4 **Five writes or none, and the journal untouched.**
+  `approve_lands_all_five_writes_and_leaves_the_journal_alone` asserts each of
+  the five and compares the journal before and after. `API.md` §6.1: the engine
+  is the journal's only author.
+- [x] AG5 **Every `settle` write names its writer.** `status = 'running'` alone
+  is not enough — two jobs can both be at `running`, and the stale one's replay
+  returns in microseconds — so the guard also names the `attempt` the claim
+  stamped. `a_stale_outcome_held_across_the_decision_cannot_settle` holds a
+  `PendingApproval` across the decision; deleting `and attempt = $5` turns it
+  red. `a_settle_cannot_overwrite_a_terminal_status` covers the other branch.
+  D71.
+- [x] AG6 **A parked run belongs to `resume_run`.** `run_agent` returns before
+  the engine for `pending_approval` and `waiting`, asserted by a model-call
+  count rather than by a status that would be the same either way.
+- [x] AG7 **A dead-lettered decision does not vanish.** `Handler::on_dead_letter`
+  ends the run through the engine and corrects the card that said the note was
+  saved. Before it, an approval that failed five times left the run `queued` for
+  ever with one audit row as the only trace. D72's neighbour; tested by
+  `a_dead_lettered_decision_ends_the_run_and_corrects_the_card`.
+- [x] AG8 **The daily cap counts runs, not model calls.** `compile.rs` tells the
+  model to leave `semantic` null when the filters suffice, so the default
+  compiled agent made no `purpose = 'triage'` call and was capped by nothing
+  while starting a 50 000-token run per message. The count is now part of the
+  insert, so `NADE_WORKERS` jobs cannot all read 19 and all write. D73.
+- [x] AG9 **The 2 KB triage body cap is measured, not declared.** It was applied
+  *after* fencing, against a ceiling the fenced string could never reach, so it
+  truncated nothing and every call paid five times the documented input.
+  `the_body_cap_is_measured_on_the_prompt_and_not_only_declared` asserts the
+  size of the real prompt.
+- [x] AG10 **The subject is inside the fence.** Open finding 6 in
+  `backend/testdata/injection/README.md`. The corpus sweep now calls
+  `triage::prompt` rather than rebuilding it, and
+  `a_forged_delimiter_in_the_subject_cannot_close_the_fence` supplies the case
+  the corpus is missing — the attacker guessing the nonce correctly.
+- [x] AG11 **The allowlist is measured.** The corpus test asserts that no run
+  parked on a tool its owner never granted; deleting `tools::build`'s
+  intersection turns it red. It also alternates both mutating tools, so
+  `assert_eq!(notes, 0)` is falsifiable.
+- [x] AG12 **Two shipped contract violations, fixed.** The spend-ceiling and
+  needs-reauth cards wrote `data.reason`, an extra key the exact key set
+  forbids, and re-consent set `resolved_note` on an `info` card. Invisible
+  because `/feed` was unmounted.
+  `every_card_the_system_raises_for_itself_is_contract_shaped` drives the real
+  writers, and the copy is compared word for word. D72.
+- [x] AG13 **The card body cannot claim an outbound action.** Model prose, from
+  a model that has just read somebody else's mail, screened for every form that
+  says NADE *did* something — and deliberately not for the present-tense words
+  that describe the mail itself. D75.
+- [x] AG14 **The feed's keyset query walks an index.** D13's rule, with the
+  `EXPLAIN` test `api::mail::tests::thread_list_query_uses_an_index` set as the
+  precedent.
+- [x] AG15 **Every gated tool has copy, or a test fails.** A tool that can park
+  a run must have a `feed::GatePresentation` row — the action, the button's
+  verb, the settled card's italic line, the mail row's phrase, the fallback
+  sentence and whether `actions` carries `edit`. The default for a missing one
+  is the note shape, so without this a sixth tool ships a card reading "Saved to
+  Notes." about something that is not a note.
+  `every_gated_tool_has_a_presentation` walks `V1_TOOLS` and screens the table's
+  own strings for outbound promises. D83.
+- [x] AG16 **Both approval surfaces show the recipient list.** 2a's feed row and
+  1f's thread agent card render from one `ApprovalControls`, so the control
+  `backend/testdata/injection/README.md` finding 10 requires — the addresses and
+  the `never_messaged` flag, above the button that saves — cannot exist on one
+  surface and not the other. The row itself is asserted on 2a
+  (`testADraftCardNamesItsRecipient`), because the only live `draft_reply` card
+  in the fixture world is on a thread `thread.json` does not describe; 1f
+  asserts that the same view draws its buttons and that a *note* card correctly
+  shows no recipient. **A thread fixture carrying a live draft card would let
+  the row be asserted directly on 1f, and is a fixture-first change P6 should
+  make.** D83.
+- [x] AG17 **One priced path, one chain.** Every forced tool call goes through
+  `anthropic::forced_tool_call`: ceiling first (D60), ledger row from `usage()`
+  before the body is parsed (D61). A caller that wants an object out of a model
+  cannot re-implement either half by accident, because there is nothing left to
+  re-implement. D83.
+
+## Mandated edge cases — P5
+
+- [x] **Empty input** — an empty feed matches `feed_empty.json`; `POST
+  /feed/seen` with `ids: []`; a gated call with no prose falls back; a
+  `draft_reply` with no `thread_id`; an account with no agents; a page with no
+  ids to triage.
+- [x] **Unicode** — an agent name in astral codepoints capped without splitting
+  one; a 4 000-codepoint subject inside the triage prompt; case folding on both
+  sides of every filter.
+- [x] **Crash mid-step** — the card and the run row commit together; a settle
+  from a superseded claim is refused; re-raising a card is a no-op; the
+  approved effect upserts on its `effect_id`.
+- [x] **Duplicate delivery / replay** — a replayed webhook produces no second
+  run *and* pays for no second model call; approve twice is `409
+  token_consumed`; two resume jobs are `AlreadyResolved`; a second sweep finds
+  nothing; a dead letter for a finished run is a no-op.
+- [x] **Expiry** — one second either side of the deadline; the sweep at exactly
+  `expires_at`; a card whose agent was deleted answers `410 gone`.
+- [x] **Pagination boundary** — a card inserted mid-scroll neither duplicates
+  nor skips; `next_cursor: null` on the last page; a corrupt cursor is `400`.
+- [x] **429 / timeout** — a provider that answers 429 bills the call and starts
+  nothing; a 200 whose body will not decode is billed all the same (D61); a
+  spend breach is a no-op and never a job error.
+- [x] **Clock skew** — a message with no date fails a freshness filter; one
+  stamped in the future is not old; the card's deadline derives from the
+  engine's stamp, so a retried job cannot extend it.

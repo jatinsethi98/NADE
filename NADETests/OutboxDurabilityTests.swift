@@ -79,9 +79,8 @@ final class OutboxDurabilityTests: XCTestCase {
     func testTheExpiredFallbackNoteIsAnExplanationAndNotAnOutboundPromise() {
         let note = OutboxDriver.expiredNote
         XCTAssertFalse(note.isEmpty)
-        XCTAssertNil(note.range(of: #"\bsend(s|ing)?\b"#,
-                                options: [.regularExpression, .caseInsensitive]),
-                     "v1 takes no outbound action, so no copy may imply one")
+        XCTAssertFalse(OutboundCopy.promises(note),
+                       "v1 takes no outbound action, so no copy may imply one")
     }
 
     // MARK: - Retry-After

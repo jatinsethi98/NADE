@@ -67,11 +67,21 @@ impl DraftReply {
 /// Returns an error if the query fails. A caller that cannot reach the database
 /// should show the warning rather than hide it - failing closed on a *warning*
 /// means the quiet path is the unsafe one.
-pub async fn never_messaged(
-    pool: &sqlx::PgPool,
+/// Takes the caller's executor, because the card is raised inside the
+/// transaction that parks the run: a `&PgPool` would take a second connection
+/// and see a snapshot from outside the transaction that is about to commit.
+/// `&PgPool` satisfies `PgExecutor` too, which is what the tests pass.
+///
+/// # Errors
+/// Returns an error if the query fails.
+pub async fn never_messaged_in<'e, E>(
+    executor: E,
     account_id: uuid::Uuid,
     addresses: &[String],
-) -> sqlx::Result<Vec<String>> {
+) -> sqlx::Result<Vec<String>>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     // EDGE (empty input): no addresses, no question to ask the database.
     if addresses.is_empty() {
         return Ok(Vec::new());
@@ -97,7 +107,7 @@ pub async fn never_messaged(
     )
     .bind(account_id)
     .bind(addresses)
-    .fetch_all(pool)
+    .fetch_all(executor)
     .await?;
 
     // Order follows the caller's list, not the database's: the card reads back

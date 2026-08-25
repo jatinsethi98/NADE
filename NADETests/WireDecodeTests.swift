@@ -84,7 +84,12 @@ final class WireDecodeTests: XCTestCase {
         XCTAssertEqual(first.fromName, "Priya Raghavan")
         XCTAssertTrue(first.unread)
         XCTAssertEqual(first.msgCount, 3)
-        XCTAssertEqual(first.agentNote, "Job Search Tracker · two next steps to approve")
+        // Rendered by the server from the pending action, not written by hand.
+        // It read "two next steps to approve" until P5, which described the
+        // note's *contents* — a string no server can reproduce from a gated
+        // tool call, so the fixture and the renderer would have disagreed in
+        // silence.
+        XCTAssertEqual(first.agentNote, "Job Search Tracker · a note to approve")
 
         // `agent_note` is genuinely nullable …
         XCTAssertNil(page.threads[2].agentNote)

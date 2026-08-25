@@ -28,8 +28,10 @@ struct FeedRow: View {
         static let bodySize: CGFloat = 14
         static let bodyLineHeight: CGFloat = 1.6
         static let bodyTop: CGFloat = 5
+        /// §2a's button offset. The gap, the recipient row's numbers and the
+        /// button labels live in `ApprovalControls`, which draws them for both
+        /// approval surfaces.
         static let buttonsTop: CGFloat = 10
-        static let buttonsGap: CGFloat = 8
         static let resolvedSize: CGFloat = 12.5
         static let resolvedTop: CGFloat = 8
     }
@@ -42,15 +44,6 @@ struct FeedRow: View {
     /// Accent only while the card is an approval that still wants a tap.
     private var borderColor: Color {
         item.kind == .approval && item.status == .new ? Theme.Color.accent : .clear
-    }
-
-    /// "Save note" / "Save draft" — **never** "Send". v1 takes no outbound
-    /// action, so the primary button names the local effect (PLAN C2).
-    /// The fallback is deliberately also local: a card whose `data` we cannot
-    /// read must not invent a verb.
-    private var primaryLabel: String {
-        item.data?.actionLabel
-            ?? String(localized: "Save", comment: "Fallback label for an approval whose data is unrecognised")
     }
 
     var body: some View {
@@ -84,14 +77,14 @@ struct FeedRow: View {
                     .padding(.top, M.bodyTop)
                     .accessibilityIdentifier("feed.body")
 
-                if !item.actions.isEmpty {
-                    HStack(spacing: M.buttonsGap) {
-                        ForEach(item.actions, id: \.rawValue) { action in
-                            button(for: action)
-                        }
-                    }
-                    .padding(.top, M.buttonsTop)
-                }
+                // The recipient row and the buttons, shared with 1f's agent
+                // card — see `ApprovalControls` for why they are not written
+                // out here.
+                ApprovalControls(item: item,
+                                 idPrefix: "feed",
+                                 buttonsTop: M.buttonsTop,
+                                 onApprove: onApprove,
+                                 onSkip: onSkip)
 
                 if let note = item.resolvedNote, !note.isEmpty {
                     Text(note)
@@ -110,31 +103,4 @@ struct FeedRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    @ViewBuilder
-    private func button(for action: FeedAction) -> some View {
-        switch action {
-        case .approve:
-            NButton(primaryLabel, variant: .primary, action: onApprove)
-                .accessibilityIdentifier("feed.approve")
-        case .edit:
-            // PLAN §Approval semantics: "approve creates/updates the draft;
-            // `PATCH /drafts/{id}` edits it after". There is no pre-approval
-            // edit flow in v1, so Edit takes the same action and the draft is
-            // edited from where it lands.
-            NButton(String(localized: "Edit", comment: "2a, the secondary approval button"),
-                    variant: .secondary, action: onApprove)
-                .accessibilityIdentifier("feed.edit")
-        case .skip:
-            NButton(String(localized: "Skip", comment: "2a, the ghost approval button"),
-                    variant: .ghost, action: onSkip)
-                .accessibilityIdentifier("feed.skip")
-        case .unknown:
-            // EDGE: an action this build does not know. Rendering nothing is
-            // right — a button whose behaviour is unknown must not be tappable.
-            // `WireEnum` already decodes it to `.unknown(raw)` rather than
-            // throwing, which is where the value is preserved; a zero-size view
-            // existing only to hang a `print` off it is not worth the pixel.
-            EmptyView()
-        }
-    }
 }

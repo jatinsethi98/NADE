@@ -51,6 +51,7 @@ pub const ENV_VARS: &[&str] = &[
     "NADE_LLM_API_BASE",
     "NADE_LLM_MODEL",
     "NADE_LLM_COMPILE_MODEL",
+    "NADE_LLM_TRIAGE_MODEL",
     "NADE_LLM_TIMEOUT_SECS",
     "NADE_LLM_MAX_ATTEMPTS",
     "NADE_LLM_DAILY_USD",
@@ -183,6 +184,14 @@ pub struct LlmConfig {
     pub model: String,
     /// The model `POST /agents` compiles a sentence with.
     pub compile_model: String,
+    /// The model the mail trigger judges `spec.trigger.semantic` with.
+    ///
+    /// `None` falls back to [`Self::model`]. There is deliberately **no**
+    /// per-agent override read here: `agents.triage_model` exists in the schema
+    /// and no writer sets it — `PATCH /agents/{id}` accepts no such field
+    /// (`API.md` §5) and the compiler does not emit one — so reading it would
+    /// be a lookup that can only ever answer null.
+    pub triage_model: Option<String>,
     /// Per request, applied to the request builder. `gmail::http_client()`
     /// bakes a 60 s client-wide timeout, so a value above that does nothing
     /// unless it is also set per request - which is why this is used that way.
@@ -217,6 +226,7 @@ impl std::fmt::Debug for LlmConfig {
             .field("api_base", &self.api_base)
             .field("model", &self.model)
             .field("compile_model", &self.compile_model)
+            .field("triage_model", &self.triage_model)
             .field("timeout", &self.timeout)
             .field("max_attempts", &self.max_attempts)
             .field("daily_ceiling_nano_usd", &self.daily_ceiling_nano_usd)
@@ -351,6 +361,7 @@ impl Config {
             string("NADE_LLM_MODEL").unwrap_or_else(|| crate::llm::DEFAULT_MODEL.to_owned());
         let llm_compile_model =
             string("NADE_LLM_COMPILE_MODEL").unwrap_or_else(|| llm_model.clone());
+        let llm_triage_model = string("NADE_LLM_TRIAGE_MODEL");
         let llm_api_base =
             string("NADE_LLM_API_BASE").unwrap_or_else(|| crate::llm::DEFAULT_API_BASE.to_owned());
 
@@ -436,6 +447,7 @@ impl Config {
                 api_base: llm_api_base,
                 model: llm_model,
                 compile_model: llm_compile_model,
+                triage_model: llm_triage_model,
                 timeout: llm_timeout,
                 max_attempts: llm_max_attempts,
                 daily_ceiling_nano_usd,
@@ -812,6 +824,7 @@ pub(crate) mod tests {
             api_base: "http://127.0.0.1:1".to_owned(),
             model: "claude-haiku-4-5".to_owned(),
             compile_model: "claude-haiku-4-5".to_owned(),
+            triage_model: None,
             timeout: Duration::from_secs(5),
             // One attempt: a test that exercises the retry policy sets its own
             // value, and every other test would otherwise pay the backoff.

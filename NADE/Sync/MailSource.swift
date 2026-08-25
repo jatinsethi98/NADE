@@ -40,12 +40,9 @@ nonisolated protocol MailSource: Sendable {
     /// closure threaded down through four layers.
     func attachmentData(gmailID: String, attachmentID: String) async throws -> Data
 
-    // P3. The feed and the agents live behind endpoints that land at P5 and
-    // P4; the seam exists now so the screens are written once. `FixtureMailSource`
-    // implements them today, and `HTTPMailSource` gains its half when the routes
-    // do — which is why these throw `notImplemented` rather than being absent:
-    // a screen that calls a method the live source cannot answer must fail
-    // loudly in DEBUG, not silently render an empty list in production.
+    // The feed and the agents. Built at P3 against fixtures because the routes
+    // landed later; live since P5, with no change to a screen. `POST /ask` is
+    // the last one still waiting, and it is P6's.
     func feed(cursor: String?) async throws -> WireFeedPage
     func feedItem(id: String) async throws -> WireFeedItem
     func approve(feedItemID: String, approvalToken: String) async throws -> WireApproveResponse
@@ -138,47 +135,54 @@ nonisolated final class HTTPMailSource: MailSource {
                                         attachmentID: attachmentID)
     }
 
-    // MARK: - P3's endpoints, which the backend does not serve yet
+    // MARK: - The feed and the agents (`API.md` §§5, 7)
     //
-    // `APIClient` deliberately refuses to carry a URL builder no screen calls
-    // (see its `Endpoint` comment: "an unreachable URL builder is not a head
-    // start - it is untested code that reads as a shipped capability"). Here
-    // the screens *do* call them, and the routes are what is missing — so the
-    // seam is real and the live half is a loud, single-line failure until
-    // `/feed` (P5) and `/agents` (P4) exist.
+    // These were eleven `notServedYet` stubs, and the comment that stood here
+    // said the seam existed so "the screens are written once ... and
+    // `HTTPMailSource` gains its half when the routes do". P5 mounted `/feed`;
+    // `/agents` has been served since P4 and `docs/PLAN.md` recorded the iOS
+    // half as debt no phase owned. Both halves are live now, and the screens
+    // needed no rewrite — which is what the seam was for.
 
-    func feed(cursor: String?) async throws -> WireFeedPage { throw APIFailure.notServedYet("GET /feed") }
-    func feedItem(id: String) async throws -> WireFeedItem { throw APIFailure.notServedYet("GET /feed/{id}") }
+    func feed(cursor: String?) async throws -> WireFeedPage {
+        try await client.feed(origin: origin, cursor: cursor)
+    }
+
+    func feedItem(id: String) async throws -> WireFeedItem {
+        try await client.feedItem(origin: origin, id: id)
+    }
 
     func approve(feedItemID: String, approvalToken: String) async throws -> WireApproveResponse {
-        throw APIFailure.notServedYet("POST /feed/{id}/approve")
+        try await client.approve(origin: origin, feedItemID: feedItemID,
+                                 approvalToken: approvalToken)
     }
 
     func skip(feedItemID: String, approvalToken: String) async throws -> WireSkipResponse {
-        throw APIFailure.notServedYet("POST /feed/{id}/skip")
+        try await client.skip(origin: origin, feedItemID: feedItemID,
+                              approvalToken: approvalToken)
     }
 
     func seen(ids: [String]) async throws -> WireSeenResponse {
-        throw APIFailure.notServedYet("POST /feed/seen")
+        try await client.seen(origin: origin, ids: ids)
     }
 
-    func agents() async throws -> [WireAgentRow] { throw APIFailure.notServedYet("GET /agents") }
-    func agent(id: String) async throws -> WireAgent { throw APIFailure.notServedYet("GET /agents/{id}") }
+    func agents() async throws -> [WireAgentRow] { try await client.agents(origin: origin) }
+    func agent(id: String) async throws -> WireAgent { try await client.agent(origin: origin, id: id) }
 
     func createAgent(nlDefinition: String) async throws -> WireAgent {
-        throw APIFailure.notServedYet("POST /agents")
+        try await client.createAgent(origin: origin, nlDefinition: nlDefinition)
     }
 
     func updateAgent(id: String, patch: AgentPatch) async throws -> WireAgent {
-        throw APIFailure.notServedYet("PATCH /agents/{id}")
+        try await client.updateAgent(origin: origin, id: id, patch: patch)
     }
 
     func deleteAgent(id: String) async throws {
-        throw APIFailure.notServedYet("DELETE /agents/{id}")
+        try await client.deleteAgent(origin: origin, id: id)
     }
 
     func runAgent(id: String) async throws -> WireRunStarted {
-        throw APIFailure.notServedYet("POST /agents/{id}/run")
+        try await client.runAgent(origin: origin, id: id)
     }
 
     /// P6 gives this a `URLSession` byte stream. Until then it fails the same

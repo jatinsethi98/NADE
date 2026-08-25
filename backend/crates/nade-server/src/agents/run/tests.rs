@@ -9,7 +9,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use super::*;
 use crate::config::Env;
 use crate::jobs::{Job, JobContext, Queue};
-use crate::test_support::{test_app, TestApp};
+use crate::test_support::{script, test_app, text_turn, tool_turn, TestApp};
 
 // ------------------------------------------------------------- helpers --
 
@@ -61,39 +61,6 @@ async fn world(allowed: &[&str], approval_required: bool) -> World {
         run,
         server,
     }
-}
-
-fn text_turn(text: &str) -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_json(json!({
-        "model": "claude-haiku-4-5-20251001",
-        "stop_reason": "end_turn",
-        "content": [{"type": "text", "text": text}],
-        "usage": {"input_tokens": 100, "output_tokens": 20}
-    }))
-}
-
-fn tool_turn(name: &str, input: Value) -> ResponseTemplate {
-    ResponseTemplate::new(200).set_body_json(json!({
-        "model": "claude-haiku-4-5-20251001",
-        "stop_reason": "tool_use",
-        "content": [{"type": "tool_use", "id": "toolu_1", "name": name, "input": input}],
-        "usage": {"input_tokens": 100, "output_tokens": 20}
-    }))
-}
-
-/// Answer with `first` once, then `rest` for everything after.
-async fn script(server: &MockServer, first: ResponseTemplate, rest: ResponseTemplate) {
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(first)
-        .up_to_n_times(1)
-        .mount(server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .respond_with(rest)
-        .mount(server)
-        .await;
 }
 
 fn job_for(run: Uuid) -> Job {
@@ -170,6 +137,7 @@ async fn a_run_that_calls_a_tool_writes_the_effect_and_journals_the_step() {
         tool_turn(
             "write_note",
             json!({"title": "Findings", "body_md": "all quiet"}),
+            None,
         ),
         text_turn("Saved a note."),
     )
@@ -211,6 +179,7 @@ async fn a_gated_tool_parks_the_run_and_records_everything_p5_will_need() {
         tool_turn(
             "write_note",
             json!({"title": "Findings", "body_md": "all quiet"}),
+            None,
         ),
         text_turn("unused"),
     )
@@ -258,7 +227,7 @@ async fn a_nade_journal_never_records_an_approval_expiry() {
     let w = world(&["write_note"], true).await;
     script(
         &w.server,
-        tool_turn("write_note", json!({"title": "t", "body_md": "b"})),
+        tool_turn("write_note", json!({"title": "t", "body_md": "b"}), None),
         text_turn("unused"),
     )
     .await;
@@ -284,7 +253,7 @@ async fn a_duplicate_delivery_of_a_finished_run_does_nothing() {
     let w = world(&["write_note"], false).await;
     script(
         &w.server,
-        tool_turn("write_note", json!({"title": "t", "body_md": "b"})),
+        tool_turn("write_note", json!({"title": "t", "body_md": "b"}), None),
         text_turn("done"),
     )
     .await;
@@ -404,7 +373,7 @@ async fn a_ceiling_breach_raises_exactly_one_feed_card_however_many_runs_hit_it(
     handler.handle(job_for(second), ctx).await.expect("second");
 
     let cards: i64 = sqlx::query_scalar(
-        "select count(*) from feed_items where account_id = $1 and data->>'reason' = 'spend_ceiling'",
+        "select count(*) from feed_items where account_id = $1 and reason = 'spend_ceiling'",
     )
     .bind(w.account)
     .fetch_one(&w.app.db.pool)
@@ -452,7 +421,7 @@ async fn deleting_an_agent_cancels_a_started_run_through_the_engine() {
     let w = world(&["write_note"], true).await;
     script(
         &w.server,
-        tool_turn("write_note", json!({"title": "t", "body_md": "b"})),
+        tool_turn("write_note", json!({"title": "t", "body_md": "b"}), None),
         text_turn("unused"),
     )
     .await;
@@ -473,7 +442,7 @@ async fn a_started_run_is_cancelled_through_the_engine_with_no_provider_configur
     let mut w = world(&["write_note"], true).await;
     script(
         &w.server,
-        tool_turn("write_note", json!({"title": "t", "body_md": "b"})),
+        tool_turn("write_note", json!({"title": "t", "body_md": "b"}), None),
         text_turn("unused"),
     )
     .await;
@@ -556,7 +525,7 @@ async fn the_step_cap_actually_bounds_a_looping_model() {
 
     Mock::given(method("POST"))
         .and(path("/v1/messages"))
-        .respond_with(tool_turn("read_thread", json!({"thread_id": "nope"})))
+        .respond_with(tool_turn("read_thread", json!({"thread_id": "nope"}), None))
         .mount(&w.server)
         .await;
 

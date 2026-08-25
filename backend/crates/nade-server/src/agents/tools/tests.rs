@@ -467,7 +467,7 @@ async fn a_recipient_this_mailbox_has_never_written_to_is_flagged() {
         "owner@example.com".to_owned(),
         "ops@parcel-status-updates.com".to_owned(),
     ];
-    let unseen = draft_reply::never_messaged(&app.db.pool, account, &addresses)
+    let unseen = draft_reply::never_messaged_in(&app.db.pool, account, &addresses)
         .await
         .expect("query");
     // A sender we have heard from and a recipient we have written to are both
@@ -487,7 +487,7 @@ async fn the_never_messaged_check_is_case_insensitive_on_the_sender() {
     .await
     .unwrap();
     let unseen =
-        draft_reply::never_messaged(&app.db.pool, account, &["priya@kettle.com".to_owned()])
+        draft_reply::never_messaged_in(&app.db.pool, account, &["priya@kettle.com".to_owned()])
             .await
             .unwrap();
     assert!(
@@ -514,7 +514,7 @@ async fn the_never_messaged_check_is_scoped_to_one_account() {
     .unwrap();
     // Another mailbox's correspondence must not vouch for this one's recipient.
     let unseen =
-        draft_reply::never_messaged(&app.db.pool, account, &["known@example.com".to_owned()])
+        draft_reply::never_messaged_in(&app.db.pool, account, &["known@example.com".to_owned()])
             .await
             .unwrap();
     assert_eq!(unseen, vec!["known@example.com"]);
@@ -910,7 +910,7 @@ async fn the_never_messaged_check_answers_a_whole_list_in_the_callers_order() {
     .map(|a| (*a).to_owned())
     .collect();
 
-    let unseen = draft_reply::never_messaged(&app.db.pool, account, &addresses)
+    let unseen = draft_reply::never_messaged_in(&app.db.pool, account, &addresses)
         .await
         .expect("query");
     assert_eq!(
@@ -925,7 +925,7 @@ async fn the_never_messaged_check_answers_a_whole_list_in_the_callers_order() {
 #[tokio::test]
 async fn the_never_messaged_check_of_nothing_is_nothing() {
     let (app, account) = app_with_account().await;
-    let unseen = draft_reply::never_messaged(&app.db.pool, account, &[])
+    let unseen = draft_reply::never_messaged_in(&app.db.pool, account, &[])
         .await
         .expect("query");
     assert!(unseen.is_empty());

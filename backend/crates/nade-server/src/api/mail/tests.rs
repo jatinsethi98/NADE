@@ -534,21 +534,30 @@ async fn a_thread_row_matches_the_contract_field_for_field() {
 }
 
 /// `agent_note` is whatever the run stored, verbatim - the string the row
-/// renders. P5 writes it; this proves the seam works now.
+/// renders.
+///
+/// **It is a column, not a key in `data`.** This test used to seed
+/// `data.agent_note`, matching a P2 comment that promised P5 would write it
+/// there. It could not: `data` is served verbatim and
+/// `docs/contract/validate.py`'s `FEED_DATA` is an exact key set, so a card
+/// carrying an extra key would have failed the contract the day `/feed` was
+/// mounted. Migration 0006 gave the note its own column.
 #[tokio::test]
 async fn an_agent_note_is_passed_through_verbatim() {
     let (app, token, account) = app_with_mail().await;
     seed_message(&app, account, Seed::new("m0", "t0", at(0))).await;
 
     sqlx::query(
-        "insert into feed_items (account_id, kind, title, body, data, status) \
-         values ($1, 'approval', 'Job Search Tracker', 'body', $2::jsonb, 'new')",
+        "insert into feed_items \
+             (account_id, kind, title, body, data, status, thread_id, agent_note) \
+         values ($1, 'approval', 'Job Search Tracker', 'body', $2::jsonb, 'new', 't0', $3)",
     )
     .bind(account)
     .bind(serde_json::json!({
-        "thread_id": "t0",
-        "agent_note": "Job Search Tracker · two next steps to approve"
+        "action": "write_note", "action_label": "Save note",
+        "note_title": "Kettle", "note_id": uuid::Uuid::nil(), "thread_id": "t0"
     }))
+    .bind("Job Search Tracker · a note to approve")
     .execute(&app.db.pool)
     .await
     .unwrap();
@@ -556,8 +565,165 @@ async fn an_agent_note_is_passed_through_verbatim() {
     let body = json(&app, "/v1/mailboxes/INBOX/threads", &token).await;
     assert_eq!(
         body["threads"][0]["agent_note"],
-        "Job Search Tracker · two next steps to approve"
+        "Job Search Tracker · a note to approve"
     );
+}
+
+/// `API.md` §2's agent cards, and the four ways a run reaches a thread.
+///
+/// Deliberately one test over all four rather than four tests over one each:
+/// the failure mode that matters is a `union` branch that silently matches
+/// nothing, and only a case that would be found by *no other branch* proves a
+/// given branch works.
+#[tokio::test]
+async fn agent_cards_find_a_run_by_every_route_a_run_reaches_a_thread() {
+    let (app, token, account) = app_with_mail().await;
+    seed_message(&app, account, Seed::new("m0", "t0", at(0))).await;
+    let agent: uuid::Uuid = sqlx::query_scalar(
+        "insert into agents (account_id, name, nl_definition, status) \
+         values ($1, 'Job Search Tracker', 'note it', 'published') returning id",
+    )
+    .bind(account)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+
+    async fn run(
+        app: &crate::test_support::TestApp,
+        account: uuid::Uuid,
+        agent: uuid::Uuid,
+        status: &str,
+        trigger: &str,
+        trigger_ref: Option<&str>,
+    ) -> uuid::Uuid {
+        sqlx::query_scalar(
+            "insert into agent_runs (agent_id, account_id, trigger_kind, trigger_ref, status, \
+                                     summary) \
+             values ($1, $2, $3, $4, $5, 'Two next steps found.') returning id",
+        )
+        .bind(agent)
+        .bind(account)
+        .bind(trigger)
+        .bind(trigger_ref)
+        .bind(status)
+        .fetch_one(&app.db.pool)
+        .await
+        .unwrap()
+    }
+
+    // 1. a mail trigger on a message *in* the thread. `trigger_ref` is the
+    //    message id (`API.md` §6), so this only works through `messages`.
+    let by_trigger = run(&app, account, agent, "pending_approval", "mail", Some("m0")).await;
+    // 2. a card naming the thread.
+    let by_card = run(&app, account, agent, "done", "manual", None).await;
+    sqlx::query(
+        "insert into feed_items (account_id, run_id, kind, title, body, data, status, thread_id) \
+         values ($1, $2, 'info', 'Job Search Tracker', 'Saved.', $3::jsonb, 'resolved', 't0')",
+    )
+    .bind(account)
+    .bind(by_card)
+    .bind(crate::agents::feed::info_data(None, None, Some("t0")))
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    // 3. a note it wrote.
+    let by_note = run(&app, account, agent, "done", "manual", None).await;
+    sqlx::query(
+        "insert into notes (id, account_id, run_id, thread_id, title) \
+         values (gen_random_uuid(), $1, $2, 't0', 'Kettle')",
+    )
+    .bind(account)
+    .bind(by_note)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+    // 4. a draft it prepared.
+    let by_draft = run(&app, account, agent, "failed", "manual", None).await;
+    sqlx::query(
+        "insert into drafts (id, account_id, run_id, thread_id, subject) \
+         values (gen_random_uuid(), $1, $2, 't0', 'Re: Kettle')",
+    )
+    .bind(account)
+    .bind(by_draft)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+
+    // And one run that touches a *different* thread, which must not appear.
+    let elsewhere = run(&app, account, agent, "done", "manual", None).await;
+    sqlx::query(
+        "insert into notes (id, account_id, run_id, thread_id, title) \
+         values (gen_random_uuid(), $1, $2, 'other', 'Elsewhere')",
+    )
+    .bind(account)
+    .bind(elsewhere)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+
+    let body = json(&app, "/v1/threads/t0", &token).await;
+    let cards = body["agent_cards"].as_array().expect("agent_cards");
+    let ids: Vec<&str> = cards
+        .iter()
+        .map(|card| card["run_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids.len(), 4, "{cards:#?}");
+    for wanted in [by_trigger, by_card, by_note, by_draft] {
+        assert!(
+            ids.contains(&wanted.to_string().as_str()),
+            "{wanted} missing"
+        );
+    }
+    assert!(
+        !ids.contains(&elsewhere.to_string().as_str()),
+        "another thread's run"
+    );
+
+    // Newest run first (`API.md` §2), and the card that has one names it.
+    assert_eq!(ids[0], by_draft.to_string(), "newest first");
+    let carded = cards
+        .iter()
+        .find(|card| card["run_id"] == by_card.to_string())
+        .unwrap();
+    assert!(carded["feed_item_id"].is_string());
+    assert_eq!(carded["agent_name"], "Job Search Tracker");
+    assert_eq!(carded["summary"], "Two next steps found.");
+    // A run that never asked for anything has nothing to tap through to.
+    let bare = cards
+        .iter()
+        .find(|card| card["run_id"] == by_note.to_string())
+        .unwrap();
+    assert_eq!(bare["feed_item_id"], serde_json::json!(null));
+}
+
+/// `AgentCard.summary` is non-nullable on the wire and `agent_runs.summary` is
+/// not written for a failed run — which would render an empty box in the state
+/// DESIGN §1f gives a status string for.
+#[tokio::test]
+async fn a_failed_runs_card_says_why_instead_of_rendering_nothing() {
+    let (app, token, account) = app_with_mail().await;
+    seed_message(&app, account, Seed::new("m0", "t0", at(0))).await;
+    let agent: uuid::Uuid = sqlx::query_scalar(
+        "insert into agents (account_id, name, nl_definition, status) \
+         values ($1, 'Tracker', 'note it', 'published') returning id",
+    )
+    .bind(account)
+    .fetch_one(&app.db.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into agent_runs (agent_id, account_id, trigger_kind, trigger_ref, status, error) \
+         values ($1, $2, 'mail', 'm0', 'failed', 'Gmail was unavailable.')",
+    )
+    .bind(agent)
+    .bind(account)
+    .execute(&app.db.pool)
+    .await
+    .unwrap();
+
+    let body = json(&app, "/v1/threads/t0", &token).await;
+    assert_eq!(body["agent_cards"][0]["status"], "failed");
+    assert_eq!(body["agent_cards"][0]["summary"], "Gmail was unavailable.");
 }
 
 // ------------------------------------------------------ /threads/{id} --

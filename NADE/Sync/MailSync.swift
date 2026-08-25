@@ -115,6 +115,16 @@ final class MailSync {
         self.outbox.onNeedsReauth = { [weak self] in
             Task { @MainActor in await self?.markNeedsGmail() }
         }
+        // The other half of that arrangement, and it was declared without ever
+        // being connected: `onProblem` had two call sites inside the outbox and
+        // no assignment anywhere, so the enqueue failure it exists to surface
+        // was still silent — the exact defect its own comment says it fixes.
+        // `.feed` is the banner 2a already reads (`HomeFeedModel.connectionProblem`).
+        self.outbox.onProblem = { [weak self] message in
+            Task { @MainActor in
+                self?.problems[.feed] = message.map { ConnectionProblem(message: $0) }
+            }
+        }
     }
 
     /// The single approve/skip queue. See `Outbox.swift`.
@@ -138,8 +148,11 @@ final class MailSync {
     /// Not routed through the outbox: seen is idempotent and carries no
     /// capability token, so a lost one costs a badge that corrects itself on the
     /// next refresh, and queueing it would put a durable row on disk per glance.
-    func markSeen(ids: [String]) async {
-        guard !ids.isEmpty, mayRequest() else { return }
+    /// Returns whether the receipt was delivered, so a caller can let the next
+    /// scroll try again rather than suppressing the id for the session.
+    @discardableResult
+    func markSeen(ids: [String]) async -> Bool {
+        guard !ids.isEmpty, mayRequest() else { return false }
         do {
             let response = try await source.seen(ids: ids)
             // **Not `loadFeed(resetting: true)`.** That deletes every cached
@@ -148,15 +161,19 @@ final class MailSync {
             // the user's finger, and the relayout scrolled more rows into view,
             // firing more receipts. The rows are already known; only their
             // status and the badge change.
-            // One transaction, not one per id. `HomeFeedModel` coalesces a
-            // flick into a single `POST /feed/seen` precisely so this is cheap;
-            // fanning it back out into N writes would fire `observeFeed` N
-            // times, and each fire re-decodes and re-renders the whole feed.
-            try? await store.markFeedItemsSeen(ids: ids, newCount: response.newCount)
+            // The **badge**, and not the statuses. Which ids the server
+            // actually resolved is its decision, not ours: `API.md` §7 keeps
+            // one class of `info` card undismissible, and guessing "all of
+            // them" cleared the one that says Gmail is dead.
+            try? await store.markFeedItemsSeen(newCount: response.newCount)
             clear(.feed)
+            return true
         } catch let failure as APIFailure {
             await handle(failure, from: .feed)
-        } catch {}
+            return false
+        } catch {
+            return false
+        }
     }
 
     /// EDGE (P9), reached from the outbox: the Gmail credential died while a
@@ -366,15 +383,28 @@ final class MailSync {
     func loadFeed(resetting: Bool) async -> Bool {
         guard mayRequest() else { return false }
         do {
+            // The generation the page was asked for, so a response that lands
+            // after a pull-to-refresh cannot be written over the newer list.
+            // `saveFeed` has taken an `expectedGeneration` since P3 and the only
+            // caller passed `nil`; the thread path does it correctly, which is
+            // what made this look done. Left unarmed, an in-flight page two
+            // landing after a refresh writes `next_cursor = null` and
+            // `reachedEnd = true` — and pages three onward become unreachable.
             let cursor: String?
+            let generation: Int
             if resetting {
                 cursor = nil
+                generation = try await store.feedGeneration()
             } else {
-                guard let next = try await store.feedCursor()?.nextCursor else { return false }
+                guard let sync = try await store.feedCursor(), let next = sync.nextCursor else {
+                    return false
+                }
                 cursor = next
+                generation = sync.generation
             }
             let page = try await source.feed(cursor: cursor)
-            _ = try await store.saveFeed(page, resetting: resetting)
+            _ = try await store.saveFeed(page, resetting: resetting,
+                                         expectedGeneration: generation)
             clear(.feed)
             return true
         } catch let failure as APIFailure {
@@ -383,6 +413,26 @@ final class MailSync {
         } catch {
             return false
         }
+    }
+
+    /// One card, for 1f's agent card.
+    ///
+    /// `DESIGN.md` §1f: the thread's agent card renders buttons only when the
+    /// run is `pending_approval` **and** `feed_item_id != null`, and their
+    /// labels come from `GET /feed/{id}` — "Save note", "Save draft", never
+    /// "Approve". So the thread screen has to fetch the card itself; the run
+    /// summary it already has cannot supply the verb.
+    ///
+    /// Cached into the same table the feed uses, so approving from 1f and
+    /// approving from 2a move the same row and the outbox has one story.
+    func loadFeedItem(id: String) async {
+        guard mayRequest() else { return }
+        do {
+            try await store.saveFeedItem(try await source.feedItem(id: id))
+            clear(.feed)
+        } catch let failure as APIFailure {
+            await handle(failure, from: .feed)
+        } catch {}
     }
 
     func loadAgents() async {
@@ -561,7 +611,7 @@ final class MailSync {
         // before the credential existed — joining it would report `.unpaired`
         // for a device that just paired, until the next foreground. Let it
         // finish, then run a fresh pass that can see the new token.
-        await refreshTask?.value
+        _ = await refreshTask?.value
         await refresh()
         await drainOutbox()
     }

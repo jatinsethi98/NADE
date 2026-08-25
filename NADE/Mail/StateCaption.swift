@@ -76,6 +76,15 @@ nonisolated enum StateCopy {
                comment: "Shown while the server's first Gmail sync is still running")
     }
 
+    /// The durable write behind an approval failed, so nothing was queued.
+    ///
+    /// Said out loud because the alternative is silence: the button stays, the
+    /// card does not move, and every further tap does the same nothing.
+    static var approvalNotQueued: String {
+        String(localized: "Couldn't save that on this device — try again.",
+               comment: "Shown when an approval could not be written to the local outbox")
+    }
+
     static var storeUnreadable: String {
         String(localized: "Couldn't read your mail from this device.",
                comment: "Shown when the local store cannot be read")

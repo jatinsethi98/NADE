@@ -47,7 +47,15 @@ final class OutboxTests: XCTestCase {
             .alreadyRecorded,
             "409 token_consumed means an earlier attempt already won"
         )
-        XCTAssertEqual(OutboxDriver.outcome(for: serverFailure(.conflict, 409)), .alreadyRecorded)
+        // **Not the same outcome**, and the two share a status precisely so a
+        // client can tell them apart. `token_consumed` is a decision that
+        // landed; `conflict` is one that did not, and calling it "already
+        // recorded" would tell the user their tap was taken when it was not.
+        XCTAssertEqual(
+            OutboxDriver.outcome(for: serverFailure(.conflict, 409)),
+            .superseded,
+            "409 conflict means the state moved on, not that we won"
+        )
     }
 
     func testAnExpiredApprovalIsTerminal() {
@@ -98,7 +106,8 @@ final class OutboxTests: XCTestCase {
         for code in ErrorCode.allKnown {
             let outcome = OutboxDriver.outcome(for: serverFailure(code, 400))
             switch code {
-            case .tokenConsumed, .conflict: XCTAssertEqual(outcome, .alreadyRecorded)
+            case .tokenConsumed: XCTAssertEqual(outcome, .alreadyRecorded)
+            case .conflict: XCTAssertEqual(outcome, .superseded)
             case .approvalExpired, .gone: XCTAssertEqual(outcome, .expired)
             case .unauthorized: XCTAssertEqual(outcome, .unauthorized)
             case .needsReauth: XCTAssertEqual(outcome, .needsReauth)

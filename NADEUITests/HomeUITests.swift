@@ -151,7 +151,9 @@ final class HomeUITests: XCTestCase {
         // The note under the toggle must never promise an outbound action.
         let note = app.staticTexts["builder.approvalnote"]
         XCTAssertTrue(note.exists)
-        XCTAssertFalse(note.label.lowercased().contains("send"))
+        // `OutboundCopy`, not a bare `contains("send")`: that missed "sent",
+        // which is the form D78's shipped violation actually used.
+        XCTAssertFalse(OutboundCopy.promises(note.label))
         XCTAssertFalse(note.label.lowercased().contains("leaves your account"))
     }
 

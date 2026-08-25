@@ -32,7 +32,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Every job kind this server can run.
 ///
 /// Lives here rather than in `main.rs` so a test can assert the registry a real
-/// process would build. P5 adds `triage_message` and `expire_approvals`.
+/// process would build. P6 adds nothing; P7 adds the schedule waker.
 pub fn register_handlers(registry: &mut jobs::Registry, state: &state::AppState) {
     registry.register(sync::KIND, sync::SyncHandler::shared(state.clone()));
     registry.register(
@@ -46,5 +46,17 @@ pub fn register_handlers(registry: &mut jobs::Registry, state: &state::AppState)
     registry.register(
         agents::run::KIND,
         agents::run::RunAgentHandler::shared(state.clone()),
+    );
+    registry.register(
+        agents::resume::KIND,
+        agents::resume::ResumeRunHandler::shared(state.clone()),
+    );
+    registry.register(
+        agents::triage::KIND,
+        agents::triage::TriageHandler::shared(state.clone()),
+    );
+    registry.register(
+        agents::expire::KIND,
+        agents::expire::ExpireApprovalsHandler::shared(state.clone()),
     );
 }

@@ -546,7 +546,13 @@ ROW_T1 = thread_row(
     T1, THREAD_DETAIL_T1["subject"], snippet_of(M3_TEXT),
     "Priya Raghavan", "priya@kettle.com", TS["m3"],
     True, len(THREAD_DETAIL_T1["messages"]),
-    "Job Search Tracker · two next steps to approve",
+    # Rendered by `agents::feed::agent_note`, not written by hand. It used to
+    # read "two next steps to approve", which describes the note's *contents* --
+    # a string no server can reproduce from a gated tool call, so the fixture
+    # and the code would have disagreed silently (the D67 failure mode: every
+    # assertion compared shapes, never strings). The Reply Drafter row below was
+    # always exactly what the renderer produces; this one now is too.
+    "Job Search Tracker · a note to approve",
 )
 ROW_T2 = thread_row(
     T2, THREAD_DETAIL_T2["subject"], snippet_of(T2_TEXT),
@@ -1614,7 +1620,7 @@ FEED_ITEM_INFO = feed_item(
     FEED_INFO, "info", AGENT_BY_ID[AGENT_B]["name"],
     "Six threads still waiting on a reply. Saved to “To-do — 16 Aug”.",
     "new", RUN_NOTED, "none",
-    {"action": "none", "note_id": NOTE_ID, "thread_id": None},
+    {"action": "none", "note_id": NOTE_ID, "draft_id": None, "thread_id": None},
     TS["r3_done"],
 )
 

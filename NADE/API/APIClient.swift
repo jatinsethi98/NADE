@@ -92,6 +92,22 @@ nonisolated enum Endpoint {
     /// The attachments proxy (`API.md` §2). Bytes, not JSON — the server
     /// streams them from Gmail on demand and caches nothing.
     case attachment(gmailID: String, attachmentID: String)
+
+    // P5. The approval loop and the agents. `/agents` has been served since P4
+    // and the app kept answering `notServedYet` for all six of its routes —
+    // `docs/PLAN.md` flagged that as debt no phase owned, and this is where it
+    // is paid.
+    case feed(cursor: String?)
+    case feedItem(id: String)
+    case feedApprove(id: String)
+    case feedSkip(id: String)
+    case feedSeen
+    case agents
+    case agent(id: String)
+    case createAgent
+    case patchAgent(id: String)
+    case deleteAgent(id: String)
+    case runAgent(id: String)
     // No `search`: `GET /v1/search` is a real endpoint with no screen in v1
     // (DESIGN.md §1e draws no search field, and the mockup has none), and an
     // unreachable URL builder is not a head start — it is untested code that
@@ -100,7 +116,10 @@ nonisolated enum Endpoint {
 
     var method: String {
         switch self {
-        case .pair, .gmailLink: "POST"
+        case .pair, .gmailLink, .feedApprove, .feedSkip, .feedSeen, .createAgent, .runAgent:
+            "POST"
+        case .patchAgent: "PATCH"
+        case .deleteAgent: "DELETE"
         default: "GET"
         }
     }
@@ -113,6 +132,10 @@ nonisolated enum Endpoint {
         case .pair: false
         default: true
         }
+    }
+
+    private static func segment(_ id: String) -> String {
+        id.addingPercentEncoding(withAllowedCharacters: .nadePathSegment) ?? id
     }
 
     func url(base: URL) -> URL? {
@@ -149,6 +172,29 @@ nonisolated enum Endpoint {
             let message = gmailID.addingPercentEncoding(withAllowedCharacters: .nadePathSegment) ?? gmailID
             let part = attachmentID.addingPercentEncoding(withAllowedCharacters: .nadePathSegment) ?? attachmentID
             components?.path = "/v1/messages/\(message)/attachments/\(part)"
+
+        case .feed(let cursor):
+            components?.path = "/v1/feed"
+            if let cursor { items.append(URLQueryItem(name: "cursor", value: cursor)) }
+        // Every id below is a UUID the server minted, so it cannot need
+        // escaping — but it arrives as a `String` off the wire, and a client
+        // that trusts a server-supplied string to be well-formed is one
+        // malformed response away from a different route. The same segment set
+        // the attachment proxy uses.
+        case .feedItem(let id):
+            components?.path = "/v1/feed/\(Self.segment(id))"
+        case .feedApprove(let id):
+            components?.path = "/v1/feed/\(Self.segment(id))/approve"
+        case .feedSkip(let id):
+            components?.path = "/v1/feed/\(Self.segment(id))/skip"
+        case .feedSeen:
+            components?.path = "/v1/feed/seen"
+        case .agents, .createAgent:
+            components?.path = "/v1/agents"
+        case .agent(let id), .patchAgent(let id), .deleteAgent(let id):
+            components?.path = "/v1/agents/\(Self.segment(id))"
+        case .runAgent(let id):
+            components?.path = "/v1/agents/\(Self.segment(id))/run"
         }
 
         components?.queryItems = items.isEmpty ? nil : items
@@ -237,6 +283,72 @@ nonisolated final class APIClient: Sendable {
         try await send(.gmailLink, origin: origin, body: Data("{}".utf8), as: WireGmailLink.self)
     }
 
+    // MARK: The feed (`API.md` §7)
+
+    func feed(origin: URL, cursor: String?) async throws -> WireFeedPage {
+        try await send(.feed(cursor: cursor), origin: origin, as: WireFeedPage.self)
+    }
+
+    func feedItem(origin: URL, id: String) async throws -> WireFeedItem {
+        try await send(.feedItem(id: id), origin: origin, as: WireFeedItem.self)
+    }
+
+    func approve(origin: URL, feedItemID: String, approvalToken: String) async throws
+        -> WireApproveResponse {
+        try await send(.feedApprove(id: feedItemID), origin: origin,
+                       body: try token(approvalToken), as: WireApproveResponse.self)
+    }
+
+    func skip(origin: URL, feedItemID: String, approvalToken: String) async throws
+        -> WireSkipResponse {
+        try await send(.feedSkip(id: feedItemID), origin: origin,
+                       body: try token(approvalToken), as: WireSkipResponse.self)
+    }
+
+    func seen(origin: URL, ids: [String]) async throws -> WireSeenResponse {
+        try await send(.feedSeen, origin: origin,
+                       body: try JSONSerialization.data(withJSONObject: ["ids": ids]),
+                       as: WireSeenResponse.self)
+    }
+
+    private func token(_ approvalToken: String) throws -> Data {
+        try JSONSerialization.data(withJSONObject: ["approval_token": approvalToken])
+    }
+
+    // MARK: Agents (`API.md` §5)
+
+    func agents(origin: URL) async throws -> [WireAgentRow] {
+        try await send(.agents, origin: origin, as: WireAgentList.self).agents
+    }
+
+    func agent(origin: URL, id: String) async throws -> WireAgent {
+        try await send(.agent(id: id), origin: origin, as: WireAgent.self)
+    }
+
+    func createAgent(origin: URL, nlDefinition: String) async throws -> WireAgent {
+        try await send(.createAgent, origin: origin,
+                       body: try JSONSerialization.data(
+                           withJSONObject: ["nl_definition": nlDefinition]),
+                       as: WireAgent.self)
+    }
+
+    func updateAgent(origin: URL, id: String, patch: AgentPatch) async throws -> WireAgent {
+        try await send(.patchAgent(id: id), origin: origin,
+                       body: try WireTime.encoder().encode(patch), as: WireAgent.self)
+    }
+
+    /// `204`, so there is nothing to decode. `send` is generic over a
+    /// `Decodable`, and an empty body is not one — a separate path is honest
+    /// about that rather than inventing a type to throw away.
+    func deleteAgent(origin: URL, id: String) async throws {
+        try await sendNoContent(.deleteAgent(id: id), origin: origin, body: nil)
+    }
+
+    func runAgent(origin: URL, id: String) async throws -> WireRunStarted {
+        try await send(.runAgent(id: id), origin: origin, body: Data("{}".utf8),
+                       as: WireRunStarted.self)
+    }
+
     // MARK: Transport
 
     /// Downloads an attachment to a temporary file and returns its URL.
@@ -276,51 +388,17 @@ nonisolated final class APIClient: Sendable {
                         origin: origin)
     }
 
-    /// The non-decoding half of `send`. Same auth, same error envelope, no JSON.
-    private func bytes(_ endpoint: Endpoint, origin: URL) async throws -> Data {
-        guard let url = endpoint.url(base: origin) else {
-            throw APIFailure.malformedResponse("could not build a URL for \(endpoint)")
-        }
-        var request = URLRequest(url: url, timeoutInterval: Self.timeout)
-        request.httpMethod = endpoint.method
-        guard let credential = try credentials.credential(for: origin) else {
-            throw APIFailure.server(code: .unauthorized, status: 401,
-                                    message: ErrorCode.unauthorized.rawValue, retryAfter: nil)
-        }
-        request.setValue("Bearer \(credential.token)", forHTTPHeaderField: "Authorization")
-
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch let error as URLError {
-            throw error.code == .cancelled ? APIFailure.cancelled : APIFailure.unreachable(error.code)
-        }
-        guard let http = response as? HTTPURLResponse else {
-            throw APIFailure.malformedResponse("not an HTTP response")
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            throw Self.failure(status: http.statusCode, headers: http, data: data)
-        }
-        // EDGE: the 25 MB ceiling is the *server's*, and the server is a URL the
-        // user typed (`DESIGN.md` §1k). A misconfigured or hostile origin
-        // answering with a multi-gigabyte body would otherwise be held in memory
-        // and then written to disk — two copies of something that never had a
-        // right to arrive. The client keeps its own limit.
-        guard data.count <= Self.maxAttachmentBytes else {
-            throw APIFailure.server(code: .payloadTooLarge, status: 413,
-                                    message: "That attachment is too large to open.",
-                                    retryAfter: nil)
-        }
-        return data
-    }
-
-    /// `API.md` §2's ceiling, enforced on this side too.
-    static let maxAttachmentBytes = 25 * 1024 * 1024
-
-    private func send<T: Decodable>(
-        _ endpoint: Endpoint, origin: URL, body: Data? = nil, as type: T.Type
-    ) async throws -> T {
+    /// The shared transport: URL, method, body, bearer, and the error envelope.
+    ///
+    /// Three call sites had this typed out three times — the JSON `send`, the
+    /// raw `bytes` an attachment streams through, and the 204 a `DELETE`
+    /// answers with — and two of them had already drifted: both hard-coded "a
+    /// bearer is required" instead of asking `endpoint.requiresBearer`, so the
+    /// transports did not agree about a rule their own comments said they
+    /// shared. It makes no difference today (only `.pair` is unauthenticated,
+    /// and neither of those two ever carries it), which is exactly why nothing
+    /// would have caught the next one.
+    private func perform(_ endpoint: Endpoint, origin: URL, body: Data? = nil) async throws -> Data {
         guard let url = endpoint.url(base: origin) else {
             throw APIFailure.malformedResponse("could not build a URL for \(endpoint)")
         }
@@ -357,11 +435,47 @@ nonisolated final class APIClient: Sendable {
             throw Self.failure(status: http.statusCode, headers: http, data: data)
         }
 
+        return data
+    }
+
+    /// [`perform`] plus the client's own size ceiling. Attachments only.
+    private func bytes(_ endpoint: Endpoint, origin: URL) async throws -> Data {
+        let data = try await perform(endpoint, origin: origin)
+        // EDGE: the 25 MB ceiling is the *server's*, and the server is a URL the
+        // user typed (`DESIGN.md` §1k). A misconfigured or hostile origin
+        // answering with a multi-gigabyte body would otherwise be held in memory
+        // and then written to disk — two copies of something that never had a
+        // right to arrive. The client keeps its own limit.
+        guard data.count <= Self.maxAttachmentBytes else {
+            throw APIFailure.server(code: .payloadTooLarge, status: 413,
+                                    message: "That attachment is too large to open.",
+                                    retryAfter: nil)
+        }
+        return data
+    }
+
+    /// `API.md` §2's ceiling, enforced on this side too.
+    static let maxAttachmentBytes = 25 * 1024 * 1024
+
+    private func send<T: Decodable>(
+        _ endpoint: Endpoint, origin: URL, body: Data? = nil, as type: T.Type
+    ) async throws -> T {
+        let data = try await perform(endpoint, origin: origin, body: body)
         do {
             return try WireTime.decoder().decode(type, from: data)
         } catch {
             throw APIFailure.malformedResponse("\(type) did not decode: \(error)")
         }
+    }
+
+    /// The transport for a route that answers with no body.
+    ///
+    /// Shares every rule `send` has — the bearer, the error envelope,
+    /// `Retry-After` — because it is the same function, and differs only in
+    /// having nothing to decode. A 404 still throws, which is the half a
+    /// "just ignore the body" shortcut loses.
+    private func sendNoContent(_ endpoint: Endpoint, origin: URL, body: Data?) async throws {
+        _ = try await perform(endpoint, origin: origin, body: body)
     }
 
     private static func failure(status: Int, headers: HTTPURLResponse, data: Data) -> APIFailure {
