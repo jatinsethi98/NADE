@@ -30,7 +30,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
-use nade_agent_sdk::ApprovalRequest;
+use durable_agent::ApprovalRequest;
 use serde_json::{json, Value};
 use sqlx::{PgExecutor, Postgres, Transaction};
 use uuid::Uuid;

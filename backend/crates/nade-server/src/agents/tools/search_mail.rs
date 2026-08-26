@@ -1,7 +1,7 @@
 //! `search_mail` — the whole mailbox, through Gmail.
 
 use async_trait::async_trait;
-use nade_agent_sdk::{Error as SdkError, Result as SdkResult, Tool, ToolCall};
+use durable_agent::{Error as SdkError, Result as SdkResult, Tool, ToolCall};
 use serde_json::{json, Value};
 
 use super::{required_str, ToolContext, MAX_ADDRESS_BYTES, MAX_SUBJECT_BYTES};

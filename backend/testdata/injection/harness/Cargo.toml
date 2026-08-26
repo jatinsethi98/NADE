@@ -11,7 +11,7 @@
 #     cd backend/testdata/injection/harness && cargo test
 #     cargo test --features real_parser     # also cross-checks the real parse.rs
 #
-# The default build depends only on stable crates (nade-agent-sdk, mail-parser,
+# The default build depends only on stable crates (durable-agent, mail-parser,
 # lol_html) so it builds even while nade-server is mid-change. `real_parser`
 # additionally runs the real extractor to prove the reference agrees with it.
 [package]
@@ -29,7 +29,7 @@ license = "MIT OR Apache-2.0"
 path = "src/lib.rs"
 
 [dependencies]
-nade-agent-sdk = { path = "../../../crates/nade-agent-sdk", features = ["testing"] }
+durable-agent = { path = "../../../crates/durable-agent", features = ["testing"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }

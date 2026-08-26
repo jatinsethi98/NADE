@@ -1,4 +1,4 @@
-# `nade-agent-sdk` — P1 acceptance criteria and edge-case checklist
+# `durable-agent` — P1 acceptance criteria and edge-case checklist
 
 Written **before** any code, per the execution doctrine in `docs/PLAN.md`.
 Every edge case below is either a named test or a `// EDGE:` comment beside the
@@ -98,11 +98,11 @@ email. No `nade-server` dependency, ever.
 
 | # | Criterion | How it is checked |
 |---|---|---|
-| A1 | Crate builds clean | `cargo build -p nade-agent-sdk` |
-| A2 | No clippy warnings anywhere, including tests | `cargo clippy -p nade-agent-sdk --all-targets -- -D warnings` |
+| A1 | Crate builds clean | `cargo build -p durable-agent` |
+| A2 | No clippy warnings anywhere, including tests | `cargo clippy -p durable-agent --all-targets -- -D warnings` |
 | A3 | Formatted | `cargo fmt --check` |
-| A4 | All unit tests and doctests green | `cargo test -p nade-agent-sdk` |
-| A5 | Rustdoc builds with no warnings | `cargo doc -p nade-agent-sdk --no-deps` |
+| A4 | All unit tests and doctests green | `cargo test -p durable-agent` |
+| A5 | Rustdoc builds with no warnings | `cargo doc -p durable-agent --no-deps` |
 | A6 | The above pass **twice consecutively** | run the block twice |
 | A7 | Dependency list is small and boring | manual: no HTTP, no DB, no provider SDK, no async runtime in `[dependencies]` |
 | A8 | Engine is `Send + Sync + 'static` and works behind `Arc` | `engine_is_send_sync_and_static` compile-time assertion test |
@@ -130,7 +130,7 @@ constraint does not have.
 
 1. append `step_started { step_seq, tool, args, args_hash, effect_id }`, let it commit;
 2. execute the tool — effects use `effect_id = uuid5(run_id ‖ step_seq)`, exposed
-   publicly as `nade_agent_sdk::effect_id(run_id, seq)`;
+   publicly as `durable_agent::effect_id(run_id, seq)`;
 3. append `step_done { step_seq, result }`.
 
 Replay: a step with `step_done` is skipped; a step with `step_started` and no

@@ -17,7 +17,7 @@
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
-use nade_agent_sdk::{
+use durable_agent::{
     ChatRequest, ChatResponse, Error as SdkError, Llm, Message, Result as SdkResult, StopReason,
     TokenUsage, ToolCall,
 };

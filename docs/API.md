@@ -666,14 +666,14 @@ message, and very visible on the fourth reply. It is null for `schedule` and
 ### 6.1 The journal
 
 **`run_journal` is written by exactly one author: the SDK engine**
-(`nade-agent-sdk`), through the host's `Journal` driver. The server never
+(`durable-agent`), through the host's `Journal` driver. The server never
 appends a row of its own — host events reach the journal only as
 engine-written entries. An approval granted in the app arrives as an
 `approval_resolved` written by `Engine::resume` when the resume job delivers
 the decision; the expiry sweep arrives the same way, as `decision: "expire"`.
 The table is append-only and byte-faithful, and `GET /runs/{id}` serves it
 verbatim — so the vocabulary below is the SDK's
-(`backend/crates/nade-agent-sdk/src/journal.rs`), transcribed, not a second
+(`backend/crates/durable-agent/src/journal.rs`), transcribed, not a second
 one for the wire. A kind or field this section does not list is a bug in
 whoever wrote it.
 

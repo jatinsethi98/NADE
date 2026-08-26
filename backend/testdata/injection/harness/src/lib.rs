@@ -40,7 +40,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use lol_html::{doc_text, element, html_content::ContentType, rewrite_str, Settings};
-use nade_agent_sdk::{
+use durable_agent::{
     ChatRequest, ChatResponse, Error as SdkError, Llm, Result as SdkResult, Tool, ToolCall,
 };
 use serde::Deserialize;
@@ -986,7 +986,7 @@ impl Llm for CompromisedLlm {
         // reach the model and the containment is not an artefact of the fence
         // having hidden everything.
         if let Some(text) = req.messages.iter().find_map(|m| match m {
-            nade_agent_sdk::Message::User { text } => Some(text.clone()),
+            durable_agent::Message::User { text } => Some(text.clone()),
             _ => None,
         }) {
             *self.saw.lock().expect("saw") = text;

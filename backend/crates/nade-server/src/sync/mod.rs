@@ -639,13 +639,34 @@ impl Handler for SyncHandler {
     }
 }
 
-/// Enqueue a sync for the connected account.
+/// Enqueue a full sync for the connected account, at most one at a time.
+///
+/// **Deduplicated, like every other enqueue on this path.** This was a plain
+/// `enqueue` with no key, and it is the only producer the scheduler drives on a
+/// timer: the tick asks what is overdue, and an account whose first full sync
+/// keeps failing never gets a cursor and never gets `last_checked_at` stamped,
+/// so it is overdue for ever. Each cycle added another row, which then queued
+/// up behind the last to re-attempt a sync that would fail the same way — 11 of
+/// them in twelve seconds, measured, while the deduplicated `gmail_maintenance`
+/// beside it stayed at one.
+///
+/// `jobs_pending_dedupe_idx` is partial on `done_at is null and dead_at is
+/// null`, so this suppresses a duplicate only while one is genuinely
+/// outstanding — including one sitting in backoff — and never blocks the next
+/// legitimate sync once this one has finished.
+///
+/// `Ok(None)` means one was already queued.
 ///
 /// # Errors
 /// Returns an error if the enqueue fails.
-pub async fn enqueue(queue: &crate::jobs::Queue, account_id: Uuid) -> sqlx::Result<i64> {
+pub async fn enqueue(queue: &crate::jobs::Queue, account_id: Uuid) -> sqlx::Result<Option<i64>> {
     queue
-        .enqueue(KIND, &json!({ "account_id": account_id }), None)
+        .enqueue_unique(
+            KIND,
+            &json!({ "account_id": account_id }),
+            None,
+            &format!("{KIND}:{account_id}"),
+        )
         .await
 }
 

@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nade_agent_sdk::{Engine, EngineConfig, Error as SdkError, RunId, RunOutcome};
+use durable_agent::{Engine, EngineConfig, Error as SdkError, RunId, RunOutcome};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -402,7 +402,7 @@ impl RunAgentHandler {
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         run: &RunRow,
-        request: &nade_agent_sdk::ApprovalRequest,
+        request: &durable_agent::ApprovalRequest,
     ) -> bool {
         if request.tool != "draft_reply" {
             return false;
@@ -607,7 +607,7 @@ impl RunAgentHandler {
     }
 
     /// The instruction and the opening message.
-    fn input(run: &RunRow, job_input: Option<&str>) -> nade_agent_sdk::RunInput {
+    fn input(run: &RunRow, job_input: Option<&str>) -> durable_agent::RunInput {
         // Through `Spec`, not `spec["instruction"]`: this is the system prompt
         // of every run, and `Spec::instruction_or` is where the fallback to the
         // user's own words is stated once. A raw probe here also treated an
@@ -629,7 +629,7 @@ impl RunAgentHandler {
         let opening = job_input
             .map(str::to_owned)
             .unwrap_or_else(|| "Run now.".to_owned());
-        nade_agent_sdk::RunInput::user(opening).with_system(system)
+        durable_agent::RunInput::user(opening).with_system(system)
     }
 }
 
@@ -856,7 +856,7 @@ async fn claim(pool: &PgPool, run_id: Uuid, states: &str) -> anyhow::Result<Opti
 pub async fn resume_one(
     state: &AppState,
     run_id: Uuid,
-    resolution: nade_agent_sdk::Resolution,
+    resolution: durable_agent::Resolution,
 ) -> anyhow::Result<()> {
     let handler = RunAgentHandler {
         state: state.clone(),

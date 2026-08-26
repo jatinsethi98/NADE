@@ -2,7 +2,7 @@
 //!
 //! # Why the ceiling is not enforced by returning an error
 //!
-//! [`Llm::chat`](nade_agent_sdk::Llm::chat)'s contract says an `Err` means
+//! [`Llm::chat`](durable_agent::Llm::chat)'s contract says an `Err` means
 //! *"the host should retry this job later"*. A breach reported that way would
 //! be retried by the queue — five times, with backoff — and every retry that
 //! got far enough would spend again. PLAN.md names that path explicitly and

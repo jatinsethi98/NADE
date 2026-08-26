@@ -66,8 +66,8 @@ fn no_nade_dependencies() {
     for forbidden in [
         "nade-server",
         "nade_server",
-        "nade-agent-sdk",
-        "nade_agent_sdk",
+        "durable-agent",
+        "durable_agent",
     ] {
         assert!(
             !manifest.contains(forbidden),
@@ -75,7 +75,7 @@ fn no_nade_dependencies() {
         );
     }
     for (path, source) in sources() {
-        for forbidden in ["nade_server", "nade_agent_sdk"] {
+        for forbidden in ["nade_server", "durable_agent"] {
             assert!(!source.contains(forbidden), "{path} refers to {forbidden}");
         }
     }

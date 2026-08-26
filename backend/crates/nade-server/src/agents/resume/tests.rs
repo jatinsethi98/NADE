@@ -1,6 +1,6 @@
 //! The resume job, and the interleavings it has to survive.
 
-use nade_agent_sdk::{Journal, RunId};
+use durable_agent::{Journal, RunId};
 use serde_json::{json, Value};
 use uuid::Uuid;
 use wiremock::MockServer;
@@ -116,7 +116,7 @@ async fn status_of(w: &World) -> String {
         .unwrap()
 }
 
-async fn pending_request(w: &World) -> nade_agent_sdk::ApprovalRequest {
+async fn pending_request(w: &World) -> durable_agent::ApprovalRequest {
     let pending: Value = sqlx::query_scalar("select pending_action from agent_runs where id = $1")
         .bind(w.run)
         .fetch_one(&w.app.db.pool)
@@ -251,10 +251,10 @@ async fn a_stale_outcome_held_across_the_decision_cannot_settle() {
         .await
         .unwrap()
         .expect("the stale job claims it");
-    let stale_outcome = nade_agent_sdk::RunOutcome::PendingApproval {
+    let stale_outcome = durable_agent::RunOutcome::PendingApproval {
         run_id: RunId::from_uuid(w.run),
         request: Box::new(pending_request(&w).await),
-        stats: nade_agent_sdk::RunStats::default(),
+        stats: durable_agent::RunStats::default(),
     };
 
     // Meanwhile the decision lands and the resume job claims the run, which
@@ -358,12 +358,12 @@ async fn a_settle_cannot_overwrite_a_terminal_status() {
         .await
         .unwrap();
 
-    let stale = nade_agent_sdk::RunOutcome::Failed {
+    let stale = durable_agent::RunOutcome::Failed {
         run_id: RunId::from_uuid(w.run),
-        reason: nade_agent_sdk::FailureReason::Cancelled {
+        reason: durable_agent::FailureReason::Cancelled {
             detail: "a stale job's idea of what happened".to_owned(),
         },
-        stats: nade_agent_sdk::RunStats::default(),
+        stats: durable_agent::RunStats::default(),
     };
     handler
         .settle_for_tests(w.run, &stale, attempt)

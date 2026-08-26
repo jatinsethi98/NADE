@@ -618,6 +618,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "durable-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ecdsa"
 version = "0.16.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1663,20 +1677,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nade-agent-sdk"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 2.0.20",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "nade-gmail-sim"
 version = "0.1.0"
 dependencies = [
@@ -1703,6 +1703,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "dotenvy",
+ "durable-agent",
  "encoding_rs",
  "hex",
  "http",
@@ -1710,7 +1711,6 @@ dependencies = [
  "jsonwebtoken",
  "lol_html",
  "mail-parser",
- "nade-agent-sdk",
  "nade-gmail-sim",
  "oauth2",
  "percent-encoding",

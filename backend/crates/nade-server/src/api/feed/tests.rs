@@ -5,7 +5,7 @@
 //! that settles them. The alternative — hand-inserting a `feed_items` row —
 //! would test the endpoint against a world the producer cannot actually create.
 
-use nade_agent_sdk::{Journal, RunId};
+use durable_agent::{Journal, RunId};
 use serde_json::{json, Value};
 use uuid::Uuid;
 use wiremock::MockServer;
@@ -227,12 +227,12 @@ async fn raising_a_card_twice_for_one_step_produces_one_card() {
         .fetch_one(&w.app.db.pool)
         .await
         .unwrap();
-    let request: nade_agent_sdk::ApprovalRequest =
+    let request: durable_agent::ApprovalRequest =
         serde_json::from_value(pending).expect("the persisted request");
-    let outcome = nade_agent_sdk::RunOutcome::PendingApproval {
-        run_id: nade_agent_sdk::RunId::from_uuid(w.run),
+    let outcome = durable_agent::RunOutcome::PendingApproval {
+        run_id: durable_agent::RunId::from_uuid(w.run),
         request: Box::new(request),
-        stats: nade_agent_sdk::RunStats::default(),
+        stats: durable_agent::RunStats::default(),
     };
 
     sqlx::query("update agent_runs set status = 'queued' where id = $1")

@@ -7,7 +7,7 @@ license.workspace = true
 description = "A stateful, deterministic, in-process simulator of the Gmail REST API v1."
 
 # Dependencies are deliberately tiny. This crate models *Gmail*, so it must not
-# depend on `nade-server` or `nade-agent-sdk`, and it must not pull in a mail
+# depend on `nade-server` or `durable-agent`, and it must not pull in a mail
 # parser: if the simulator and the code under test shared one, a bug in that
 # parser would be invisible to both.
 [dependencies]

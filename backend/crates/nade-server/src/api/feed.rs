@@ -17,7 +17,7 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, Utc};
-use nade_agent_sdk::{ApprovalRequest, Seq};
+use durable_agent::{ApprovalRequest, Seq};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{Postgres, Transaction};

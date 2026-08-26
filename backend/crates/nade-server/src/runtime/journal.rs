@@ -39,7 +39,7 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use nade_agent_sdk::{
+use durable_agent::{
     Entry, EntryKind, Error as SdkError, Journal, Result as SdkResult, RunId, Seq,
 };
 use serde_json::Value;

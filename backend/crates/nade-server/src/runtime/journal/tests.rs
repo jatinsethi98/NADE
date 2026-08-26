@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, SubsecRound, TimeZone, Utc};
-use nade_agent_sdk::{
+use durable_agent::{
     args_hash,
     // `CountingTool` and not a local re-roll of it: it counts executions the
     // same way and additionally keys effects by `effect_id`, which is the

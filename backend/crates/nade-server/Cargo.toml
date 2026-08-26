@@ -36,7 +36,7 @@ mail-parser = "0.11"
 # The generic agent engine. Host code only: this crate supplies the Postgres
 # `Journal`, the Anthropic `Llm` and the four `Tool`s; the SDK supplies the
 # engine and owns crash-safety. It is frozen - see its own manifesto.
-nade-agent-sdk = { path = "../nade-agent-sdk" }
+durable-agent = { path = "../durable-agent" }
 # PKCE + `state` + the token request shapes. `default-features = false` keeps
 # oauth2's own reqwest/TLS stack out of the tree; we bridge to our reqwest
 # client by hand (gmail::oauth::HttpBridge).
@@ -101,7 +101,7 @@ jsonwebtoken = { version = "11.0.0", default-features = false, features = ["use_
 # The same crate again, with its test doubles. `ScriptedLlm`, `MemoryJournal`
 # and `CountingTool` are exactly the fakes the host tests need, and rewriting
 # them here would mean testing against a second, subtly different engine.
-nade-agent-sdk = { path = "../nade-agent-sdk", features = ["testing"] }
+durable-agent = { path = "../durable-agent", features = ["testing"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 wiremock = "0.6"

@@ -1,6 +1,6 @@
 //! The card producer: what a card says, and what it refuses to say.
 
-use nade_agent_sdk::{ApprovalRequest, ToolCall};
+use durable_agent::{ApprovalRequest, ToolCall};
 use serde_json::json;
 use uuid::Uuid;
 

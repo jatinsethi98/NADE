@@ -6,7 +6,7 @@
 //!
 //! ```toml
 //! [dev-dependencies]
-//! nade-agent-sdk = { version = "0.1", features = ["testing"] }
+//! durable-agent = { version = "0.1", features = ["testing"] }
 //! ```
 //!
 //! None of it is wired into the default build, so a production dependency never

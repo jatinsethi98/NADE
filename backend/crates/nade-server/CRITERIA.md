@@ -751,7 +751,7 @@ model, four real tools and an HTTP surface — all host code in `nade-server`.
 
 ## V. Wiring and configuration
 
-- [x] V1 `nade-server` depends on `nade-agent-sdk` (path), and on it again with
+- [x] V1 `nade-server` depends on `durable-agent` (path), and on it again with
   `features = ["testing"]` under `[dev-dependencies]`, so host tests reuse
   `ScriptedLlm`/`MemoryJournal`/`CountingTool` rather than growing new doubles.
 - [x] V2 Ten new vars land in `config::ENV_VARS` **and** `backend/.env.example`

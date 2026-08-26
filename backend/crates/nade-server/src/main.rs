@@ -119,8 +119,20 @@ async fn serve(config: Config) -> Result<()> {
     #[cfg(unix)]
     let sighup = tokio::spawn(regenerate_on_sighup(state.clone()));
 
+    // **The workers are told the moment the signal lands, not once HTTP has
+    // drained.** `axum::serve(...).await` returns only after every in-flight
+    // request has finished, and requests that call a provider are exactly the
+    // slow ones - `POST /agents` compiles, the attachment proxy streams from
+    // Gmail. Sending the worker shutdown after that await meant one slow
+    // request kept the whole pool claiming and *starting* brand-new jobs for as
+    // long as it lasted. The send below stays as a backstop for the paths where
+    // `serve` returns without the signal having fired.
+    let shutdown_on_signal = shutdown_tx.clone();
     let result = axum::serve(listener, api::router(state))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            let _ = shutdown_on_signal.send(true);
+        })
         .await;
 
     tracing::info!("draining");

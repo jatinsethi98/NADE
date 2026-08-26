@@ -312,7 +312,7 @@ pub mod control {
     ///
     /// ```
     /// use chrono::{Duration, Utc};
-    /// use nade_agent_sdk::control;
+    /// use durable_agent::control;
     /// use serde_json::json;
     ///
     /// let parked = control::wait_until(Utc::now() + Duration::minutes(5), json!({"slept": true}));

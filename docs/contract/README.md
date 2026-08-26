@@ -51,7 +51,7 @@ run.
   the SDK vocabulary (`run_started`, `model_response`, `step_started`,
   `step_done`, `approval_requested`, `approval_resolved`, `run_waiting`,
   `run_woken`, `cap_breached`, `run_ended`) with payloads exactly as
-  `nade-agent-sdk/src/journal.rs` serialises them. Host facts — the feed item,
+  `durable-agent/src/journal.rs` serialises them. Host facts — the feed item,
   its token, its deadline — never appear in a journal; an approval reaches it
   only as an engine-written `approval_resolved`. A failed tool call is a
   `step_done` with `is_error: true`; there is no separate failure kind.
@@ -67,7 +67,7 @@ run.
 - **Effect ids are `uuid5`.** `uuid5(EFFECT_NAMESPACE, "<run-id>:<seq>")` under
   the frozen namespace `6e616465-5f65-6666-6563-745f6e737631` — the ASCII bytes
   of `nade_effect_nsv1`, defined in
-  `backend/crates/nade-agent-sdk/src/ids.rs`. The seq is the **opening** seq
+  `backend/crates/durable-agent/src/ids.rs`. The seq is the **opening** seq
   and nothing else, so a gated step keeps the id minted at
   `approval_requested` through approval and execution — which is what makes
   re-execution after a crash upsert rather than duplicate. **Anything an agent

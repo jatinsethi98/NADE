@@ -42,7 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # Deterministic identifiers
 # --------------------------------------------------------------------------
 
-# Frozen in backend/crates/nade-agent-sdk/src/ids.rs as
+# Frozen in backend/crates/durable-agent/src/ids.rs as
 #   Uuid::from_u128(0x6e_61_64_65_5f_65_66_66_65_63_74_5f_6e_73_76_31)
 # which is the sixteen ASCII bytes of "nade_effect_nsv1", i.e.
 #   6e616465-5f65-6666-6563-745f6e737631
@@ -54,7 +54,7 @@ EFFECT_NAMESPACE = uuid.UUID(bytes=b"nade_effect_nsv1")
 def effect_id(run_id, seq):
     """`uuid5(EFFECT_NAMESPACE, "<run-uuid-hyphenated>:<seq>")`.
 
-    Mirrors `nade_agent_sdk::effect_id`. The run id is always the hyphenated
+    Mirrors `durable_agent::effect_id`. The run id is always the hyphenated
     lowercase form, so `"<uuid>:<seq>"` is fixed width up to the colon and
     cannot be ambiguous.
     """
@@ -64,7 +64,7 @@ def effect_id(run_id, seq):
 def args_hash(args):
     """`sha256:<hex>` over the canonical JSON encoding of a tool's arguments.
 
-    Mirrors `nade_agent_sdk::args_hash`. `serde_json::Value` is backed by a
+    Mirrors `durable_agent::args_hash`. `serde_json::Value` is backed by a
     `BTreeMap` (the crate deliberately does not enable `preserve_order`), so
     object keys serialise sorted, with no spaces, and non-ASCII as raw UTF-8.
     """
@@ -76,7 +76,7 @@ def compact(value):
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
 
 
-# The four v1 tools' real fingerprints, as `nade_agent_sdk::tool_fingerprint`
+# The four v1 tools' real fingerprints, as `durable_agent::tool_fingerprint`
 # computes them over `{name, description, version, schema}`.
 #
 # These are copied from the build, exactly like `EFFECT_GOLDEN` in validate.py
@@ -792,7 +792,7 @@ class Journal(object):
     """Appends journal entries exactly as the SDK engine writes them.
 
     The vocabulary and every payload shape are transcribed from
-    `backend/crates/nade-agent-sdk/src/journal.rs` (API.md section 6.1):
+    `backend/crates/durable-agent/src/journal.rs` (API.md section 6.1):
     `run_journal` is written ONLY by the engine, through the host's Journal
     driver, so these fixtures are engine output, never host output. Fields the
     SDK omits when absent (serde `skip_serializing_if`) are omitted here too --
@@ -1131,7 +1131,7 @@ _seq = _j1.open_step("call_1_1", "read_thread", READ_T1_ARGS, TS["r1_think"])
 # A long thread: the result was capped, and says so in the value rather than
 # being silently trimmed.
 # A result the engine had to cap. The envelope is the SDK's own
-# (`nade_agent_sdk::tool::cap_result`), not a marker of our invention: the
+# (`durable_agent::tool::cap_result`), not a marker of our invention: the
 # engine *replaces* an oversized result rather than trimming inside it, so a
 # fixture carrying "…[truncated N bytes]" described output no build produces -
 # the same defect class as the pre-P4 journal vocabulary, and caught the same

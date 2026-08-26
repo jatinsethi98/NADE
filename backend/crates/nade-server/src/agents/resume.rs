@@ -28,7 +28,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use nade_agent_sdk::{Error as SdkError, Resolution, Seq};
+use durable_agent::{Error as SdkError, Resolution, Seq};
 use serde_json::{json, Value};
 use uuid::Uuid;
 

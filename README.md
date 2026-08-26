@@ -46,7 +46,7 @@ simulator only.
 
 ```
 backend/                       Cargo workspace (edition 2021, rustc ≥ 1.90)
-  crates/nade-agent-sdk/       generic agent engine — zero NADE types, zero infrastructure
+  crates/durable-agent/       generic agent engine — zero NADE types, zero infrastructure
   crates/nade-gmail-sim/       stateful in-process simulator of the Gmail REST API
   crates/nade-server/          axum API, Gmail sync, agent runtime, jobs queue
 NADE/, NADE.xcodeproj/         the iOS app (SwiftUI, iOS 18, GRDB 7, MVVM + @Observable)
@@ -55,7 +55,7 @@ docs/                          PLAN, DESIGN, API, PARSER, SEARCH, contract/, Moc
 
 ### The agent engine
 
-`nade-agent-sdk` is the part that would be worth extracting: a tool-calling
+`durable-agent` is the part that would be worth extracting: a tool-calling
 loop that survives being killed. Three traits describe the world — `Llm` talks
 to a model, `Tool` does something, `Journal` remembers — and `Engine` drives
 them. It compiles with no HTTP client, no database and no async runtime, which
@@ -76,7 +76,7 @@ landed is a fact about the outside world the engine has no record of. Effect
 rows carry deterministic `uuid5(run_id‖step_seq)` ids and are written as
 upserts, so the retry collapses into the original. Exactly-once *effects* are
 therefore available and are the host's to build.
-`backend/crates/nade-agent-sdk/README.md` is the long version.
+`backend/crates/durable-agent/README.md` is the long version.
 
 ## Running it
 

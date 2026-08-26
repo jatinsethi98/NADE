@@ -1,14 +1,17 @@
 [package]
-name = "nade-agent-sdk"
+name = "durable-agent"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "A generic, model-agnostic agent engine with a durable journal and human approval pauses."
-repository = "https://github.com/jatinsethi/nade"
+repository = "https://github.com/jatinsethi98/NADE"
 readme = "README.md"
 keywords = ["agent", "llm", "tool-calling", "durable", "journal"]
 categories = ["asynchronous", "api-bindings"]
+# Acceptance criteria are scaffolding for this repo's build process and cite
+# paths (`docs/PLAN.md`) that do not exist in the published tarball.
+exclude = ["CRITERIA.md"]
 
 # Dependencies are pinned with explicit versions rather than `workspace = true`:
 # this crate is published on its own and must stand alone outside the workspace.
@@ -35,7 +38,7 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] 
 default = []
 # Exposes the in-crate test doubles (`ScriptedLlm`, `MemoryJournal`, sample
 # tools) to downstream crates. They are always available to this crate's own
-# `cfg(test)` builds, so `cargo test -p nade-agent-sdk` needs no extra flags.
+# `cfg(test)` builds, so `cargo test -p durable-agent` needs no extra flags.
 testing = []
 
 [package.metadata.docs.rs]

@@ -1,6 +1,6 @@
 //! Host implementations of the SDK's storage-facing traits.
 //!
-//! The SDK is generic over [`Journal`](nade_agent_sdk::Journal) and owns no
+//! The SDK is generic over [`Journal`](durable_agent::Journal) and owns no
 //! infrastructure — no HTTP, no database, no runtime, per its own manifesto.
 //! The Postgres driver for it therefore lives here, in the host, rather than
 //! behind a `--features postgres` flag on the SDK, which is the exact per-crate

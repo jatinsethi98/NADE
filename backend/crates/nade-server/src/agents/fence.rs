@@ -30,7 +30,7 @@
 //! life of the run and identical on every attempt at a step. See
 //! [`nonce_for`].
 
-use nade_agent_sdk::ToolCall;
+use durable_agent::ToolCall;
 
 /// The marker word both delimiters are built from.
 ///
@@ -246,7 +246,7 @@ pub fn fence(nonce: &str, label: &str, text: &str) -> String {
 mod tests {
     use super::*;
     use chrono::Utc;
-    use nade_agent_sdk::{effect_id, CallContext, RunId};
+    use durable_agent::{effect_id, CallContext, RunId};
     use serde_json::json;
 
     fn call_for(run: RunId) -> ToolCall {

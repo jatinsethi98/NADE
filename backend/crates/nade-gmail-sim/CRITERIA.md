@@ -54,7 +54,7 @@ is the second.
 **Hard rules**
 
 * **Zero NADE types.** It models *Gmail*. No dependency on `nade-server` or
-  `nade-agent-sdk`, ever. — `hygiene::no_nade_dependencies`
+  `durable-agent`, ever. — `hygiene::no_nade_dependencies`
 * **No shared MIME parser.** If the simulator and the code under test both used
   `mail-parser`, a bug in it would be invisible to both. —
   `hygiene::no_mail_parser_dependency`

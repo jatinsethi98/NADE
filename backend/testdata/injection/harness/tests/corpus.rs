@@ -17,7 +17,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use nade_agent_sdk::{
+use durable_agent::{
     testing::MemoryJournal, Engine, EngineConfig, Journal, Resolution, RunId, RunOutcome,
     RunStatus, Tool,
 };
@@ -598,11 +598,11 @@ async fn the_compromised_model_really_does_attempt_the_attack() {
 
     struct Shared(Arc<CompromisedLlm>);
     #[async_trait::async_trait]
-    impl nade_agent_sdk::Llm for Shared {
+    impl durable_agent::Llm for Shared {
         async fn chat(
             &self,
-            req: nade_agent_sdk::ChatRequest,
-        ) -> nade_agent_sdk::Result<nade_agent_sdk::ChatResponse> {
+            req: durable_agent::ChatRequest,
+        ) -> durable_agent::Result<durable_agent::ChatResponse> {
             self.0.chat(req).await
         }
     }

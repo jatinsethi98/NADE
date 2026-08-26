@@ -49,7 +49,7 @@ NAMESPACE_FROM_BYTES = uuid.UUID(bytes=b"nade_effect_nsv1")
 NAMESPACE_FROM_HEX = uuid.UUID("6e616465-5f65-6666-6563-745f6e737631")
 NAMESPACE_FROM_U128 = uuid.UUID(int=0x6E61_6465_5F65_6666_6563_745F_6E73_7631)
 
-# Copied from nade-agent-sdk `effect_id_golden_vector` (tests/happy.rs).
+# Copied from durable-agent `effect_id_golden_vector` (tests/happy.rs).
 EFFECT_GOLDEN = [
     ("00000000-0000-0000-0000-000000000000", 1, "e7293919-5143-5626-903c-d82c4d5be3c8"),
     ("00000000-0000-0000-0000-000000000000", 3, "1ac9540d-d1eb-5c36-8fcf-58ce0a96f997"),
@@ -447,7 +447,7 @@ RUN_ROW = OBJ({
 
 # API.md section 6.1, one row per journal kind. The vocabulary and every
 # payload shape are the SDK engine's own, transcribed from
-# `backend/crates/nade-agent-sdk/src/journal.rs` -- `run_journal` is written
+# `backend/crates/durable-agent/src/journal.rs` -- `run_journal` is written
 # ONLY by the engine, through the host's Journal driver, so a host-invented
 # kind or field here is a contract violation. The key set is exact; `OPT`
 # marks the fields serde omits when absent, which is the one licensed
@@ -459,11 +459,11 @@ TERMINAL_RUN_STATUSES = ["done", "failed", "skipped", "expired"]
 
 TOKEN_USAGE = OBJ({"input_tokens": "int", "output_tokens": "int"})
 
-# `nade_agent_sdk::ToolCall`, as the engine journals it: ids already
+# `durable_agent::ToolCall`, as the engine journals it: ids already
 # normalised, `context` absent (it is attached at dispatch, after journaling).
 TOOL_CALL = OBJ({"id": "str", "name": ENUM(V1_TOOLS), "arguments": "any"})
 
-# `nade_agent_sdk::Message`, tagged by `role`.
+# `durable_agent::Message`, tagged by `role`.
 SDK_MESSAGE = UNION("role", {
     "system": OBJ({"role": ENUM(["system"]), "text": "str"}),
     "user": OBJ({"role": ENUM(["user"]), "text": "str"}),
@@ -473,7 +473,7 @@ SDK_MESSAGE = UNION("role", {
                  "result": "any", "is_error": OPT("bool")}),
 })
 
-# `nade_agent_sdk::FailureReason`, internally tagged on `cap`.
+# `durable_agent::FailureReason`, internally tagged on `cap`.
 FAILURE_REASON = UNION("cap", {
     "step_cap_exceeded": OBJ({"cap": ENUM(["step_cap_exceeded"]),
                               "limit": "int", "taken": "int"}),

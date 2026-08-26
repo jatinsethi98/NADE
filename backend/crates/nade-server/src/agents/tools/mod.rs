@@ -27,7 +27,7 @@ pub mod write_note;
 
 use std::sync::Arc;
 
-use nade_agent_sdk::{Error as SdkError, Result as SdkResult, Tool, ToolCall};
+use durable_agent::{Error as SdkError, Result as SdkResult, Tool, ToolCall};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -99,7 +99,7 @@ pub fn build(context: &ToolContext, allowed: &[String]) -> Vec<Arc<dyn Tool>> {
 /// The `run_id` and `effect_id` the engine minted for this attempt.
 ///
 /// Every mutating tool needs both, and a call that arrives without a
-/// [`CallContext`](nade_agent_sdk::CallContext) cannot be idempotent — so it is
+/// [`CallContext`](durable_agent::CallContext) cannot be idempotent — so it is
 /// refused rather than being written under a fresh id, which is precisely the
 /// duplicate-effect bug the whole protocol exists to prevent.
 pub(crate) fn effect_identity(call: &ToolCall) -> SdkResult<(Uuid, Uuid)> {

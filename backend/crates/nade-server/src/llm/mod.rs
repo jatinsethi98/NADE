@@ -3,7 +3,7 @@
 //!
 //! # Where the boundary is
 //!
-//! `nade-agent-sdk` owns the engine and defines [`Llm`](nade_agent_sdk::Llm) as
+//! `durable-agent` owns the engine and defines [`Llm`](durable_agent::Llm) as
 //! "translate a provider-neutral request into a vendor's wire format and back".
 //! Everything vendor-shaped therefore lives here, in the host, and the SDK
 //! stays free of it — including the two things the SDK deliberately refuses to
@@ -22,7 +22,7 @@ pub mod anthropic;
 pub mod cost;
 pub mod ledger;
 
-/// An [`Llm`](nade_agent_sdk::Llm) that is never asked anything.
+/// An [`Llm`](durable_agent::Llm) that is never asked anything.
 ///
 /// `Engine::cancel` loads the journal, replays it and appends `run_ended`. It
 /// dispatches no tool and makes no model call — but `Engine::new` still takes
@@ -39,15 +39,15 @@ pub mod ledger;
 pub struct Unreachable;
 
 #[async_trait::async_trait]
-impl nade_agent_sdk::Llm for Unreachable {
+impl durable_agent::Llm for Unreachable {
     async fn chat(
         &self,
-        _request: nade_agent_sdk::ChatRequest,
-    ) -> nade_agent_sdk::Result<nade_agent_sdk::ChatResponse> {
+        _request: durable_agent::ChatRequest,
+    ) -> durable_agent::Result<durable_agent::ChatResponse> {
         // Unreachable by construction, and an error rather than a panic in case
         // it ever stops being: a run that somehow reached here should fail, not
         // take the worker down with it.
-        Err(nade_agent_sdk::Error::llm(
+        Err(durable_agent::Error::llm(
             "this engine exists only to end a run; it cannot call a model",
         ))
     }

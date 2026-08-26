@@ -1,6 +1,6 @@
 //! The run job, end to end, over a real database and a fake provider.
 
-use nade_agent_sdk::{Journal, RunId};
+use durable_agent::{Journal, RunId};
 use serde_json::{json, Value};
 use uuid::Uuid;
 use wiremock::matchers::{method, path};
@@ -607,7 +607,7 @@ fn the_dedupe_key_is_stable_and_scoped_to_one_run() {
 /// this fails rather than the SQL quietly leaving rows behind.
 #[test]
 fn terminal_statuses_match_the_sdk() {
-    use nade_agent_sdk::RunStatus;
+    use durable_agent::RunStatus;
 
     let sdk: Vec<&str> = [
         RunStatus::Done,

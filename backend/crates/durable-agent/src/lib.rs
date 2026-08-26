@@ -240,7 +240,7 @@
 //! use std::sync::{Arc, Mutex};
 //!
 //! use async_trait::async_trait;
-//! use nade_agent_sdk::{
+//! use durable_agent::{
 //!     ChatRequest, ChatResponse, Engine, EngineConfig, Entry, Error, Journal, Llm, Result,
 //!     RunId, RunStatus, Seq, Tool, ToolCall,
 //! };

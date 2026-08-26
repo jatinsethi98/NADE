@@ -1,4 +1,4 @@
-# nade-agent-sdk
+# durable-agent
 
 A generic agent engine for Rust: a tool-calling loop that survives being killed.
 
@@ -8,7 +8,7 @@ your domain, your provider, or your database.
 
 ```toml
 [dependencies]
-nade-agent-sdk = "0.1"
+durable-agent = "0.1"
 ```
 
 ## What it guarantees
@@ -109,7 +109,7 @@ effect_id = uuid5(EFFECT_NAMESPACE, "<run-id>:<step-seq>")
 ```
 
 available to a tool as `call.effect_id()` and to a host as the free function
-`nade_agent_sdk::effect_id(run_id, seq)`.
+`durable_agent::effect_id(run_id, seq)`.
 
 **Write your side effects keyed on that id, with an upsert.** The identity of a
 row an agent creates must come from the engine, never from a fresh `uuid4()` or
@@ -205,7 +205,7 @@ says it is, and is the host's to retry.
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use nade_agent_sdk::{
+use durable_agent::{
     ChatRequest, ChatResponse, Engine, EngineConfig, Entry, Error, Journal, Llm, Result,
     RunId, RunStatus, Seq, Tool, ToolCall,
 };
@@ -307,9 +307,13 @@ their own executions.
 
 ```toml
 [dev-dependencies]
-nade-agent-sdk = { version = "0.1", features = ["testing"] }
+durable-agent = { version = "0.1", features = ["testing"] }
 ```
 
 ## License
 
-MIT OR Apache-2.0.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. Unless you explicitly state
+otherwise, any contribution intentionally submitted for inclusion in this crate
+by you, as defined in the Apache-2.0 license, shall be dual licensed as above,
+without any additional terms or conditions.

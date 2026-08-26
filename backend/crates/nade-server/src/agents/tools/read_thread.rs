@@ -1,7 +1,7 @@
 //! `read_thread` — one conversation, fenced.
 
 use async_trait::async_trait;
-use nade_agent_sdk::{Error as SdkError, Result as SdkResult, Tool, ToolCall};
+use durable_agent::{Error as SdkError, Result as SdkResult, Tool, ToolCall};
 use serde_json::{json, Value};
 
 use super::{

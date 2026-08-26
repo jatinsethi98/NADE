@@ -5,7 +5,7 @@
 //! those differences is a `400` — or worse, a silent degradation — if it is
 //! missed.
 
-use nade_agent_sdk::{ChatRequest, Llm, Message, StopReason, ToolCall, ToolSchema};
+use durable_agent::{ChatRequest, Llm, Message, StopReason, ToolCall, ToolSchema};
 use serde_json::{json, Value};
 use uuid::Uuid;
 use wiremock::matchers::{method, path};

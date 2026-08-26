@@ -109,7 +109,7 @@ pub const EFFECT_NAMESPACE: Uuid =
 /// to pre-create the row an approval will later fill in.
 ///
 /// ```
-/// use nade_agent_sdk::{effect_id, RunId};
+/// use durable_agent::{effect_id, RunId};
 /// use uuid::Uuid;
 ///
 /// let run = RunId::from_uuid(Uuid::nil());

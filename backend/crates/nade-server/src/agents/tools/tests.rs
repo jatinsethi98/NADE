@@ -1,7 +1,7 @@
 //! The four tools, against a real database.
 
 use chrono::Utc;
-use nade_agent_sdk::{effect_id, tool_fingerprint, CallContext, RunId, Seq, Tool, ToolCall};
+use durable_agent::{effect_id, tool_fingerprint, CallContext, RunId, Seq, Tool, ToolCall};
 use serde_json::{json, Value};
 use uuid::Uuid;
 

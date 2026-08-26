@@ -36,7 +36,7 @@ Checkpoints get an **adversarial review from Codex** before they count as done.
 
 ```
 backend/                       Cargo workspace
-  crates/nade-agent-sdk/       generic, publishable agent engine — zero NADE types
+  crates/durable-agent/       generic, publishable agent engine — zero NADE types
   crates/nade-server/          axum API, Gmail sync, agent runtime, jobs queue
   secrets/                     gitignored: web_client.json, apns.p8
 NADE/, NADE.xcodeproj/         the iOS app
