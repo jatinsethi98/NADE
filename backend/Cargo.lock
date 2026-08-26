@@ -619,9 +619,9 @@ dependencies = [
 
 [[package]]
 name = "durable-agent"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe32ef78b3892687b5e6ffcb4637128d623bbf8f8997eae587d4600bdbc4e85a"
+checksum = "4b814edc90e41613640e8a1e35b7138274e684c01098d936d01e54da74dde364"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3297,7 +3297,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
