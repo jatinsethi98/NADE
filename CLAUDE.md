@@ -36,13 +36,19 @@ Checkpoints get an **adversarial review from Codex** before they count as done.
 
 ```
 backend/                       Cargo workspace
-  crates/durable-agent/       generic, publishable agent engine — zero NADE types
   crates/nade-server/          axum API, Gmail sync, agent runtime, jobs queue
   secrets/                     gitignored: web_client.json, apns.p8
 NADE/, NADE.xcodeproj/         the iOS app
 NADETests/, NADEUITests/       test targets
 docs/                          PLAN, DESIGN, PHASE0, contract/, MockUps/, screens/
 ```
+
+The agent engine is no longer in this repo. It was extracted, published as
+[`durable-agent`](https://crates.io/crates/durable-agent), and lives at
+<https://github.com/jatinsethi98/durable-agent>; `nade-server` depends on it
+like any other crate. **Changing it means a PR there and a release**, not an
+edit here — and its own `CONTRIBUTING.md` sets the bar for that. It is public,
+so nothing NADE-specific may go into it.
 
 ## Commands
 

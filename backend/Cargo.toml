@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/durable-agent", "crates/nade-gmail-sim", "crates/nade-server"]
+members = ["crates/nade-gmail-sim", "crates/nade-server"]
 
 [workspace.package]
 edition = "2021"

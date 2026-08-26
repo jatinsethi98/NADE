@@ -46,7 +46,6 @@ simulator only.
 
 ```
 backend/                       Cargo workspace (edition 2021, rustc ≥ 1.90)
-  crates/durable-agent/       generic agent engine — zero NADE types, zero infrastructure
   crates/nade-gmail-sim/       stateful in-process simulator of the Gmail REST API
   crates/nade-server/          axum API, Gmail sync, agent runtime, jobs queue
 NADE/, NADE.xcodeproj/         the iOS app (SwiftUI, iOS 18, GRDB 7, MVVM + @Observable)
@@ -55,12 +54,18 @@ docs/                          PLAN, DESIGN, API, PARSER, SEARCH, contract/, Moc
 
 ### The agent engine
 
-`durable-agent` is the part that would be worth extracting: a tool-calling
-loop that survives being killed. Three traits describe the world — `Llm` talks
-to a model, `Tool` does something, `Journal` remembers — and `Engine` drives
-them. It compiles with no HTTP client, no database and no async runtime, which
-is why the Postgres journal driver and the Anthropic adapter are host code in
-`nade-server` rather than crate features.
+The engine was the part worth extracting, so it was: it is now
+**[`durable-agent`](https://crates.io/crates/durable-agent)** on crates.io,
+developed at <https://github.com/jatinsethi98/durable-agent>, and `nade-server`
+depends on it like anyone else would.
+
+It is a tool-calling loop that survives being killed. Three traits describe the
+world — `Llm` talks to a model, `Tool` does something, `Journal` remembers — and
+`Engine` drives them. The default build has eight dependencies: no HTTP client,
+no database, no async runtime. The Anthropic adapter is therefore host code in
+`nade-server`, and so is the Postgres journal driver — the crate ships one now,
+behind a feature, but NADE's `run_journal` has a foreign key to `agent_runs`
+that a generic schema cannot carry.
 
 It guarantees **at-least-once execution with stable idempotency keys**, and it
 is careful about the difference between that and exactly-once. The journal is
@@ -76,7 +81,7 @@ landed is a fact about the outside world the engine has no record of. Effect
 rows carry deterministic `uuid5(run_id‖step_seq)` ids and are written as
 upserts, so the retry collapses into the original. Exactly-once *effects* are
 therefore available and are the host's to build.
-`backend/crates/durable-agent/README.md` is the long version.
+The crate’s own README is the long version: <https://docs.rs/durable-agent>.
 
 ## Running it
 

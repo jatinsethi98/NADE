@@ -42,7 +42,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # Deterministic identifiers
 # --------------------------------------------------------------------------
 
-# Frozen in backend/crates/durable-agent/src/ids.rs as
+# Frozen in the durable-agent crate’s ids.rs as
 #   Uuid::from_u128(0x6e_61_64_65_5f_65_66_66_65_63_74_5f_6e_73_76_31)
 # which is the sixteen ASCII bytes of "nade_effect_nsv1", i.e.
 #   6e616465-5f65-6666-6563-745f6e737631
@@ -792,7 +792,7 @@ class Journal(object):
     """Appends journal entries exactly as the SDK engine writes them.
 
     The vocabulary and every payload shape are transcribed from
-    `backend/crates/durable-agent/src/journal.rs` (API.md section 6.1):
+    the `durable-agent` crate’s `journal.rs` (API.md section 6.1):
     `run_journal` is written ONLY by the engine, through the host's Journal
     driver, so these fixtures are engine output, never host output. Fields the
     SDK omits when absent (serde `skip_serializing_if`) are omitted here too --

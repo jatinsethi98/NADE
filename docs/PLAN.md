@@ -202,12 +202,13 @@ system labels become mailboxes and under what display names.
 NADE/
 ├── NADE.xcodeproj, NADE/          # iOS app
 ├── backend/                       # Cargo workspace
-│   ├── crates/durable-agent/     # generic: llm.rs, tool.rs, journal.rs, engine.rs,
-│   │                              #   ids.rs — no HTTP, no DB, no runtime (its own manifesto)
 │   └── crates/nade-server/        # axum: api/, gmail/, mail/parse.rs, sync/,
 │                                  #   agents/{compile,triggers,tools/}, runtime/ (journal.rs =
 │                                  #   the Journal impl over run_journal), llm/ (anthropic.rs),
 │                                  #   jobs.rs, push.rs, migrations/
+│                                  # the agent engine is the `durable-agent`
+│                                  # crate, extracted 2026-08-26 and developed
+│                                  # at github.com/jatinsethi98/durable-agent
 ├── docs/PLAN.md, docs/contract/   # this plan + shared fixtures
 ├── docs/MockUps/                  # design source (Email App.dc.html + Classical DS)
 └── docker-compose.yml             # P8 only; dev uses postgresql_embedded
@@ -234,7 +235,7 @@ Two rules the DDL cannot express, so they live here:
 
 - **Agent-written `notes.id` and `drafts.id` are `uuid5(EFFECT_NAMESPACE,
   "<run-id>:<seq>")`**, with the namespace frozen in
-  `crates/durable-agent/src/ids.rs`. They are written with an upsert, never a
+  the `durable-agent` crate’s `ids.rs`. They are written with an upsert, never a
   plain insert, which is what makes re-execution after a crash harmless. Rows
   created any other way are v4.
 - **`jobs` claim semantics**: `for update skip locked`, `lease_expires_at`

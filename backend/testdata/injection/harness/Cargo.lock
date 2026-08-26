@@ -591,7 +591,9 @@ dependencies = [
 
 [[package]]
 name = "durable-agent"
-version = "0.1.0"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe32ef78b3892687b5e6ffcb4637128d623bbf8f8997eae587d4600bdbc4e85a"
 dependencies = [
  "async-trait",
  "chrono",

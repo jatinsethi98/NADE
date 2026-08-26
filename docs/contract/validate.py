@@ -447,7 +447,7 @@ RUN_ROW = OBJ({
 
 # API.md section 6.1, one row per journal kind. The vocabulary and every
 # payload shape are the SDK engine's own, transcribed from
-# `backend/crates/durable-agent/src/journal.rs` -- `run_journal` is written
+# the `durable-agent` crate’s `journal.rs` -- `run_journal` is written
 # ONLY by the engine, through the host's Journal driver, so a host-invented
 # kind or field here is a contract violation. The key set is exact; `OPT`
 # marks the fields serde omits when absent, which is the one licensed

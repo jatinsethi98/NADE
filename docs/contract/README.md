@@ -67,7 +67,7 @@ run.
 - **Effect ids are `uuid5`.** `uuid5(EFFECT_NAMESPACE, "<run-id>:<seq>")` under
   the frozen namespace `6e616465-5f65-6666-6563-745f6e737631` — the ASCII bytes
   of `nade_effect_nsv1`, defined in
-  `backend/crates/durable-agent/src/ids.rs`. The seq is the **opening** seq
+  the `durable-agent` crate’s `ids.rs`. The seq is the **opening** seq
   and nothing else, so a gated step keeps the id minted at
   `approval_requested` through approval and execution — which is what makes
   re-execution after a crash upsert rather than duplicate. **Anything an agent

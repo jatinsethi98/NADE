@@ -673,7 +673,7 @@ engine-written entries. An approval granted in the app arrives as an
 the decision; the expiry sweep arrives the same way, as `decision: "expire"`.
 The table is append-only and byte-faithful, and `GET /runs/{id}` serves it
 verbatim — so the vocabulary below is the SDK's
-(`backend/crates/durable-agent/src/journal.rs`), transcribed, not a second
+(the `durable-agent` crate’s `journal.rs`), transcribed, not a second
 one for the wire. A kind or field this section does not list is a bug in
 whoever wrote it.
 
